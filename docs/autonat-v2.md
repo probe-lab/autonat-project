@@ -14,6 +14,135 @@ behind a NAT or firewall. Knowing per-address reachability allows the node to:
 - Proactively connect to relay servers when no public address is reachable
 - Test addresses from multiple sources (listen addrs, UPnP, observed addrs)
 
+## End-to-End Lifecycle
+
+This section traces the full workflow from node startup to stable reachability
+determination. Each step references the detailed section where the mechanism
+is documented.
+
+### 1. Node starts and listens
+
+The node starts listening on its configured transports (e.g., TCP on port 4001,
+QUIC on port 4001). At this point it only knows its local addresses
+(e.g., `/ip4/10.0.1.10/tcp/4001`). It has no idea whether it sits behind a NAT.
+
+### 2. Connect to peers
+
+The node connects to peers — from a peer store, DHT bootstrap nodes, or
+preconfigured addresses. Each outbound connection through a NAT router gets an
+external IP:port mapping assigned by the router.
+
+### 3. Identify exchange
+
+On every new connection, the [Identify](#identify) protocol runs automatically.
+Each remote peer reports:
+- The client's **observed address** — the IP:port the remote peer sees (the
+  NAT's external mapping)
+- The remote peer's **supported protocols** — including whether it supports
+  `/libp2p/autonat/2/dial-request`
+
+Two things happen from Identify:
+
+**a) Server discovery** — peers supporting the dial-request protocol are added
+to the eligible AutoNAT server pool. See [Server Discovery](#server-discovery).
+
+**b) Observed address collection** — the `ObservedAddrManager` collects
+external addresses reported by peers. See
+[Observed Address Activation](#observed-address-activation).
+
+### 4. Observed address activation (gate)
+
+The `ObservedAddrManager` requires `ActivationThresh = 4` distinct observers
+reporting the same address before activating it. This is the critical gate:
+
+- **EIM NATs** (full cone, address-restricted, port-restricted): all peers see
+  the same external IP:port → address activates after 4 peers connect.
+- **ADPM NATs** (symmetric): each peer sees a different external port → no
+  single address ever reaches 4 observations → address never activates →
+  AutoNAT v2 never runs. See
+  [Non-Port-Preserving NAT Prevents Address Activation](#non-port-preserving-nat-prevents-address-activation-flight-wifi-finding).
+
+Once activated, the address is added to the host's advertised address list and
+becomes a candidate for AutoNAT v2 probing.
+
+### 5. Probing begins
+
+The `addrsReachabilityTracker` detects the new address (via
+`EvtLocalAddressesUpdated`) and schedules a probe after a 1-second delay. For
+each address to probe:
+
+1. Pick a random eligible server that hasn't been used in the last 2 minutes.
+   See [Server Selection](#server-selection).
+2. Open a dial-request stream on the existing connection.
+3. Send `DialRequest{nonce, addrs[]}`. See [Protocol Flow](#protocol-flow).
+
+### 6. Server processes the request
+
+1. Check [rate limits](#rate-limiting) (60 RPM global, 12 RPM per-peer).
+2. Iterate the client's address list and pick the first dialable address. See
+   [Address Selection](#address-selection).
+3. If the selected address IP matches the client's observed IP → proceed
+   directly. If different → request [amplification prevention](#amplification-prevention)
+   data.
+4. Dial back to the selected address using the
+   [dialerHost](#dial-back-mechanism) (separate peer ID, separate source port).
+5. Send `DialBack{nonce}` on the new connection, wait for `DialBackResponse`.
+6. Send `DialResponse` on the original stream.
+
+### 7. NAT filtering determines the outcome
+
+The dial-back comes from the server's IP but a **different port** than the
+original connection. Whether it gets through depends on the NAT's filtering
+behavior:
+
+- **EIF (full cone):** any source allowed → dial-back succeeds
+- **ADF (address-restricted):** server IP previously contacted → dial-back
+  succeeds (false positive)
+- **APDF (port-restricted):** different port rejected → dial-back fails
+
+### 8. Client records the result
+
+The client interprets the `DialResponse` according to the
+[Reachability Interpretation](#reachability-interpretation) table and updates
+the sliding window for the tested address.
+
+### 9. Repeat until confidence
+
+The client probes the same address with different servers until the
+[Confidence System](#confidence-system) reaches `minConfidence = 2` net
+successes or failures. With `maxConcurrency = 5` goroutines probing in
+parallel, this typically requires 3 probes from 3 different servers.
+
+### 10. Reachability event fires
+
+Once confidence is reached, the host emits `EvtHostReachableAddrsChanged`:
+- **Reachable:** stop using relays, advertise direct addresses. See
+  [Relay (Circuit v2)](#relay-circuit-v2).
+- **Unreachable:** connect to relay servers, advertise relay addresses.
+
+### 11. Steady state
+
+After initial determination, addresses are re-probed periodically:
+- High-confidence primary address: every 1 hour
+- High-confidence secondary address: every 3 hours
+- Refresh ticker: every 5 minutes checks if any address needs re-probing
+- New address detected: probe after 1 second
+
+See [Confidence System](#confidence-system) for all intervals.
+
+### Typical timeline (testbed)
+
+```
+ 0s     Node starts, begins connecting to servers
+ 1-3s   Identify completes with 4+ peers, observed addresses activated
+ 3-4s   First AutoNAT v2 probes sent (TCP and QUIC in parallel)
+ 5-11s  3 probes per address complete → reachability determined
+```
+
+TCP and QUIC addresses are probed independently and in parallel. The exact
+timing depends on when each observed address is activated (which depends on
+Identify completion order per transport) and server availability.
+
 ## Key Differences from AutoNAT v1
 
 | Aspect | v1 | v2 |

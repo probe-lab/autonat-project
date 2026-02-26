@@ -161,7 +161,7 @@ case "$NAT_TYPE" in
         # destination, simulating endpoint-dependent mapping.
         echo "Symmetric: MASQUERADE --random + strict conntrack"
         iptables -t nat -A POSTROUTING -o "$PUB_IFACE" -j MASQUERADE --random
-        iptables -A FORWARD -i "$PUB_IFACE" -o "$PRIV_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -A FORWARD -i "$PUB_IFACE" -o "$PRIV_IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
         iptables -A FORWARD -i "$PRIV_IFACE" -o "$PUB_IFACE" -j ACCEPT
         iptables -A FORWARD -j DROP
         ;;

@@ -103,7 +103,9 @@ Variables used below:
 iptables -A FORWARD -j ACCEPT
 ```
 
-Pure IP forwarding. No address translation.
+Pure IP forwarding, no address translation. The client is directly reachable
+on the public network. Used as the baseline to verify AutoNAT correctly reports
+reachable.
 
 ### Full Cone (EIM + EIF)
 
@@ -113,9 +115,13 @@ iptables -t nat -A PREROUTING  -i $PUB_IFACE -j DNAT --to-destination $CLIENT_PR
 iptables -A FORWARD -j ACCEPT
 ```
 
-Static SNAT rewrites the client's source IP to the router's public IP. Static
-DNAT forwards all inbound traffic to the client. Any external host can reach
-the client.
+- **SNAT** rewrites the client's source IP to the router's public IP on
+  outbound packets (endpoint-independent mapping — same external IP:port
+  regardless of destination).
+- **DNAT** forwards **all** inbound traffic on the router's public IP to the
+  client (endpoint-independent filtering — any external host can reach the
+  client, no prior contact required).
+- `FORWARD ACCEPT` allows all forwarded traffic in both directions.
 
 ### Address-Restricted Cone (EIM + ADF)
 
@@ -130,11 +136,19 @@ iptables -A FORWARD -i $PUB_IFACE -o $PRIV_IFACE -j ACCEPT
 iptables -A FORWARD -j DROP
 ```
 
-Linux's native conntrack is port-restricted (full 5-tuple), so plain
-`MASQUERADE` + `RELATED,ESTABLISHED` can't produce address-only filtering.
-The `xt_recent` module tracks contacted destination IPs. Inbound packets from
-those IPs are DNATted to the client, allowing return traffic from any port on
-a previously-contacted IP.
+- **MASQUERADE** provides endpoint-independent mapping (same external port for
+  all destinations, port-preserving when possible).
+- **`xt_recent` module** tracks destination IPs the client contacts (the
+  `contacted` list). When an inbound packet arrives, `--rcheck --rsource`
+  checks if its source IP is in the contacted list. If yes, the packet is
+  DNATted to the client.
+- This allows return traffic from **any port** on a previously-contacted IP
+  (address-dependent filtering), which is what makes AutoNAT v2's dial-back
+  succeed — the dial-back comes from the same server IP but a different port.
+- Linux's native conntrack is port-restricted (full 5-tuple matching), so plain
+  `MASQUERADE` + `RELATED,ESTABLISHED` cannot produce address-only filtering.
+  The `xt_recent` + DNAT approach is necessary to simulate ADF.
+- Entries expire after 300 seconds.
 
 ### Port-Restricted Cone (EIM + APDF)
 
@@ -146,21 +160,33 @@ iptables -A FORWARD -i $PRIV_IFACE -o $PUB_IFACE -j ACCEPT
 iptables -A FORWARD -j DROP
 ```
 
-Standard Linux NAT. Conntrack's `ESTABLISHED` state requires the exact source
-IP:port pair to match, making this naturally port-restricted.
+- **MASQUERADE** provides endpoint-independent mapping (same external port,
+  port-preserving).
+- **conntrack `RELATED,ESTABLISHED`** only allows inbound packets that match
+  an existing connection's full 5-tuple (protocol, source IP, source port,
+  destination IP, destination port). This is address+port-dependent filtering.
+- This is standard Linux NAT behavior — conntrack is naturally port-restricted.
+  AutoNAT v2's dial-back fails because it comes from a different source port
+  than the original connection, and no conntrack entry exists for that port.
 
 ### Symmetric (ADPM + APDF)
 
 ```bash
 iptables -t nat -A POSTROUTING -o $PUB_IFACE -j MASQUERADE --random
 iptables -A FORWARD -i $PUB_IFACE -o $PRIV_IFACE \
-    -m state --state RELATED,ESTABLISHED -j ACCEPT
+    -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 iptables -A FORWARD -i $PRIV_IFACE -o $PUB_IFACE -j ACCEPT
 iptables -A FORWARD -j DROP
 ```
 
-The `--random` flag forces a random source port per connection, simulating
-endpoint-dependent mapping.
+- **`MASQUERADE --random`** randomizes the external source port for each new
+  connection, simulating address+port-dependent mapping (each destination sees
+  a different external port).
+- **conntrack `RELATED,ESTABLISHED`** provides address+port-dependent filtering
+  (same as port-restricted).
+- The combination means each peer sees a different external address, so the
+  `ObservedAddrManager` never activates a public address (no single address
+  reaches `ActivationThresh=4` observations), and AutoNAT v2 never runs.
 
 ### Additional Router Features
 
