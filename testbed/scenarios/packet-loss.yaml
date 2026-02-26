@@ -1,0 +1,15 @@
+name: packet-loss
+description: >
+  Network degradation: packet loss sweep (experiment 9). Tests detection
+  reliability under lossy conditions. Uses full-cone NAT because tc netem
+  rules are applied on the router — none bypasses the router entirely.
+
+defaults:
+  timeout_s: 120
+  runs: 1
+
+matrix:
+  nat_type: [full-cone]
+  transport: [tcp, quic]
+  server_count: [7]
+  packet_loss: [1, 5, 10]

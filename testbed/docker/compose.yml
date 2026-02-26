@@ -1,0 +1,307 @@
+# AutoNAT v2 Lab - Docker Compose
+#
+# Profiles:
+#   local      - AutoNAT experiment with local servers, client behind NAT
+#   nonat      - AutoNAT experiment with local servers, client on public network (no NAT)
+#   5servers   - Add servers 4-5 (use with local or nonat)
+#   7servers   - Add servers 6-7 (use with local/nonat + 5servers)
+#   public     - AutoNAT experiment with real IPFS/libp2p servers
+#   test       - Lightweight NAT verification (socat, no Go binary)
+#
+# Environment variables:
+#   NAT_TYPE       - none, full-cone, address-restricted, port-restricted, symmetric
+#   TRANSPORT      - tcp, quic, or both (default: both)
+#   PACKET_LOSS    - Packet loss percentage for tc netem (default: 0)
+#   LATENCY_MS     - Added latency in ms for tc netem (default: 0)
+#   TCP_BLOCK_PORT - Block outbound TCP to this port (e.g., 4001)
+#   PORT_REMAP     - Remap source port (e.g., 4001:29538)
+
+# Network layout:
+#   public-net  (73.0.0.0/24)  — servers and router's public side.
+#     Uses a "public-looking" range because go-libp2p's manet.IsPublicAddr()
+#     filters out all private/reserved/CGNAT ranges. The router's public IP
+#     is what servers report as the client's observed address via Identify,
+#     and AutoNAT v2 only probes addresses that pass IsPublicAddr().
+#   private-net (10.0.1.0/24)  — client and router's private side.
+#     Uses a standard private range, matching real-world deployments.
+#     The client's 10.x address is correctly filtered by IsPublicAddr() —
+#     it never appears in DialRequests, just like in production.
+networks:
+  public-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 73.0.0.0/24
+  private-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24
+
+volumes:
+  peer-addrs:  # shared volume for server address discovery
+
+# Shared build config for autonat node containers (servers + clients).
+# Build context is testbed/ where Go source lives.
+x-node-build: &node-build
+  build:
+    context: ..
+    dockerfile: docker/node/Dockerfile
+
+services:
+  # NAT Router: sits between public-net and private-net
+  router:
+    build: ./router
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    environment:
+      - NAT_TYPE=${NAT_TYPE:-none}
+      - PACKET_LOSS=${PACKET_LOSS:-0}
+      - LATENCY_MS=${LATENCY_MS:-0}
+      - TCP_BLOCK_PORT=${TCP_BLOCK_PORT:-}
+      - PORT_REMAP=${PORT_REMAP:-}
+      - CLIENT_PRIVATE_IP=10.0.1.10
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.2
+      private-net:
+        ipv4_address: 10.0.1.2
+
+  # === AutoNAT servers on the public network ===
+  # Servers write their multiaddrs to a shared volume so the client can discover them.
+
+  server-1:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["local", "nonat"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-1"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  server-2:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["local", "nonat"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-2"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  server-3:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["local", "nonat"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-3"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  server-4:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["5servers", "7servers"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-4"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  server-5:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["5servers", "7servers"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-5"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  server-6:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["7servers"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-6"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  server-7:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["7servers"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-7"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  # === Client node behind NAT ===
+  # Reads server multiaddrs from the shared volume.
+  client:
+    <<: *node-build
+    cap_add:
+      - NET_ADMIN  # needed to set default gateway to router
+    depends_on:
+      - router
+      - server-1
+      - server-2
+      - server-3
+    profiles: ["local"]
+    environment:
+      - GATEWAY=auto
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --log-file=/results/experiment.json
+      --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+      - ../../results/testbed:/results
+    networks:
+      private-net:
+        ipv4_address: 10.0.1.10
+
+  # === Client with public IP (no NAT) ===
+  # Sits directly on public-net with a public-looking IP. No router involved.
+  # Servers see the client's actual 73.x IP — no translation needed.
+  # Used for the no-NAT baseline experiment.
+  client-nonat:
+    <<: *node-build
+    depends_on:
+      - server-1
+      - server-2
+      - server-3
+    profiles: ["nonat"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --log-file=/results/experiment.json
+      --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+      - ../../results/testbed:/results
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.100
+
+  # === Client for public server mode ===
+  # Bootstraps to IPFS DHT instead of using local servers.
+  client-public:
+    <<: *node-build
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - router
+    profiles: ["public"]
+    environment:
+      - GATEWAY=auto
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --bootstrap
+      --log-file=/results/experiment.json
+      --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
+    volumes:
+      - ../../results/testbed:/results
+    networks:
+      private-net:
+        ipv4_address: 10.0.1.11
+
+  # === NAT verification (lightweight, no Go binary) ===
+  # Used by testbed/verify-nat.sh to validate iptables rules with plain TCP/UDP.
+  # Uses an inline Dockerfile — just Alpine with socat and iproute2.
+
+  test-server1:
+    build:
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache socat iproute2
+        CMD ["sleep", "infinity"]
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["test"]
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.10
+
+  test-server2:
+    build:
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache socat iproute2
+        CMD ["sleep", "infinity"]
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["test"]
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.11
+
+  test-client:
+    build:
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache socat iproute2
+        CMD ["sleep", "infinity"]
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["test"]
+    networks:
+      private-net:
+        ipv4_address: 10.0.1.10

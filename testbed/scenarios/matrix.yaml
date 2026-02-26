@@ -1,0 +1,20 @@
+name: full-matrix
+description: >
+  Full experiment matrix covering experiments 1-7 and 11-12. Produces 40
+  scenarios: 5 NAT types x 2 transports x 3 local server counts + 5 NAT
+  types x 2 transports x ipfs-network.
+
+  Use --filter to run subsets:
+    --filter=server_count=5                       Just 5-server experiments (exp 1-4)
+    --filter=nat_type=symmetric                   Just symmetric NAT (exp 2, 7)
+    --filter=nat_type=address-restricted --runs=5  Deep dive (exp 5)
+    --filter=server_count=ipfs-network             Only real IPFS network (exp 11-12)
+
+defaults:
+  timeout_s: 120
+  runs: 1
+
+matrix:
+  nat_type: [none, full-cone, address-restricted, port-restricted, symmetric]
+  transport: [tcp, quic]
+  server_count: [3, 5, 7, ipfs-network]

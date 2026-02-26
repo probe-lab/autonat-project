@@ -1,0 +1,32 @@
+name: flight-wifi
+description: >
+  Flight WiFi reproduction (experiment 14). Symmetric NAT with ~700ms RTT.
+  AutoNAT v2 should never activate a public address because symmetric NAT
+  gives each peer a different external port. Only v1 fires.
+  Matches field data from 2026-02-16.
+
+defaults:
+  timeout_s: 120
+
+scenarios:
+  - nat_type: symmetric
+    transport: both
+    server_count: 5
+    latency_ms: 350
+    runs: 3
+    assertions:
+      - type: no_event
+        event: addresses_updated
+        filter: { address_contains: "73." }
+        message: "No public address activated (symmetric NAT prevents it)"
+      - type: no_event
+        event: reachable_addrs_changed
+        message: "AutoNAT v2 should never fire (no addresses to probe)"
+      - type: has_event
+        event: reachability_changed
+        message: "AutoNAT v1 should provide a result"
+      - type: info
+        event: connected
+        extract: elapsed_ms
+        select: first
+        label: "Bootstrap latency (first peer)"

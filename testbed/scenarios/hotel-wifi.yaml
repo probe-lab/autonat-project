@@ -1,0 +1,25 @@
+name: hotel-wifi
+description: >
+  Hotel WiFi reproduction (experiment 13). TCP blocked on port 4001,
+  port remapped 4001->29538. QUIC address activates but is unreachable;
+  TCP never discovered. Matches field data from 2026-02-19.
+
+defaults:
+  timeout_s: 120
+  runs: 1
+
+scenarios:
+  - nat_type: port-restricted
+    transport: both
+    server_count: 7
+    tcp_block_port: 4001
+    port_remap: "4001:29538"
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: { message_contains: "unreachable=" }
+        message: "QUIC address should be marked unreachable"
+      - type: has_event
+        event: reachability_changed
+        filter: { reachability: private }
+        message: "Final reachability should be private"

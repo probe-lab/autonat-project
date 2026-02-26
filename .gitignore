@@ -1,0 +1,12 @@
+# Raw experiment data (json, jsonl, csv, txt) are not tracked
+results/*/data/
+results/**/*.json
+results/**/*.jsonl
+*.log
+*.tmp
+
+# Go build artifacts
+autonat-node
+
+# Local-only docs
+docs/nat-classification-crawl-idea.md
