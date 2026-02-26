@@ -88,6 +88,8 @@ SCENARIOS=$(echo "$SCENARIOS" | jq --argjson dt "$DEFAULT_TIMEOUT" --argjson dr 
         tcp_block_port: (.tcp_block_port // null),
         port_remap: (.port_remap // null),
         obs_addr_thresh: (.obs_addr_thresh // null),
+        mock_behaviors: (.mock_behaviors // null),
+        mock_delays: (.mock_delays // null),
         assertions: (.assertions // null)
     }]
 ')
@@ -121,19 +123,24 @@ if $DRY_RUN; then
     echo ""
     echo "Scenario file: $(basename "$SCENARIO_FILE") ($TOTAL scenarios)"
     echo ""
-    printf "  %-4s %-20s %-10s %-14s %-6s %-8s %-6s\n" "#" "NAT Type" "Transport" "Servers" "Loss" "Latency" "Runs"
+    printf "  %-4s %-20s %-10s %-14s %-30s %-6s %-8s %-6s\n" "#" "NAT Type" "Transport" "Servers" "Mock Behaviors" "Loss" "Latency" "Runs"
     for ((i=0; i<TOTAL; i++)); do
         S=$(echo "$SCENARIOS" | jq ".[$i]")
         nat=$(echo "$S" | jq -r '.nat_type')
         tr=$(echo "$S" | jq -r '.transport')
         sc=$(echo "$S" | jq -r '.server_count')
+        mock=$(echo "$S" | jq -r 'if .mock_behaviors then (.mock_behaviors | join(",")) else "-" end')
         loss=$(echo "$S" | jq -r '.packet_loss')
         lat=$(echo "$S" | jq -r '.latency_ms')
         runs=$(echo "$S" | jq -r '.runs')
-        # Format server_count: show "ipfs-network" as-is, numbers as-is
-        [[ "$sc" == "null" ]] && sc="?"
-        printf "  %-4d %-20s %-10s %-14s %-6s %-8s %-6s\n" \
-            "$((i+1))" "$nat" "$tr" "$sc" "${loss}%" "${lat}ms" "$runs"
+        # Format server_count: show "ipfs-network" as-is, "mock" for mock scenarios, numbers as-is
+        if [[ "$mock" != "-" ]]; then
+            sc="mock(3)"
+        elif [[ "$sc" == "null" ]]; then
+            sc="?"
+        fi
+        printf "  %-4d %-20s %-10s %-14s %-30s %-6s %-8s %-6s\n" \
+            "$((i+1))" "$nat" "$tr" "$sc" "$mock" "${loss}%" "${lat}ms" "$runs"
     done
     echo ""
     exit 0
@@ -170,10 +177,25 @@ for ((i=0; i<TOTAL; i++)); do
     PORT_REMAP=$(echo "$S" | jq -r '.port_remap // empty')
     OBS_THRESH=$(echo "$S" | jq -r '.obs_addr_thresh // empty')
     HAS_ASSERTIONS=$(echo "$S" | jq '.assertions != null')
+    HAS_MOCK=$(echo "$S" | jq '.mock_behaviors != null')
+
+    # Extract mock behaviors and delays (arrays → per-server env vars)
+    MOCK_BEHAVIOR_1="" MOCK_BEHAVIOR_2="" MOCK_BEHAVIOR_3=""
+    MOCK_DELAY_1="" MOCK_DELAY_2="" MOCK_DELAY_3=""
+    if [[ "$HAS_MOCK" == "true" ]]; then
+        MOCK_BEHAVIOR_1=$(echo "$S" | jq -r '.mock_behaviors[0] // "force-unreachable"')
+        MOCK_BEHAVIOR_2=$(echo "$S" | jq -r '.mock_behaviors[1] // "force-unreachable"')
+        MOCK_BEHAVIOR_3=$(echo "$S" | jq -r '.mock_behaviors[2] // "force-unreachable"')
+        MOCK_DELAY_1=$(echo "$S" | jq -r '.mock_delays[0] // 0')
+        MOCK_DELAY_2=$(echo "$S" | jq -r '.mock_delays[1] // 0')
+        MOCK_DELAY_3=$(echo "$S" | jq -r '.mock_delays[2] // 0')
+    fi
 
     # Compute obs_addr_thresh if not overridden
     if [[ -z "$OBS_THRESH" ]]; then
-        if [[ "$SERVER_COUNT" != "ipfs-network" && "$SERVER_COUNT" -lt 4 ]]; then
+        if [[ "$HAS_MOCK" == "true" ]]; then
+            OBS_THRESH=2
+        elif [[ "$SERVER_COUNT" != "ipfs-network" && "$SERVER_COUNT" -lt 4 ]]; then
             OBS_THRESH=2
         else
             OBS_THRESH=4
@@ -183,7 +205,10 @@ for ((i=0; i<TOTAL; i++)); do
     # Map server_count to Docker compose profiles and numeric SERVERS value
     PROFILES=""
     SERVERS="$SERVER_COUNT"
-    if [[ "$SERVER_COUNT" == "ipfs-network" ]]; then
+    if [[ "$HAS_MOCK" == "true" ]]; then
+        PROFILES="--profile mock"
+        SERVERS="mock"
+    elif [[ "$SERVER_COUNT" == "ipfs-network" ]]; then
         PROFILES="--profile public"
         SERVERS="public"
     elif [[ "$NAT_TYPE" == "none" ]]; then
@@ -206,7 +231,9 @@ for ((i=0; i<TOTAL; i++)); do
 
     # Determine client container name
     CLIENT_CONTAINER="client"
-    if [[ "$SERVERS" == "public" ]]; then
+    if [[ "$HAS_MOCK" == "true" ]]; then
+        CLIENT_CONTAINER="client-mock"
+    elif [[ "$SERVERS" == "public" ]]; then
         CLIENT_CONTAINER="client-public"
     elif [[ "$NAT_TYPE" == "none" ]]; then
         CLIENT_CONTAINER="client-nonat"
@@ -214,7 +241,14 @@ for ((i=0; i<TOTAL; i++)); do
 
     for ((run=1; run<=RUNS; run++)); do
         SCENARIO_NUM=$((SCENARIO_NUM + 1))
-        RUN_LABEL="${NAT_TYPE}-${TRANSPORT}-${SERVERS}"
+
+        # Build run label
+        SCENARIO_NAME_FIELD=$(echo "$S" | jq -r '.name // empty')
+        if [[ -n "$SCENARIO_NAME_FIELD" ]]; then
+            RUN_LABEL="$SCENARIO_NAME_FIELD"
+        else
+            RUN_LABEL="${NAT_TYPE}-${TRANSPORT}-${SERVERS}"
+        fi
         [[ "$PACKET_LOSS" != "0" ]] && RUN_LABEL="${RUN_LABEL}-loss${PACKET_LOSS}"
         [[ "$LATENCY_MS" != "0" ]] && RUN_LABEL="${RUN_LABEL}-lat${LATENCY_MS}"
         [[ "$RUNS" -gt 1 ]] && RUN_LABEL="${RUN_LABEL}-run${run}"
@@ -222,11 +256,17 @@ for ((i=0; i<TOTAL; i++)); do
         RESULT_FILE="$RESULT_DIR/${RUN_LABEL}.json"
 
         echo "--- [$SCENARIO_NUM] $RUN_LABEL ---"
-        echo "  NAT=$NAT_TYPE transport=$TRANSPORT servers=$SERVER_COUNT loss=${PACKET_LOSS}% latency=${LATENCY_MS}ms timeout=${TIMEOUT}s"
+        if [[ "$HAS_MOCK" == "true" ]]; then
+            echo "  mock_behaviors=[$MOCK_BEHAVIOR_1,$MOCK_BEHAVIOR_2,$MOCK_BEHAVIOR_3] transport=$TRANSPORT timeout=${TIMEOUT}s"
+        else
+            echo "  NAT=$NAT_TYPE transport=$TRANSPORT servers=$SERVER_COUNT loss=${PACKET_LOSS}% latency=${LATENCY_MS}ms timeout=${TIMEOUT}s"
+        fi
 
         # Export environment for docker compose
         export NAT_TYPE TRANSPORT PACKET_LOSS LATENCY_MS TCP_BLOCK_PORT PORT_REMAP
         export OBS_ADDR_THRESH="$OBS_THRESH"
+        export MOCK_BEHAVIOR_1 MOCK_BEHAVIOR_2 MOCK_BEHAVIOR_3
+        export MOCK_DELAY_1 MOCK_DELAY_2 MOCK_DELAY_3
 
         # Clean up from previous runs
         # shellcheck disable=SC2086

@@ -5,16 +5,19 @@
 #   nonat      - AutoNAT experiment with local servers, client on public network (no NAT)
 #   5servers   - Add servers 4-5 (use with local or nonat)
 #   7servers   - Add servers 6-7 (use with local/nonat + 5servers)
+#   mock       - Mock AutoNAT v2 servers with controllable behaviors
 #   public     - AutoNAT experiment with real IPFS/libp2p servers
 #   test       - Lightweight NAT verification (socat, no Go binary)
 #
 # Environment variables:
 #   NAT_TYPE       - none, full-cone, address-restricted, port-restricted, symmetric
-#   TRANSPORT      - tcp, quic, or both (default: both)
-#   PACKET_LOSS    - Packet loss percentage for tc netem (default: 0)
-#   LATENCY_MS     - Added latency in ms for tc netem (default: 0)
-#   TCP_BLOCK_PORT - Block outbound TCP to this port (e.g., 4001)
-#   PORT_REMAP     - Remap source port (e.g., 4001:29538)
+#   TRANSPORT        - tcp, quic, or both (default: both)
+#   PACKET_LOSS      - Packet loss percentage for tc netem (default: 0)
+#   LATENCY_MS       - Added latency in ms for tc netem (default: 0)
+#   TCP_BLOCK_PORT   - Block outbound TCP to this port (e.g., 4001)
+#   PORT_REMAP       - Remap source port (e.g., 4001:29538)
+#   MOCK_BEHAVIOR_N  - Behavior for mock-server-N (default: force-unreachable)
+#   MOCK_DELAY_N     - Response delay ms for mock-server-N (default: 0)
 
 # Network layout:
 #   public-net  (73.0.0.0/24)  — servers and router's public side.
@@ -256,6 +259,93 @@ services:
     networks:
       private-net:
         ipv4_address: 10.0.1.11
+
+  # === Mock AutoNAT v2 servers ===
+  # Controllable servers that generate specific protocol responses.
+  # Use MOCK_BEHAVIOR_N env vars to set behavior per server.
+  # See mock_server.go for available behaviors.
+
+  mock-server-1:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["mock"]
+    command: >-
+      --role=mock-server
+      --behavior=${MOCK_BEHAVIOR_1:-force-unreachable}
+      --delay=${MOCK_DELAY_1:-0}
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --addr-file=/peer-addrs/mock-server-1
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  mock-server-2:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["mock"]
+    command: >-
+      --role=mock-server
+      --behavior=${MOCK_BEHAVIOR_2:-force-unreachable}
+      --delay=${MOCK_DELAY_2:-0}
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --addr-file=/peer-addrs/mock-server-2
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  mock-server-3:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["mock"]
+    command: >-
+      --role=mock-server
+      --behavior=${MOCK_BEHAVIOR_3:-force-unreachable}
+      --delay=${MOCK_DELAY_3:-0}
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --addr-file=/peer-addrs/mock-server-3
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+
+  # Client for mock server experiments — on public network (no NAT)
+  # so mock servers can dial back directly for Category B behaviors.
+  client-mock:
+    <<: *node-build
+    depends_on:
+      - mock-server-1
+      - mock-server-2
+      - mock-server-3
+    profiles: ["mock"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --log-file=/results/experiment.json
+      --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+      - ../../results/testbed:/results
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.100
 
   # === NAT verification (lightweight, no Go binary) ===
   # Used by testbed/verify-nat.sh to validate iptables rules with plain TCP/UDP.

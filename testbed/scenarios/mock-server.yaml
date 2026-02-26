@@ -1,0 +1,99 @@
+name: mock-server
+description: >
+  Mock AutoNAT v2 server experiments. Tests how an unmodified client reacts to
+  controlled protocol responses: rejections, unreachable results, forced
+  reachability, wrong nonces, and delayed responses.
+
+  All scenarios use the "mock" Docker profile with 3 mock servers on the public
+  network and a client also on the public network (no NAT). The mock_behaviors
+  array sets each server's behavior independently.
+
+defaults:
+  timeout_s: 120
+  runs: 1
+
+scenarios:
+  # --- Category A: Response-only behaviors ---
+
+  - name: all-reject
+    nat_type: none
+    transport: both
+    mock_behaviors: [reject, reject, reject]
+    assertions:
+      - type: no_event
+        event: reachability_changed
+        message: "Client should not converge (all servers rejected)"
+      - type: no_event
+        event: reachable_addrs_changed
+        message: "No addresses should be probed (all rejected)"
+
+  - name: all-unreachable
+    nat_type: none
+    transport: both
+    mock_behaviors: [force-unreachable, force-unreachable, force-unreachable]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: { message_contains: "unreachable=" }
+        message: "Addresses should be marked unreachable"
+
+  - name: all-internal-error
+    nat_type: none
+    transport: both
+    mock_behaviors: [internal-error, internal-error, internal-error]
+    assertions:
+      - type: no_event
+        event: reachability_changed
+        message: "Client should not converge (all servers returned internal error)"
+
+  - name: delayed-response-5s
+    nat_type: none
+    transport: both
+    mock_behaviors: [force-unreachable, force-unreachable, force-unreachable]
+    mock_delays: [5000, 5000, 5000]
+    timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: { message_contains: "unreachable=" }
+        message: "Addresses should be marked unreachable despite delay"
+
+  # --- Category B: Dial-back behaviors ---
+
+  - name: all-reachable
+    nat_type: none
+    transport: both
+    mock_behaviors: [force-reachable, force-reachable, force-reachable]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "Addresses should be marked reachable"
+
+  - name: majority-reachable
+    nat_type: none
+    transport: both
+    mock_behaviors: [force-reachable, force-reachable, force-unreachable]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "Addresses should be marked reachable (2/3 majority)"
+
+  - name: majority-unreachable
+    nat_type: none
+    transport: both
+    mock_behaviors: [force-reachable, force-unreachable, force-unreachable]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: { message_contains: "unreachable=" }
+        message: "Addresses should be marked unreachable (2/3 majority)"
+
+  - name: wrong-nonce
+    nat_type: none
+    transport: both
+    mock_behaviors: [wrong-nonce, wrong-nonce, wrong-nonce]
+    assertions:
+      - type: no_event
+        event: reachable_addrs_changed
+        filter: { message_contains: "unreachable=" }
+        message: "Client should not converge (all nonces wrong)"

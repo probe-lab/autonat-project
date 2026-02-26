@@ -291,7 +291,42 @@ NAT router.
 ./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=ipfs-network
 ```
 
-### Mode C: Real-World Networks
+### Mode C: Mock Servers
+
+Controllable mock AutoNAT v2 servers that generate specific protocol responses
+without performing real AutoNAT. The mock server registers a stream handler for
+`/libp2p/autonat/2/dial-request`, making it visible via Identify, then responds
+with pre-determined protobuf messages.
+
+Available behaviors:
+
+| Behavior | Category | Response | Client effect |
+|----------|----------|----------|---------------|
+| `reject` | A | `E_REQUEST_REJECTED` | No result, try another server |
+| `refuse` | A | `E_DIAL_REFUSED` | No result, try another server |
+| `force-unreachable` | A | `OK` + `E_DIAL_ERROR` | +1 failure (unreachable) |
+| `internal-error` | A | `E_INTERNAL_ERROR` | No result |
+| `timeout` | A | Never responds | Stream timeout |
+| `force-reachable` | B | Dial back + `OK` + `OK` | +1 success (reachable) |
+| `wrong-nonce` | B | Dial back with nonce-1 | Client rejects |
+| `no-dialback-msg` | B | Connect but no DialBack msg | Client timeout |
+
+Category A behaviors only send a response message. Category B behaviors require
+a real dial-back connection (using a separate `dialerHost` with a different peer
+ID, same pattern as go-libp2p's built-in server).
+
+```bash
+# All 3 servers force-unreachable → client converges to private
+./testbed/run.sh testbed/scenarios/mock-server.yaml --filter=name=all-unreachable
+
+# All 3 servers force-reachable → client converges to public
+./testbed/run.sh testbed/scenarios/mock-server.yaml --filter=name=all-reachable
+
+# Run all mock server scenarios
+./testbed/run.sh testbed/scenarios/mock-server.yaml
+```
+
+### Mode D: Real-World Networks
 
 Run the AutoNAT client locally (no Docker) against the real IPFS network,
 using whatever NAT the current network provides.
@@ -533,7 +568,8 @@ Each experiment produces a JSON file in `results/testbed/` or `results/local/`:
 
 | File | Purpose |
 |------|---------|
-| `testbed/main.go` | libp2p node binary (server + client roles) |
+| `testbed/main.go` | libp2p node binary (server, client, mock-server roles) |
+| `testbed/mock_server.go` | Mock AutoNAT v2 server (controllable behaviors) |
 | `testbed/go.mod` | Go module definition |
 | `testbed/run.sh` | YAML-driven experiment runner |
 | `testbed/run-local.sh` | Local experiment runner (no Docker, real NAT) |

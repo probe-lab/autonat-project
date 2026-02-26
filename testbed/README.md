@@ -41,9 +41,12 @@ All scenario files live in `testbed/scenarios/`:
 | `high-latency.yaml` | 4 | 10 | Latency at 200ms, 500ms one-way (full-cone, both transports) |
 | `hotel-wifi.yaml` | 1 | 13 | TCP blocked on port 4001, port remap 4001:29538 |
 | `flight-wifi.yaml` | 3 runs | 14 | Symmetric NAT + 350ms latency (700ms RTT) |
+| `mock-server.yaml` | 8 | 15 | Mock server behaviors: reject, unreachable, reachable, wrong nonce, etc. |
 
-The last two include assertions that automatically validate expected behavior
-(e.g., "AutoNAT v2 should never fire under symmetric NAT").
+The WiFi scenarios include assertions that automatically validate expected
+behavior (e.g., "AutoNAT v2 should never fire under symmetric NAT"). The mock
+server scenarios test how an unmodified client reacts to controlled protocol
+responses.
 
 See [testbed.md](../docs/testbed.md) for detailed descriptions
 of each experiment, iptables rules, and the NAT verification test suite.
@@ -192,12 +195,21 @@ matrix:
 | `timeout_s` | no | 120 | Max seconds to wait for convergence |
 | `runs` | no | 1 | Repeat this scenario N times |
 | `obs_addr_thresh` | no | auto | Observer address activation threshold (auto: 2 if servers<4, else 4) |
+| `mock_behaviors` | no | — | Array of 3 mock server behaviors (uses `mock` Docker profile instead of real servers) |
+| `mock_delays` | no | [0,0,0] | Array of 3 response delays in ms (one per mock server) |
 | `assertions` | no | — | List of assertions to evaluate against the experiment log |
 
 **Note on `packet_loss` and `latency_ms`:** These require traffic to flow
 through the router. `nat_type: none` places the client directly on `public-net`
 (bypassing the router), so use `full-cone` instead when testing network
 degradation.
+
+**Note on `mock_behaviors`:** When present, `server_count` is ignored. The
+runner uses the `mock` Docker profile (3 mock servers + `client-mock` on the
+public network). Each element sets the `--behavior` flag for the corresponding
+mock server. Valid behaviors: `reject`, `refuse`, `force-unreachable`,
+`internal-error`, `timeout`, `force-reachable`, `wrong-nonce`, `no-dialback-msg`.
+See [testbed.md](../docs/testbed.md#mode-c-mock-servers) for details.
 
 **Note on `server_count: ipfs-network`:** The client bootstraps to the real
 IPFS/libp2p DHT and discovers actual AutoNAT v2 servers on the internet. The
@@ -295,6 +307,20 @@ NAT_TYPE=none $DC --profile 5servers --profile 7servers up --build
 
 # Public server mode (no local servers, real IPFS DHT)
 NAT_TYPE=symmetric $DC --profile public up --build
+
+# Mock servers: all force-unreachable
+MOCK_BEHAVIOR_1=force-unreachable MOCK_BEHAVIOR_2=force-unreachable \
+MOCK_BEHAVIOR_3=force-unreachable $DC --profile mock up --build
+
+# Mock servers: 2 reachable + 1 unreachable (majority reachable)
+MOCK_BEHAVIOR_1=force-reachable MOCK_BEHAVIOR_2=force-reachable \
+MOCK_BEHAVIOR_3=force-unreachable $DC --profile mock up --build
+
+# Mock servers: with 3s response delay
+MOCK_BEHAVIOR_1=force-unreachable MOCK_DELAY_1=3000 \
+MOCK_BEHAVIOR_2=force-unreachable MOCK_DELAY_2=3000 \
+MOCK_BEHAVIOR_3=force-unreachable MOCK_DELAY_3=3000 \
+$DC --profile mock up --build
 
 # Add network degradation
 NAT_TYPE=full-cone PACKET_LOSS=5 LATENCY_MS=100 $DC up --build
