@@ -9,5 +9,8 @@ results/**/*.jsonl
 autonat-node
 testbed/autonat
 
+# Synced go-libp2p for Docker builds (created by run.sh)
+testbed/go-libp2p-patched/
+
 # Local-only docs
 docs/nat-classification-crawl-idea.md

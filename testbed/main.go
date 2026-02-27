@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -20,18 +19,12 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/host/observedaddrs"
 	ma "github.com/multiformats/go-multiaddr"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
-
-// LogEvent is a structured log entry for experiment output.
-type LogEvent struct {
-	Time         string   `json:"time"`
-	ElapsedMs    int64    `json:"elapsed_ms"`
-	Type         string   `json:"type"`
-	Reachability string   `json:"reachability,omitempty"`
-	Addresses    []string `json:"addresses,omitempty"`
-	PeerID       string   `json:"peer_id,omitempty"`
-	Message      string   `json:"message,omitempty"`
-}
 
 var startTime time.Time
 
@@ -42,13 +35,23 @@ func main() {
 	listenPort := flag.Int("port", 4001, "Listen port")
 	peers := flag.String("peers", "", "Comma-separated multiaddrs of AutoNAT servers (local mode)")
 	bootstrap := flag.Bool("bootstrap", false, "Bootstrap to IPFS DHT to discover public AutoNAT servers")
-	logFile := flag.String("log-file", "", "Output file for structured JSON logs (default: stdout)")
 	addrFile := flag.String("addr-file", "", "Write this node's multiaddr to file (for server discovery)")
 	peerDir := flag.String("peer-dir", "", "Directory to read peer multiaddrs from (client reads server addr files)")
 	obsAddrThresh := flag.Int("obs-addr-thresh", 0, "Override observed address activation threshold (default: 0 = use go-libp2p default of 4)")
 	behaviorFlag := flag.String("behavior", "force-unreachable", "Mock server behavior (mock-server role only)")
 	delayFlag := flag.Int("delay", 0, "Mock server response delay in milliseconds (mock-server role only)")
+	traceFile := flag.String("trace-file", "", "Output file for OTEL traces (JSON); empty = no tracing")
 	flag.Parse()
+
+	// Initialize OTEL tracing if requested
+	if *traceFile != "" {
+		shutdown, err := initTracer(*traceFile)
+		if err != nil {
+			log.Fatalf("Failed to initialize tracer: %v", err)
+		}
+		defer shutdown()
+		log.Printf("OTEL tracing enabled, writing to %s", *traceFile)
+	}
 
 	if *obsAddrThresh > 0 {
 		observedaddrs.ActivationThresh = *obsAddrThresh
@@ -56,19 +59,6 @@ func main() {
 	}
 
 	startTime = time.Now()
-
-	// Set up log output
-	var logOutput *json.Encoder
-	if *logFile != "" {
-		f, err := os.Create(*logFile)
-		if err != nil {
-			log.Fatalf("Failed to create log file: %v", err)
-		}
-		defer f.Close()
-		logOutput = json.NewEncoder(f)
-	} else {
-		logOutput = json.NewEncoder(os.Stdout)
-	}
 
 	// Build listen addresses based on transport flag
 	listenAddrs := buildListenAddrs(*listenAddr, *listenPort, *transport)
@@ -88,13 +78,6 @@ func main() {
 		defer ms.Close()
 
 		mockHost := ms.Host()
-		emitLog(logOutput, LogEvent{
-			Type:      "started",
-			PeerID:    mockHost.ID().String(),
-			Addresses: multiaddrsToStrings(mockHost.Addrs()),
-			Message:   fmt.Sprintf("role=mock-server behavior=%s delay=%s", behavior, delay),
-		})
-
 		log.Printf("Mock server started: %s (behavior=%s, delay=%s)", mockHost.ID(), behavior, delay)
 		for _, addr := range mockHost.Addrs() {
 			log.Printf("  Listening on: %s/p2p/%s", addr, mockHost.ID())
@@ -108,10 +91,6 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 
-		emitLog(logOutput, LogEvent{
-			Type:    "shutdown",
-			Message: "received signal, shutting down",
-		})
 		log.Println("Shutting down...")
 		return
 	}
@@ -139,12 +118,23 @@ func main() {
 	}
 	defer h.Close()
 
-	emitLog(logOutput, LogEvent{
-		Type:      "started",
-		PeerID:    h.ID().String(),
-		Addresses: multiaddrsToStrings(h.Addrs()),
-		Message:   fmt.Sprintf("role=%s transport=%s", *role, *transport),
-	})
+	// Create the session span — covers the entire node lifetime.
+	// All testbed lifecycle events are recorded as events on this span.
+	tracer := otel.Tracer("autonat-testbed")
+	ctx, sessionSpan := tracer.Start(context.Background(), "autonat.session",
+		trace.WithAttributes(
+			attribute.String("role", *role),
+			attribute.String("transport", *transport),
+			attribute.String("peer_id", h.ID().String()),
+			attribute.StringSlice("listen_addrs", multiaddrsToStrings(h.Addrs())),
+		))
+	defer sessionSpan.End()
+
+	addEvent(sessionSpan, "started",
+		attribute.String("peer_id", h.ID().String()),
+		attribute.StringSlice("addresses", multiaddrsToStrings(h.Addrs())),
+		attribute.String("message", fmt.Sprintf("role=%s transport=%s", *role, *transport)),
+	)
 
 	log.Printf("Node started: %s (role=%s)", h.ID(), *role)
 	for _, addr := range h.Addrs() {
@@ -156,23 +146,23 @@ func main() {
 		writeAddrFile(h, *addrFile)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// Subscribe to reachability events (v1: EvtLocalReachabilityChanged, v2: EvtHostReachableAddrsChanged)
-	go subscribeReachability(ctx, h, logOutput)
-	go subscribeReachableAddrs(ctx, h, logOutput)
+	go subscribeReachability(ctx, h, sessionSpan)
+	go subscribeReachableAddrs(ctx, h, sessionSpan)
 
 	// Subscribe to address update events
-	go subscribeAddressUpdates(ctx, h, logOutput)
+	go subscribeAddressUpdates(ctx, h, sessionSpan)
 
 	if *role == "client" {
 		if *bootstrap {
-			go bootstrapDHT(ctx, h, logOutput)
+			go bootstrapDHT(ctx, h, sessionSpan)
 		} else if *peerDir != "" {
-			go discoverFromDir(ctx, h, *peerDir, logOutput)
+			go discoverFromDir(ctx, h, *peerDir, sessionSpan)
 		} else if *peers != "" {
-			go connectToPeers(ctx, h, *peers, logOutput)
+			go connectToPeers(ctx, h, *peers, sessionSpan)
 		} else {
 			log.Println("Warning: client mode with no --peers, no --peer-dir, and no --bootstrap; waiting for inbound connections")
 		}
@@ -183,11 +173,16 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	emitLog(logOutput, LogEvent{
-		Type:    "shutdown",
-		Message: "received signal, shutting down",
-	})
+	addEvent(sessionSpan, "shutdown",
+		attribute.String("message", "received signal, shutting down"),
+	)
 	log.Println("Shutting down...")
+}
+
+// addEvent adds a named event to the session span with elapsed_ms computed from startTime.
+func addEvent(span trace.Span, name string, attrs ...attribute.KeyValue) {
+	attrs = append(attrs, attribute.Int64("elapsed_ms", time.Since(startTime).Milliseconds()))
+	span.AddEvent(name, trace.WithAttributes(attrs...))
 }
 
 func buildListenAddrs(ip string, port int, transport string) []string {
@@ -208,7 +203,7 @@ func buildListenAddrs(ip string, port int, transport string) []string {
 	return addrs
 }
 
-func subscribeReachability(ctx context.Context, h host.Host, logOutput *json.Encoder) {
+func subscribeReachability(ctx context.Context, h host.Host, sessionSpan trace.Span) {
 	sub, err := h.EventBus().Subscribe(new(event.EvtLocalReachabilityChanged))
 	if err != nil {
 		log.Printf("Failed to subscribe to reachability events: %v", err)
@@ -227,16 +222,15 @@ func subscribeReachability(ctx context.Context, h host.Host, logOutput *json.Enc
 			reachEvt := evt.(event.EvtLocalReachabilityChanged)
 			reachStr := reachabilityString(reachEvt.Reachability)
 			log.Printf("REACHABILITY CHANGED: %s", reachStr)
-			emitLog(logOutput, LogEvent{
-				Type:         "reachability_changed",
-				Reachability: reachStr,
-				Addresses:    multiaddrsToStrings(h.Addrs()),
-			})
+			addEvent(sessionSpan, "reachability_changed",
+				attribute.String("reachability", reachStr),
+				attribute.StringSlice("addresses", multiaddrsToStrings(h.Addrs())),
+			)
 		}
 	}
 }
 
-func subscribeReachableAddrs(ctx context.Context, h host.Host, logOutput *json.Encoder) {
+func subscribeReachableAddrs(ctx context.Context, h host.Host, sessionSpan trace.Span) {
 	sub, err := h.EventBus().Subscribe(new(event.EvtHostReachableAddrsChanged))
 	if err != nil {
 		log.Printf("Failed to subscribe to reachable addrs events: %v", err)
@@ -264,18 +258,16 @@ func subscribeReachableAddrs(ctx context.Context, h host.Host, logOutput *json.E
 			for _, a := range reachEvt.Unknown {
 				log.Printf("  UNKNOWN:     %s", a)
 			}
-			emitLog(logOutput, LogEvent{
-				Type:      "reachable_addrs_changed",
-				Addresses: multiaddrsToStrings(reachEvt.Reachable),
-				Message: fmt.Sprintf("unreachable=%v unknown=%v",
-					multiaddrsToStrings(reachEvt.Unreachable),
-					multiaddrsToStrings(reachEvt.Unknown)),
-			})
+			addEvent(sessionSpan, "reachable_addrs_changed",
+				attribute.StringSlice("addresses", multiaddrsToStrings(reachEvt.Reachable)),
+				attribute.StringSlice("unreachable", multiaddrsToStrings(reachEvt.Unreachable)),
+				attribute.StringSlice("unknown", multiaddrsToStrings(reachEvt.Unknown)),
+			)
 		}
 	}
 }
 
-func subscribeAddressUpdates(ctx context.Context, h host.Host, logOutput *json.Encoder) {
+func subscribeAddressUpdates(ctx context.Context, h host.Host, sessionSpan trace.Span) {
 	sub, err := h.EventBus().Subscribe(new(event.EvtLocalAddressesUpdated))
 	if err != nil {
 		log.Printf("Failed to subscribe to address events: %v", err)
@@ -300,16 +292,15 @@ func subscribeAddressUpdates(ctx context.Context, h host.Host, logOutput *json.E
 			for _, a := range addrEvt.Removed {
 				removed = append(removed, a.Address.String())
 			}
-			emitLog(logOutput, LogEvent{
-				Type:      "addresses_updated",
-				Addresses: current,
-				Message:   fmt.Sprintf("removed=%v", removed),
-			})
+			addEvent(sessionSpan, "addresses_updated",
+				attribute.StringSlice("addresses", current),
+				attribute.StringSlice("removed", removed),
+			)
 		}
 	}
 }
 
-func connectToPeers(ctx context.Context, h host.Host, peersStr string, logOutput *json.Encoder) {
+func connectToPeers(ctx context.Context, h host.Host, peersStr string, sessionSpan trace.Span) {
 	for _, addrStr := range strings.Split(peersStr, ",") {
 		addrStr = strings.TrimSpace(addrStr)
 		if addrStr == "" {
@@ -327,44 +318,39 @@ func connectToPeers(ctx context.Context, h host.Host, peersStr string, logOutput
 		}
 		if err := h.Connect(ctx, *pi); err != nil {
 			log.Printf("Failed to connect to %s: %v", pi.ID, err)
-			emitLog(logOutput, LogEvent{
-				Type:    "connect_failed",
-				PeerID:  pi.ID.String(),
-				Message: err.Error(),
-			})
+			addEvent(sessionSpan, "connect_failed",
+				attribute.String("peer_id", pi.ID.String()),
+				attribute.String("message", err.Error()),
+			)
 		} else {
 			log.Printf("Connected to %s", pi.ID)
-			emitLog(logOutput, LogEvent{
-				Type:   "connected",
-				PeerID: pi.ID.String(),
-			})
+			addEvent(sessionSpan, "connected",
+				attribute.String("peer_id", pi.ID.String()),
+			)
 		}
 	}
 }
 
-func bootstrapDHT(ctx context.Context, h host.Host, logOutput *json.Encoder) {
-	emitLog(logOutput, LogEvent{
-		Type:    "bootstrap_start",
-		Message: "connecting to IPFS DHT bootstrap peers",
-	})
+func bootstrapDHT(ctx context.Context, h host.Host, sessionSpan trace.Span) {
+	addEvent(sessionSpan, "bootstrap_start",
+		attribute.String("message", "connecting to IPFS DHT bootstrap peers"),
+	)
 
 	d, err := dht.New(ctx, h, dht.Mode(dht.ModeClient))
 	if err != nil {
 		log.Printf("Failed to create DHT: %v", err)
-		emitLog(logOutput, LogEvent{
-			Type:    "bootstrap_error",
-			Message: err.Error(),
-		})
+		addEvent(sessionSpan, "bootstrap_error",
+			attribute.String("message", err.Error()),
+		)
 		return
 	}
 	defer d.Close()
 
 	if err := d.Bootstrap(ctx); err != nil {
 		log.Printf("DHT bootstrap failed: %v", err)
-		emitLog(logOutput, LogEvent{
-			Type:    "bootstrap_error",
-			Message: err.Error(),
-		})
+		addEvent(sessionSpan, "bootstrap_error",
+			attribute.String("message", err.Error()),
+		)
 		return
 	}
 
@@ -378,17 +364,15 @@ func bootstrapDHT(ctx context.Context, h host.Host, logOutput *json.Encoder) {
 			log.Printf("Bootstrap peer %s: failed (%v)", pi.ID.ShortString(), err)
 		} else {
 			log.Printf("Bootstrap peer %s: connected", pi.ID.ShortString())
-			emitLog(logOutput, LogEvent{
-				Type:   "bootstrap_connected",
-				PeerID: pi.ID.String(),
-			})
+			addEvent(sessionSpan, "bootstrap_connected",
+				attribute.String("peer_id", pi.ID.String()),
+			)
 		}
 	}
 
-	emitLog(logOutput, LogEvent{
-		Type:    "bootstrap_done",
-		Message: "DHT bootstrap complete, discovering peers...",
-	})
+	addEvent(sessionSpan, "bootstrap_done",
+		attribute.String("message", "DHT bootstrap complete, discovering peers..."),
+	)
 
 	// Keep the DHT running so it discovers peers (and AutoNAT servers)
 	<-ctx.Done()
@@ -407,11 +391,10 @@ func writeAddrFile(h host.Host, path string) {
 	}
 }
 
-func discoverFromDir(ctx context.Context, h host.Host, dir string, logOutput *json.Encoder) {
-	emitLog(logOutput, LogEvent{
-		Type:    "peer_discovery_start",
-		Message: fmt.Sprintf("reading server addresses from %s", dir),
-	})
+func discoverFromDir(ctx context.Context, h host.Host, dir string, sessionSpan trace.Span) {
+	addEvent(sessionSpan, "peer_discovery_start",
+		attribute.String("message", fmt.Sprintf("reading server addresses from %s", dir)),
+	)
 
 	// Wait for server addr files to appear (servers may still be starting)
 	maxWait := 30 * time.Second
@@ -423,10 +406,9 @@ func discoverFromDir(ctx context.Context, h host.Host, dir string, logOutput *js
 		}
 		if time.Since(start) > maxWait {
 			log.Printf("Timeout waiting for peer addr files in %s", dir)
-			emitLog(logOutput, LogEvent{
-				Type:    "peer_discovery_timeout",
-				Message: fmt.Sprintf("no addr files found in %s after %s", dir, maxWait),
-			})
+			addEvent(sessionSpan, "peer_discovery_timeout",
+				attribute.String("message", fmt.Sprintf("no addr files found in %s after %s", dir, maxWait)),
+			)
 			return
 		}
 		time.Sleep(1 * time.Second)
@@ -476,24 +458,21 @@ func discoverFromDir(ctx context.Context, h host.Host, dir string, logOutput *js
 		pi := peer.AddrInfo{ID: id, Addrs: addrs}
 		if err := h.Connect(ctx, pi); err != nil {
 			log.Printf("Failed to connect to %s: %v", id.ShortString(), err)
-			emitLog(logOutput, LogEvent{
-				Type:    "connect_failed",
-				PeerID:  id.String(),
-				Message: err.Error(),
-			})
+			addEvent(sessionSpan, "connect_failed",
+				attribute.String("peer_id", id.String()),
+				attribute.String("message", err.Error()),
+			)
 		} else {
 			log.Printf("Connected to server %s", id.ShortString())
-			emitLog(logOutput, LogEvent{
-				Type:   "connected",
-				PeerID: id.String(),
-			})
+			addEvent(sessionSpan, "connected",
+				attribute.String("peer_id", id.String()),
+			)
 		}
 	}
 
-	emitLog(logOutput, LogEvent{
-		Type:    "peer_discovery_done",
-		Message: fmt.Sprintf("connected to servers from %s", dir),
-	})
+	addEvent(sessionSpan, "peer_discovery_done",
+		attribute.String("message", fmt.Sprintf("connected to servers from %s", dir)),
+	)
 }
 
 func reachabilityString(r network.Reachability) string {
@@ -515,9 +494,31 @@ func multiaddrsToStrings(addrs []ma.Multiaddr) []string {
 	return strs
 }
 
-func emitLog(enc *json.Encoder, evt LogEvent) {
-	now := time.Now()
-	evt.Time = now.UTC().Format(time.RFC3339Nano)
-	evt.ElapsedMs = now.Sub(startTime).Milliseconds()
-	enc.Encode(evt)
+// initTracer sets up an OTEL TracerProvider that exports spans as JSON to a file.
+// Each span is written as a single-line JSON object (JSONL format).
+func initTracer(path string) (func(), error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("create trace file: %w", err)
+	}
+
+	exporter, err := stdouttrace.New(
+		stdouttrace.WithWriter(f),
+	)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("create stdout exporter: %w", err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+	)
+	otel.SetTracerProvider(tp)
+
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tp.Shutdown(ctx)
+		f.Close()
+	}, nil
 }
