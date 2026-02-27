@@ -361,33 +361,17 @@ change between address advertisement and dial-back.
 
 ## Black Hole Detector
 
-The black hole detector tracks UDP/QUIC and IPv6 connection success rates.
-When the success counter enters `Blocked` state (too few successes),
+The black hole detector (`p2p/net/swarm/black_hole_detector.go`) tracks
+UDP/QUIC and IPv6 connection success rates using a sliding window. When the
+success counter enters `Blocked` state (too few successes),
 `filterKnownUndialables` returns "dial refused because of black hole" and
-the swarm refuses to dial.
+the swarm refuses to dial. This protects nodes from wasting resources on
+networks that silently drop UDP traffic.
 
-### Bug: Fresh Servers Block QUIC Dial-Backs
-
-**Problem**: The `dialerHost` originally shared `UDPBlackHoleSuccessCounter`
-with the main host. On fresh testbed servers with zero UDP connection history,
-the counter starts in `Blocked` state → `CanDial()` returns false for
-QUIC/UDP → server refuses all QUIC dial-backs.
-
-Long-running public IPFS nodes (Kubo) are unaffected because their counters
-accumulate enough successes to reach `Allowed` state.
-
-**Fix** (in `go-libp2p-patched/config/config.go`):
-
-```go
-// In makeAutoNATV2Host():
-UDPBlackHoleSuccessCounter:       nil,
-CustomUDPBlackHoleSuccessCounter:  true,  // disables detector for dialerHost
-IPv6BlackHoleSuccessCounter:       nil,
-CustomIPv6BlackHoleSuccessCounter: true,
-```
-
-Setting the counter to `nil` with the `Custom` flag set to `true` disables
-the detector entirely for the isolated dialer host.
+The `dialerHost` shares the main host's counter in read-only mode. On fresh
+servers with no UDP history, this causes QUIC dial-backs to be refused. See
+[UDP Black Hole Detector and AutoNAT v2](udp-black-hole-detector.md) for the
+full analysis, testbed workaround, and upstream fix proposal.
 
 ---
 

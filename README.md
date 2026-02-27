@@ -191,6 +191,7 @@ filtering, and Docker compose usage.
 
 - [AutoNAT v2 Protocol](docs/autonat-v2.md) — protocol walkthrough from the client perspective
 - [go-libp2p Implementation](docs/go-libp2p-autonat-implementation.md) — implementation details, constants, confidence system
+- [UDP Black Hole Detector](docs/udp-black-hole-detector.md) — detector interaction with AutoNAT v2, testbed workaround
 - [Findings Report](docs/report.md) — confirmed issues, root cause analysis
 - [Testbed & Experiments](docs/testbed.md) — Docker architecture, iptables rules, experiment catalog
 - [OpenTelemetry Tracing](docs/otel-tracing.md) — trace format, span hierarchy, querying traces

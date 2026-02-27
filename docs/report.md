@@ -15,7 +15,7 @@
 3. [Background: NAT Types and Traversal](#background-nat-types-and-traversal)
 4. [AutoNAT v2 Protocol — Step by Step](#autonat-v2-protocol--step-by-step)
 5. [Issue 1: Address-Restricted NAT False Positive](#issue-1-address-restricted-nat-false-positive)
-6. [Issue 2: QUIC Dial-Back Failure](#issue-2-quic-dial-back-failure)
+6. [Issue 2: QUIC Dial-Back Failure on Fresh Servers](#issue-2-quic-dial-back-failure-on-fresh-servers)
 7. [Additional Confirmed Issues](#additional-confirmed-issues)
 8. [Appendix A: Testbed Architecture](#appendix-a-testbed-architecture)
 9. [Appendix B: Test Results](#appendix-b-test-results)
@@ -66,15 +66,15 @@ testbed validation (5 NAT types, native Linux VM):
    incorrectly classified as publicly reachable. This is a protocol design gap:
    the spec requires dial-back from a different peer ID but not a different IP.
 
-2. **QUIC v2 per-address reachability (CONFIRMED & FIXED):** The server's
-   `dialerHost` shares its `UDPBlackHoleSuccessCounter` with the main host.
-   On fresh servers with zero UDP history, the counter enters `Blocked` state,
-   causing `CanDial()` to return false for all QUIC addresses. The server
-   responds `E_DIAL_REFUSED` for every QUIC dial-back request. Fix: disable
-   the black hole detector for the `dialerHost` by setting the counter to nil.
-   This is a go-libp2p implementation bug that affects all freshly started
-   AutoNAT v2 servers. Long-running nodes (Kubo) are unaffected because their
-   counters accumulate enough UDP successes to reach `Allowed` state.
+2. **QUIC dial-back failure on fresh servers (CONFIRMED & WORKED AROUND):**
+   The server's `dialerHost` shares its `UDPBlackHoleSuccessCounter` with
+   the main host. On fresh servers with zero UDP history, the counter enters
+   `Blocked` state, causing `CanDial()` to return false for all QUIC
+   addresses. This is a limitation of how go-libp2p's
+   [black hole detector](udp-black-hole-detector.md) interacts with
+   AutoNAT v2 on freshly started servers — not a bug in the detector itself.
+   Long-running nodes (Kubo) are unaffected. Testbed workaround: disable
+   the detector on the main host so the `dialerHost` inherits no counter.
 
 Additionally, two previously known issues were confirmed in both field and
 testbed environments:
@@ -863,19 +863,19 @@ Defense-in-depth measure that doesn't require spec changes.
 
 ---
 
-## Issue 2: QUIC v2 Per-Address Reachability
+## Issue 2: QUIC Dial-Back Failure on Fresh Servers
 
 ### Classification
 
-- **Category:** Implementation bug (go-libp2p)
+- **Category:** Testbed limitation (go-libp2p black hole detector interaction)
 - **Severity:** High — affects all freshly started AutoNAT v2 servers
-- **Status:** CONFIRMED and FIXED (2026-02-24)
+- **Status:** CONFIRMED and WORKED AROUND (2026-02-24)
 
 ### Summary
 
 The server's `dialerHost` (internal host used for dial-back connections)
 shares its `UDPBlackHoleSuccessCounter` with the main host. On fresh servers
-with zero UDP connection history, this counter enters `Blocked` state, causing
+with zero UDP connection history, the counter enters `Blocked` state, causing
 `CanDial()` to return false for all QUIC/UDP addresses. The server responds
 `E_DIAL_REFUSED` for every QUIC dial-back request, and QUIC addresses stay
 "unknown" indefinitely on the client.
@@ -883,64 +883,14 @@ with zero UDP connection history, this counter enters `Blocked` state, causing
 Long-running nodes (e.g., Kubo in production) are unaffected because their
 counters accumulate enough successful UDP connections to reach `Allowed` state.
 
-### Root Cause
-
-The `dialerHost` is created in `config/config.go:makeAutoNATV2Host()`. The
-original code shares black hole counters:
-
-```go
-// ORIGINAL (broken):
-autoNatCfg := Config{
-    UDPBlackHoleSuccessCounter:  cfg.UDPBlackHoleSuccessCounter,  // shared!
-    IPv6BlackHoleSuccessCounter: cfg.IPv6BlackHoleSuccessCounter, // shared!
-    SwarmOpts: []swarm.Option{
-        swarm.WithReadOnlyBlackHoleDetector(),  // read-only but still reads
-    },
-}
-```
-
-The `BlackHoleSuccessCounter` has three states:
-- **Probing** (initial): allows 1-in-N dials as probes
-- **Allowed**: all dials permitted (≥5 successes per 100 attempts)
-- **Blocked**: all dials refused (<5 successes per 100 attempts)
-
-On a fresh server, the main host has zero UDP history. The counter quickly
-transitions to `Blocked` after a few failed or untested dials. The
-`dialerHost` inherits this state via `WithReadOnlyBlackHoleDetector()` — it
-doesn't update the counter but reads it. When `CanDial()` checks a QUIC
-address, `filterKnownUndialables()` in the swarm consults the black hole
-detector, which returns `"dial refused because of black hole"`.
-
-### The Fix
-
-Disable the black hole detector entirely for the `dialerHost`:
-
-```go
-// FIXED:
-autoNatCfg := Config{
-    // Don't share black hole counters with dialerHost.
-    // The main host's UDP counter may enter Blocked state on fresh servers,
-    // which would prevent the dialerHost from dialing back QUIC addresses.
-    UDPBlackHoleSuccessCounter:        nil,
-    CustomUDPBlackHoleSuccessCounter:  true,
-    IPv6BlackHoleSuccessCounter:       nil,
-    CustomIPv6BlackHoleSuccessCounter: true,
-    SwarmOpts: []swarm.Option{
-        swarm.WithReadOnlyBlackHoleDetector(),
-    },
-}
-```
-
-Setting the counter to `nil` with `Custom=true` tells go-libp2p not to
-create a default counter. The `dialerHost` doesn't need this heuristic — it
-only dials addresses that clients explicitly request to be tested.
-
-Additionally, QUIC+TCP listen addresses were added for the `dialerHost`
-(ephemeral ports) to ensure transports are fully initialized.
+For the full analysis — what the black hole detector is, why the upstream v2
+approach doesn't work on fresh servers, the testbed workaround, and the
+proper upstream fix — see
+[UDP Black Hole Detector and AutoNAT v2](udp-black-hole-detector.md).
 
 ### Evidence
 
-**Before fix (5 servers, all transports):**
+**Before workaround (5 servers, all transports):**
 
 | NAT Type | Transport | v2 QUIC |
 |----------|-----------|---------|
@@ -954,7 +904,7 @@ Debug output from `filterKnownUndialables`:
 dialable=[] errs=[{/ip4/1.2.3.4/udp/4001/quic-v1 dial refused because of black hole}]
 ```
 
-**After fix (7 servers):**
+**After workaround (7 servers):**
 
 | NAT Type | Transport | v2 TCP | v2 QUIC | Time |
 |----------|-----------|--------|---------|------|
@@ -962,16 +912,6 @@ dialable=[] errs=[{/ip4/1.2.3.4/udp/4001/quic-v1 dial refused because of black h
 | none | quic | — | **reachable** | ~6s |
 | symmetric | both | — | — (v1: private) | ~18s |
 | symmetric | quic | — | — (v1: private) | ~15s |
-
-### Why Kubo/Public IPFS Works
-
-Kubo nodes are long-running daemons with many successful QUIC connections
-over their lifetime. Their `UDPBlackHoleSuccessCounter` accumulates enough
-successes (≥5/100) to enter `Allowed` state. The `dialerHost` inherits this
-permissive state and can dial QUIC addresses normally.
-
-This explains the paradox: QUIC dial-back works with public IPFS servers but
-fails in isolated test environments, CI, and freshly deployed infrastructure.
 
 ### Investigation Trail
 
@@ -982,13 +922,13 @@ fails in isolated test environments, CI, and freshly deployed infrastructure.
 5. Added listen addresses for `dialerHost` → `canDial` still false
 6. Exposed `filterKnownUndialables` via debug method → found `"black hole"` error
 7. Traced to shared `UDPBlackHoleSuccessCounter` in `Blocked` state
-8. Fix: nil counter + Custom=true → QUIC dial-back works immediately
+8. Workaround: nil counter on main host → `dialerHost` inherits nil → QUIC works
 
 ### Recommendations
 
 1. **go-libp2p fix:** The `dialerHost` should not share black hole counters
-   with the main host. The counter should be disabled (nil + Custom=true) or
-   a fresh independent counter should be created. This fix should be upstreamed.
+   with the main host. See
+   [upstream fix](udp-black-hole-detector.md#proper-upstream-fix) for details.
 
 2. **Server count:** With `targetConfidence=3` and 2 primary addresses
    (TCP + QUIC), at least 6 servers are needed (3 per address). Use 7 for
@@ -1201,7 +1141,7 @@ client directly on `public-net` bypassing the router. Must re-run with
 | Issue | Stage | Status | Category | Impact |
 |-------|-------|--------|----------|--------|
 | #1 Addr-restricted false positive | 3 (Probing) | **CONFIRMED** | Protocol design | Wrong "public" result |
-| #2 QUIC dial-back black hole | 3 (Probing) | **FIXED** | Implementation | Fresh servers can't dial QUIC |
+| #2 QUIC dial-back black hole | 3 (Probing) | **WORKED AROUND** | Testbed limitation | Fresh servers can't dial QUIC |
 | #17 Symmetric blocks v2 | 2 (Activation) | **CONFIRMED** | Protocol design | v2 completely bypassed |
 | #8 v1 oscillation | 4 (Confidence) | **CONFIRMED** | Implementation | Unreliable result (~33%) |
 | #18 TCP port blocking | 1 (Bootstrap) | **CONFIRMED** | Infrastructure | QUIC-only discovery |
