@@ -517,59 +517,57 @@ is ambiguous — the server claims it connected, but the client never saw it.
 ### Step 11: Confidence Accumulation
 
 A single probe is not enough. The client repeats the probe with **different
-servers** and accumulates results in a sliding window. Each probe outcome
-is either a success (public) or failure (private).
+servers** and accumulates results. Each probe outcome is either a success
+(public) or failure (private). Rejected and refused results are discarded.
 
-The confidence system requires:
-- **Minimum confidence**: `successes - failures >= 2` for public, or
-  `failures - successes >= 2` for private
-- **Target confidence**: 3 net successes (or failures) for high confidence
-- **Sliding window**: last 5 probe outcomes
+The spec recommends:
 
-**Example progression under no NAT / full cone** (address is reachable):
+> Consider an address reachable if more than 3 servers report a successful
+> dial and unreachable if more than 3 servers report unsuccessful dials.
+> Implementations are free to use different heuristics.
 
-| Probe | Server | Result | Successes | Failures | Net | Status |
-|-------|--------|--------|-----------|----------|-----|--------|
-| 1 | Server A | Public | 1 | 0 | +1 | Unknown |
-| 2 | Server B | Public | 2 | 0 | +2 | **Public** (min confidence reached) |
-| 3 | Server C | Public | 3 | 0 | +3 | Public (high confidence) |
+**Example under no NAT / full cone** (address is reachable):
+
+| Probe | Server | Result | Successes | Failures | Status |
+|-------|--------|--------|-----------|----------|--------|
+| 1 | Server A | Public | 1 | 0 | Unknown |
+| 2 | Server B | Public | 2 | 0 | Unknown |
+| 3 | Server C | Public | 3 | 0 | **Public** |
 
 **Example under port-restricted NAT** (address is unreachable):
 
-| Probe | Server | Result | Successes | Failures | Net | Status |
-|-------|--------|--------|-----------|----------|-----|--------|
-| 1 | Server A | Private | 0 | 1 | -1 | Unknown |
-| 2 | Server B | Private | 0 | 2 | -2 | **Private** (min confidence reached) |
-| 3 | Server C | Private | 0 | 3 | -3 | Private (high confidence) |
+| Probe | Server | Result | Successes | Failures | Status |
+|-------|--------|--------|-----------|----------|--------|
+| 1 | Server A | Private | 0 | 1 | Unknown |
+| 2 | Server B | Private | 0 | 2 | Unknown |
+| 3 | Server C | Private | 0 | 3 | **Private** |
 
-**Example under address-restricted NAT** (false positive scenario):
+**Example under address-restricted NAT** (false positive):
 
-| Probe | Server | Result | Successes | Failures | Net | Status |
-|-------|--------|--------|-----------|----------|-----|--------|
-| 1 | Server A | Public | 1 | 0 | +1 | Unknown |
-| 2 | Server B | Public | 2 | 0 | +2 | **Public** (false positive) |
-| 3 | Server C | Public | 3 | 0 | +3 | Public (high confidence) |
+| Probe | Server | Result | Successes | Failures | Status |
+|-------|--------|--------|-----------|----------|--------|
+| 1 | Server A | Public | 1 | 0 | Unknown |
+| 2 | Server B | Public | 2 | 0 | Unknown |
+| 3 | Server C | Public | 3 | 0 | **Public** (false positive) |
 
 The false positive occurs because the client already has connections to the
 servers, and address-restricted NAT allows any port from a known IP.
 
 ### Step 12: Reachability Event
 
-Once confidence is reached, the host emits a reachability event:
+Once confidence is reached, the client determines its overall reachability:
 
 - **At least one address is Public** → Node is reachable. Stop using relays,
   advertise direct addresses to the network.
 - **All addresses are Private** → Node is behind NAT. Connect to relay
   servers, advertise relay addresses instead.
 
-After the initial determination, addresses are **re-probed periodically**
-to detect network changes (e.g., NAT type change, IP change, firewall rule
-change):
-
-- High-confidence primary address: re-probe every **1 hour**
-- High-confidence secondary address: re-probe every **3 hours**
-- Refresh ticker: check every **5 minutes** if any address is stale
-- New address detected: probe after **1 second**
+The client should **re-probe periodically** to detect network changes (e.g.,
+NAT type change, IP change, firewall rule change). The spec does not
+prescribe specific intervals — see
+[go-libp2p implementation](go-libp2p-autonat-implementation.md#confidence-system)
+for the concrete re-probe schedule and sliding window mechanics used in
+go-libp2p.
 
 ---
 
@@ -672,7 +670,7 @@ Step 1-3:  Peers report client's real public IP
 Step 4:    Address activates after 4 peers confirm it
 Step 5-8:  Server dials back successfully (no NAT to block)
 Step 9-10: DialResponse OK + nonce verified → Public
-Step 11:   3 successes → high confidence Public
+Step 11:   3 successes → Public
 Step 12:   Address is Public ✓ (correct)
 ```
 
@@ -683,7 +681,7 @@ Step 1-3:  All peers see same external IP:port (EIM)
 Step 4:    Address activates after 4 peers confirm it
 Step 5-8:  NAT allows any inbound (EIF) → dial-back succeeds
 Step 9-10: DialResponse OK + nonce verified → Public
-Step 11:   3 successes → high confidence Public
+Step 11:   3 successes → Public
 Step 12:   Address is Public ✓ (correct — genuinely reachable by anyone)
 ```
 
@@ -694,7 +692,7 @@ Step 1-3:  All peers see same external IP:port (EIM)
 Step 4:    Address activates after 4 peers confirm it
 Step 5-8:  NAT allows server's IP (already contacted, ADF) → dial-back succeeds
 Step 9-10: DialResponse OK + nonce verified → Public
-Step 11:   3 successes → high confidence Public
+Step 11:   3 successes → Public
 Step 12:   Address is Public ⚠ (FALSE POSITIVE — only reachable from known IPs)
 ```
 
@@ -712,7 +710,7 @@ Step 1-3:  All peers see same external IP:port (EIM)
 Step 4:    Address activates after 4 peers confirm it
 Step 5-8:  NAT requires exact IP:port match (APDF) → dial-back from new port blocked
 Step 9-10: DialResponse OK + dialStatus E_DIAL_ERROR → Private
-Step 11:   3 failures → high confidence Private
+Step 11:   3 failures → Private
 Step 12:   Address is Private ✓ (correct — unreachable from new source ports)
 ```
 
@@ -730,7 +728,7 @@ threshold):
 ```
 Step 5-8:  NAT blocks dial-back (APDF filtering + wrong mapping)
 Step 9-10: DialResponse OK + dialStatus E_DIAL_ERROR → Private
-Step 11:   3 failures → high confidence Private
+Step 11:   3 failures → Private
 Step 12:   Address is Private ✓ (correct)
 ```
 
