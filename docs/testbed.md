@@ -1,7 +1,11 @@
-# Testbed & Experiments
+# Testbed Architecture & Experiments
 
-This document describes the Docker-based testbed architecture, iptables rules
-for each NAT type, the verification test suite, and the full experiment catalog.
+System architecture, NAT implementation details, verification tests, and the
+full experiment catalog. This document explains **how the testbed works and
+why** it is designed this way.
+
+For **how to run experiments** (commands, scenario files, YAML schema,
+filtering, assertions), see [Running Experiments](../testbed/README.md).
 
 ---
 
@@ -199,18 +203,9 @@ iptables -A FORWARD -j DROP
 ## Verification Tests
 
 The test suite (`testbed/verify-nat.sh`) verifies each NAT type at the network
-layer using plain TCP and UDP probes. No libp2p or AutoNAT is involved.
-
-### Running
-
-```bash
-# Run all NAT types (~3 minutes)
-./testbed/verify-nat.sh
-
-# Run a single NAT type
-./testbed/verify-nat.sh symmetric
-./testbed/verify-nat.sh address-restricted
-```
+layer using plain TCP and UDP probes (no libp2p or AutoNAT). Run
+`./testbed/verify-nat.sh` before experiments to confirm the NAT simulation is
+correct.
 
 ### Test Matrix
 
@@ -272,33 +267,24 @@ layer using plain TCP and UDP probes. No libp2p or AutoNAT is involved.
 
 ## Lab Modes
 
-### Mode A: Local Servers
+The testbed supports four modes of operation:
 
-All AutoNAT servers are Docker containers on the local `public-net` network.
-Fully controlled and reproducible.
+| Mode | Servers | Client location | Use case |
+|------|---------|-----------------|----------|
+| **Local servers** | Docker containers on `public-net` | Behind simulated NAT | Controlled, reproducible experiments |
+| **Public servers** (`ipfs-network`) | Real IPFS DHT servers | Behind simulated NAT | Test real-world server behavior under controlled NAT |
+| **Mock servers** | Controllable mock protocol responses | On `public-net` (no NAT) | Test client reactions to specific server behaviors |
+| **Real-world** (`run-local.sh`) | Real IPFS DHT servers | Host machine (real NAT) | Field measurements |
 
-```bash
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=5
-```
+For commands and configuration, see
+[Running Experiments](../testbed/README.md).
 
-### Mode B: Public Servers
+### Mock Server Behaviors
 
-No local servers. The client bootstraps to the IPFS DHT and discovers real
-AutoNAT v2 servers on the internet. The client still goes through the local
-NAT router.
-
-```bash
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=ipfs-network
-```
-
-### Mode C: Mock Servers
-
-Controllable mock AutoNAT v2 servers that generate specific protocol responses
-without performing real AutoNAT. The mock server registers a stream handler for
-`/libp2p/autonat/2/dial-request`, making it visible via Identify, then responds
-with pre-determined protobuf messages.
-
-Available behaviors:
+Mock servers register `/libp2p/autonat/2/dial-request` via Identify, then
+respond with pre-determined protobuf messages. Category A behaviors only
+send a response message. Category B behaviors perform a real dial-back
+connection using a separate `dialerHost` (different peer ID).
 
 | Behavior | Category | Response | Client effect |
 |----------|----------|----------|---------------|
@@ -311,53 +297,31 @@ Available behaviors:
 | `wrong-nonce` | B | Dial back with nonce-1 | Client rejects |
 | `no-dialback-msg` | B | Connect but no DialBack msg | Client timeout |
 
-Category A behaviors only send a response message. Category B behaviors require
-a real dial-back connection (using a separate `dialerHost` with a different peer
-ID, same pattern as go-libp2p's built-in server).
-
-```bash
-# All 3 servers force-unreachable → client converges to private
-./testbed/run.sh testbed/scenarios/mock-server.yaml --filter=name=all-unreachable
-
-# All 3 servers force-reachable → client converges to public
-./testbed/run.sh testbed/scenarios/mock-server.yaml --filter=name=all-reachable
-
-# Run all mock server scenarios
-./testbed/run.sh testbed/scenarios/mock-server.yaml
-```
-
-### Mode D: Real-World Networks
-
-Run the AutoNAT client locally (no Docker) against the real IPFS network,
-using whatever NAT the current network provides.
-
-```bash
-./testbed/run-local.sh --runs=3 --label=<location>
-```
-
 ---
 
-## Experiments
+## Experiment Catalog
+
+Each experiment is run via `run.sh` with the appropriate scenario file and
+filters. See [Running Experiments](../testbed/README.md) for commands.
 
 ### Experiment 1: Baseline True Positive (No NAT)
 
 **Goal**: Verify that a publicly reachable node is correctly detected as public.
 
-**Setup**: NAT: none, servers: 5, transport: both
-
-**Run**: `./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=none,server_count=5`
+**Setup**: `matrix.yaml`, `nat_type=none`, `server_count=5`, `transport=both`
 
 ### Experiment 2: Baseline True Negative (Symmetric NAT)
 
 **Goal**: Verify that a node behind symmetric NAT is correctly detected as private.
 
-**Setup**: NAT: symmetric, servers: 5, transport: both
+**Setup**: `matrix.yaml`, `nat_type=symmetric`, `server_count=5`, `transport=both`
 
-**Run**: `./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=symmetric,server_count=5`
+### Experiments 3-4: NAT Type Matrix (TCP / QUIC)
 
-### Experiment 3: NAT Type Matrix (TCP)
+**Goal**: Test detection accuracy across all NAT types, per transport. QUIC may
+behave differently (shorter UDP NAT TTLs, different conntrack behavior).
 
-**Goal**: Test detection accuracy across all NAT types using TCP.
+**Setup**: `matrix.yaml`, `server_count=5`, `transport=tcp` or `transport=quic`
 
 | NAT Type | Expected Detection | Correct? |
 |----------|-------------------|----------|
@@ -367,111 +331,80 @@ using whatever NAT the current network provides.
 | Port-Restricted | Private | True negative |
 | Symmetric | Private | True negative |
 
-**Run**: `./testbed/run.sh testbed/scenarios/matrix.yaml --filter=transport=tcp,server_count=5`
-
-### Experiment 4: NAT Type Matrix (QUIC)
-
-**Goal**: Same as experiment 3 but with QUIC. QUIC may behave differently
-(shorter UDP NAT TTLs, different conntrack behavior).
-
-**Run**: `./testbed/run.sh testbed/scenarios/matrix.yaml --filter=transport=quic,server_count=5`
-
 ### Experiment 5: Address-Restricted NAT Deep Dive
 
-**Goal**: Confirm false positive hypothesis for address-restricted NAT.
+**Goal**: Confirm false positive hypothesis for address-restricted NAT with
+multiple runs.
 
-**Run**: `./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=address-restricted,server_count=5 --runs=5`
+**Setup**: `matrix.yaml`, `nat_type=address-restricted`, `server_count=5`, `runs=5`
 
 ### Experiments 6-7: Server Count Impact
 
 **Goal**: Measure how server count (3, 5, 7) affects convergence speed.
 
-**Run**:
-```bash
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=none
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=symmetric
-```
+**Setup**: `matrix.yaml`, `nat_type=none` or `nat_type=symmetric` (all server counts)
 
 ### Experiment 8: Rate Limit Pressure
 
 **Goal**: Test convergence under aggressive rate limiting.
 
-**Status**: Requires `--server-rpm` flag (not yet implemented).
+**Status**: Not yet implemented (requires `--server-rpm` flag).
 
 ### Experiment 9: Packet Loss
 
-**Goal**: Test detection reliability under packet loss.
+**Goal**: Test detection reliability under packet loss (1%, 5%, 10%).
 
-**Status**: **Needs re-run** — first attempt used `none` NAT type which bypasses
+**Setup**: `packet-loss.yaml`
+
+**Status**: Needs re-run — first attempt used `none` NAT type which bypasses
 the router (where `tc netem` rules are applied). Must use `full-cone`.
-
-**Run**: `./testbed/run.sh testbed/scenarios/packet-loss.yaml`
 
 ### Experiment 10: High Latency
 
-**Goal**: Test detection under high-latency conditions.
+**Goal**: Test detection under high-latency conditions (200ms, 500ms one-way).
 
-**Status**: **Needs re-run** — same issue as Experiment 9.
+**Setup**: `high-latency.yaml`
 
-**Run**: `./testbed/run.sh testbed/scenarios/high-latency.yaml`
+**Status**: Needs re-run — same issue as Experiment 9.
 
 ### Experiments 11-12: Public Server Tests
 
 **Goal**: Test AutoNAT behavior using real IPFS servers through each NAT type.
 
-**Run**: `./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=ipfs-network`
+**Setup**: `matrix.yaml`, `server_count=ipfs-network`
 
 ### Experiment 13: Hotel WiFi Reproduction
 
-**Goal**: Reproduce hotel WiFi conditions (port-restricted + TCP blocked + port remap).
+**Goal**: Reproduce hotel WiFi conditions (port-restricted + TCP blocked on
+port 4001 + port remap 4001:29538).
 
-**Status**: **COMPLETED** — field data (2026-02-19) + testbed match (2026-02-25)
+**Setup**: `hotel-wifi.yaml`
 
-**Testbed result**: QUIC activated at ~5s, unreachable at ~11s, v1 private at ~18s.
-Matches field data within ±1s on all metrics.
-
-**Run**: `./testbed/run.sh testbed/scenarios/hotel-wifi.yaml`
+**Status**: Completed — field data (2026-02-19) + testbed match (2026-02-25).
+QUIC activated at ~5s, unreachable at ~11s, v1 private at ~18s. Matches field
+data within ±1s on all metrics.
 
 ### Experiment 14: Flight WiFi Reproduction
 
 **Goal**: Reproduce in-flight satellite WiFi (symmetric NAT + 700ms RTT).
 
-**Status**: **COMPLETED** — field data (2026-02-16) + testbed match (2026-02-25)
+**Setup**: `flight-wifi.yaml`
 
-**Testbed result**: No public address activated, v2 never ran, v1 private at ~21s.
-Confirms symmetric NAT prevents address activation.
+**Status**: Completed — field data (2026-02-16) + testbed match (2026-02-25).
+No public address activated, v2 never ran, v1 private at ~21s. Confirms
+symmetric NAT prevents address activation.
 
-**Run**: `./testbed/run.sh testbed/scenarios/flight-wifi.yaml`
+### Experiment 15: Mock Server Behaviors
 
----
+**Goal**: Test how an unmodified client reacts to controlled protocol responses.
 
-## Running the Full Matrix
-
-```bash
-# All 40 scenarios (30 local + 10 ipfs-network)
-./testbed/run.sh testbed/scenarios/matrix.yaml
-
-# Preview without executing
-./testbed/run.sh testbed/scenarios/matrix.yaml --dry-run
-
-# Run a subset
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=5
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=symmetric,transport=quic
-```
-
-This runs all local-server combinations:
-- 5 NAT types × 2 transports × 3 server counts = 30 experiments
-
-Plus ipfs-network experiments:
-- 5 NAT types × 2 transports = 10 experiments
-
-Total: 40 experiments, each up to 120 seconds + setup/teardown.
+**Setup**: `mock-server.yaml` (8 scenarios)
 
 ---
 
 ## Real-World NAT Identification
 
-After running `./testbed/run-local.sh`, check the JSONL log:
+After running `./testbed/run-local.sh`, check the OTEL trace file:
 
 1. **`addresses_updated` events with a public IP:**
    - Same port as listen port → **port-preserving EIM** (cone NAT)
@@ -487,6 +420,8 @@ After running `./testbed/run-local.sh`, check the JSONL log:
    - v1 private + v2 unreachable → consistent, NAT is restrictive
    - v1 private + v2 never ran → symmetric NAT
    - v1 oscillates → confidence window instability (Issue #8)
+
+See `docs/otel-tracing.md` for the full event and span reference.
 
 ---
 
@@ -532,37 +467,16 @@ After running `./testbed/run-local.sh`, check the JSONL log:
 
 ---
 
-## Output Format
+## Output
 
-Each experiment produces a JSON file in `results/testbed/` or `results/local/`:
+Each experiment produces an OTEL trace file (one JSON span per line) in
+`results/testbed/` or `results/local/`. When assertions are present, a
+corresponding `.assertions.json` file contains pass/fail results.
 
-```json
-{
-  "experiment": {
-    "nat_type": "symmetric",
-    "transport": "quic",
-    "server_count": 5,
-    "server_source": "local",
-    "timestamp": "2024-01-15T10:30:00Z"
-  },
-  "events": [
-    {
-      "time": "2024-01-15T10:30:05Z",
-      "elapsed_ms": 5000,
-      "type": "reachability_changed",
-      "reachability": "private"
-    }
-  ],
-  "result": {
-    "final_reachability": "private",
-    "convergence_time_ms": 25000,
-    "total_probes": 4,
-    "successful_probes": 0,
-    "failed_probes": 4,
-    "rejected_probes": 0
-  }
-}
-```
+See [OpenTelemetry Tracing](otel-tracing.md) for the span hierarchy,
+attributes, and querying examples. See
+[Running Experiments](../testbed/README.md#output) for directory structure
+and file naming.
 
 ## Files
 

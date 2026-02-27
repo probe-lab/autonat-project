@@ -20,8 +20,8 @@ Measure AutoNAT v2 behavior across different NAT types in a controlled lab:
 
 **Phase 0: Preparation**
 
-- [-] P0.1 — Study AutoNAT v2 specification
-- [-] P0.2 — Review go-libp2p AutoNAT implementation
+- [x] P0.1 — Study AutoNAT v2 specification
+- [x] P0.2 — Review go-libp2p AutoNAT implementation
 
 **Phase 1: Core Setup**
 
@@ -272,15 +272,15 @@ low (10ms), medium (50ms), high (150ms), variable (high jitter).
 ### Phase 5: Instrumentation & Analysis
 
 #### P5.1 — Define implementation-agnostic trace format
-- **Status:** In progress
-- **Notes:** Current output is JSONL with event types: `started`, `connected`, `reachability_changed`, `reachable_addrs_changed`, `addresses_updated`. Not yet aligned with OTel
+- **Status:** Done
+- **Notes:** All output uses OpenTelemetry traces (JSONL, one span per line). Testbed lifecycle events are on an `autonat.session` span; AutoNAT v2 internals are separate spans (`autonatv2.refresh_cycle`, `autonatv2.server_selection`, `autonatv2.probe`). See `docs/otel-tracing.md`.
 
 Design a trace/event format that any libp2p implementation can emit (go, rust,
 js). Potentially add to libp2p specs.
 
 #### P5.2 — Document instrumentation requirements
-- **Status:** In progress
-- **Notes:** Events documented in `docs/testbed.md` output format section
+- **Status:** Done
+- **Notes:** Full span/event reference in `docs/otel-tracing.md`
 
 Specify what instrumentation other libp2p implementations need: events to emit
 (names, when, required/optional fields), export mechanism (OTel preferred,

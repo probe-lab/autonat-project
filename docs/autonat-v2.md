@@ -1,226 +1,746 @@
-# AutoNAT v2 Protocol Reference
+# AutoNAT v2 Protocol Walkthrough
 
-This document describes the AutoNAT v2 protocol in detail, covering the protocol
-flow, message format, implementation behavior in go-libp2p, and all relevant
-constants and thresholds.
+A step-by-step guide to the AutoNAT v2 protocol from the **client's
+perspective**. Each step explains what the client does, what messages it sends
+and receives, and how the outcome varies depending on the client's NAT type.
 
-## Purpose
+For go-libp2p implementation details (constants, structs, confidence system,
+observed address manager), see
+[go-libp2p-autonat-implementation.md](go-libp2p-autonat-implementation.md).
 
-AutoNAT v2 enables a libp2p node to determine whether its **individual
-addresses** are publicly reachable. A node cannot know a priori whether it sits
-behind a NAT or firewall. Knowing per-address reachability allows the node to:
+---
 
-- Avoid advertising unreachable addresses to the network
-- Proactively connect to relay servers when no public address is reachable
-- Test addresses from multiple sources (listen addrs, UPnP, observed addrs)
+## What AutoNAT v2 Does
 
-## End-to-End Lifecycle
-
-This section traces the full workflow from node startup to stable reachability
-determination. Each step references the detailed section where the mechanism
-is documented.
-
-### 1. Node starts and listens
-
-The node starts listening on its configured transports (e.g., TCP on port 4001,
-QUIC on port 4001). At this point it only knows its local addresses
-(e.g., `/ip4/10.0.1.10/tcp/4001`). It has no idea whether it sits behind a NAT.
-
-### 2. Connect to peers
-
-The node connects to peers — from a peer store, DHT bootstrap nodes, or
-preconfigured addresses. Each outbound connection through a NAT router gets an
-external IP:port mapping assigned by the router.
-
-### 3. Identify exchange
-
-On every new connection, the [Identify](#identify) protocol runs automatically.
-Each remote peer reports:
-- The client's **observed address** — the IP:port the remote peer sees (the
-  NAT's external mapping)
-- The remote peer's **supported protocols** — including whether it supports
-  `/libp2p/autonat/2/dial-request`
-
-Two things happen from Identify:
-
-**a) Server discovery** — peers supporting the dial-request protocol are added
-to the eligible AutoNAT server pool. See [Server Discovery](#server-discovery).
-
-**b) Observed address collection** — the `ObservedAddrManager` collects
-external addresses reported by peers. See
-[Observed Address Activation](#observed-address-activation).
-
-### 4. Observed address activation (gate)
-
-The `ObservedAddrManager` requires `ActivationThresh = 4` distinct observers
-reporting the same address before activating it. This is the critical gate:
-
-- **EIM NATs** (full cone, address-restricted, port-restricted): all peers see
-  the same external IP:port → address activates after 4 peers connect.
-- **ADPM NATs** (symmetric): each peer sees a different external port → no
-  single address ever reaches 4 observations → address never activates →
-  AutoNAT v2 never runs. See
-  [Non-Port-Preserving NAT Prevents Address Activation](#non-port-preserving-nat-prevents-address-activation-flight-wifi-finding).
-
-Once activated, the address is added to the host's advertised address list and
-becomes a candidate for AutoNAT v2 probing.
-
-### 5. Probing begins
-
-The `addrsReachabilityTracker` detects the new address (via
-`EvtLocalAddressesUpdated`) and schedules a probe after a 1-second delay. For
-each address to probe:
-
-1. Pick a random eligible server that hasn't been used in the last 2 minutes.
-   See [Server Selection](#server-selection).
-2. Open a dial-request stream on the existing connection.
-3. Send `DialRequest{nonce, addrs[]}`. See [Protocol Flow](#protocol-flow).
-
-### 6. Server processes the request
-
-1. Check [rate limits](#rate-limiting) (60 RPM global, 12 RPM per-peer).
-2. Iterate the client's address list and pick the first dialable address. See
-   [Address Selection](#address-selection).
-3. If the selected address IP matches the client's observed IP → proceed
-   directly. If different → request [amplification prevention](#amplification-prevention)
-   data.
-4. Dial back to the selected address using the
-   [dialerHost](#dial-back-mechanism) (separate peer ID, separate source port).
-5. Send `DialBack{nonce}` on the new connection, wait for `DialBackResponse`.
-6. Send `DialResponse` on the original stream.
-
-### 7. NAT filtering determines the outcome
-
-The dial-back comes from the server's IP but a **different port** than the
-original connection. Whether it gets through depends on the NAT's filtering
-behavior:
-
-- **EIF (full cone):** any source allowed → dial-back succeeds
-- **ADF (address-restricted):** server IP previously contacted → dial-back
-  succeeds (false positive)
-- **APDF (port-restricted):** different port rejected → dial-back fails
-
-### 8. Client records the result
-
-The client interprets the `DialResponse` according to the
-[Reachability Interpretation](#reachability-interpretation) table and updates
-the sliding window for the tested address.
-
-### 9. Repeat until confidence
-
-The client probes the same address with different servers until the
-[Confidence System](#confidence-system) reaches `minConfidence = 2` net
-successes or failures. With `maxConcurrency = 5` goroutines probing in
-parallel, this typically requires 3 probes from 3 different servers.
-
-### 10. Reachability event fires
-
-Once confidence is reached, the host emits `EvtHostReachableAddrsChanged`:
-- **Reachable:** stop using relays, advertise direct addresses. See
-  [Relay (Circuit v2)](#relay-circuit-v2).
-- **Unreachable:** connect to relay servers, advertise relay addresses.
-
-### 11. Steady state
-
-After initial determination, addresses are re-probed periodically:
-- High-confidence primary address: every 1 hour
-- High-confidence secondary address: every 3 hours
-- Refresh ticker: every 5 minutes checks if any address needs re-probing
-- New address detected: probe after 1 second
-
-See [Confidence System](#confidence-system) for all intervals.
-
-### Typical timeline (testbed)
-
-```
- 0s     Node starts, begins connecting to servers
- 1-3s   Identify completes with 4+ peers, observed addresses activated
- 3-4s   First AutoNAT v2 probes sent (TCP and QUIC in parallel)
- 5-11s  3 probes per address complete → reachability determined
-```
-
-TCP and QUIC addresses are probed independently and in parallel. The exact
-timing depends on when each observed address is activated (which depends on
-Identify completion order per transport) and server availability.
-
-## Key Differences from AutoNAT v1
+AutoNAT v2 lets a node determine whether each of its **individual addresses**
+is publicly reachable. A node behind a NAT or firewall cannot know this on its
+own — it needs an external peer to dial back and confirm.
 
 | Aspect | v1 | v2 |
 |--------|----|----|
 | Granularity | Tests the node as a whole | Tests individual addresses |
-| Verification | None — trusts server's report | Nonce-based dial-back verification |
-| Cross-IP testing | Forbidden (must match observed IP) | Allowed with amplification cost |
-| Protocol ID | `/libp2p/autonat/1.0.0` | `/libp2p/autonat/2/dial-request` + `/libp2p/autonat/2/dial-back` |
+| Verification | Trusts server's report | Nonce-based dial-back proof |
+| Cross-IP testing | Forbidden | Allowed (with amplification cost) |
+| Protocol IDs | `/libp2p/autonat/1.0.0` | `/libp2p/autonat/2/dial-request` + `/libp2p/autonat/2/dial-back` |
 
-## Protocol Flow
+---
 
-### Happy Path (same IP — no amplification cost)
+## NAT Types Quick Reference
+
+The protocol outcome depends on the client's NAT type, which has two
+independent dimensions: **mapping behavior** (how the NAT assigns external
+ports) and **filtering behavior** (which inbound packets the NAT allows).
+
+### Terminology
+
+NAT types are classified using [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787)
+terminology:
+
+- **EIM** — Endpoint-Independent Mapping. The NAT assigns the same external
+  IP:port regardless of which destination the client connects to.
+- **EIF** — Endpoint-Independent Filtering. The NAT allows inbound packets
+  from any source IP:port. Combined with EIM, this is a **full cone** NAT.
+- **ADF** — Address-Dependent Filtering. The NAT only allows inbound packets
+  from IPs the client has previously sent packets to.
+  Combined with EIM, this is an **address-restricted cone** NAT.
+- **APDF** — Address and Port-Dependent Filtering. The NAT only allows
+  inbound packets from exact IP:port pairs the client has previously sent
+  packets to. Combined with EIM, this is a **port-restricted cone** NAT.
+- **ADPM** — Address and Port-Dependent Mapping. The NAT assigns a different
+  external port for each destination. Combined with APDF filtering, this is
+  a **symmetric** NAT.
+
+### Summary Table
+
+| NAT Type | Mapping | Filtering | Dial-back outcome |
+|----------|---------|-----------|-------------------|
+| **No NAT** | N/A | None | Succeeds |
+| **Full cone** (EIM + EIF) | Same external port for all destinations | Any source IP:port allowed | Succeeds |
+| **Address-restricted** (EIM + ADF) | Same external port for all destinations | Only IPs previously contacted | Succeeds (false positive) |
+| **Port-restricted** (EIM + APDF) | Same external port for all destinations | Only IP:port pairs previously contacted | Fails — new source port blocked |
+| **Symmetric** (ADPM + APDF) | Different external port per destination | Only IP:port pairs previously contacted | Fails — new source port blocked (but typically never reached; see Step 4) |
+
+---
+
+## Protocol Overview
+
+### Roles
+
+- **Client** — the node that wants to learn whether its addresses are
+  publicly reachable. Initiates the protocol.
+- **Server** — a peer that performs the reachability test on behalf of the
+  client by dialing back to the client's address.
+
+Any libp2p node can act as both client and server simultaneously.
+
+### Protocol IDs and Streams
+
+The protocol uses two separate streams, each identified by its own protocol
+ID:
+
+| Stream | Protocol ID | Direction | Purpose |
+|--------|-------------|-----------|---------|
+| **Dial-request** | `/libp2p/autonat/2/dial-request` | Client → Server (existing connection) | Client sends addresses + nonce; server responds with result |
+| **Dial-back** | `/libp2p/autonat/2/dial-back` | Server → Client (new connection) | Server proves it reached the client by echoing the nonce |
+
+The dial-request stream runs over an **existing** connection between client
+and server. The dial-back stream runs over a **new** connection that the
+server opens to the address being tested, using a different peer ID and
+source port.
+
+### Messages
+
+All messages on the dial-request stream are wrapped in a `Message` envelope
+(protobuf `oneof`). Messages on the dial-back stream are sent directly.
+
+**Dial-request stream messages:**
+
+| Message | Sender | Purpose |
+|---------|--------|---------|
+| `DialRequest` | Client | Carries the addresses to test and a random 64-bit nonce |
+| `DialDataRequest` | Server | Requests amplification-prevention data from the client (address index + byte count) |
+| `DialDataResponse` | Client | Sends data chunks (up to 4096 bytes each) to satisfy the server's request |
+| `DialResponse` | Server | Final result: whether the server could reach the address and complete the dial-back |
+
+**Dial-back stream messages:**
+
+| Message | Sender | Purpose |
+|---------|--------|---------|
+| `DialBack` | Server | Echoes the nonce from the DialRequest, proving the server reached the address |
+| `DialBackResponse` | Client | Acknowledges receipt of the nonce |
+
+### Response Statuses
+
+The `DialResponse` carries two status fields:
+
+**`ResponseStatus`** — whether the server processed the request at all:
+
+| Value | Meaning |
+|-------|---------|
+| `OK` (200) | Request processed; check `dialStatus` for the dial-back outcome |
+| `E_REQUEST_REJECTED` (100) | Server refused (rate limit, resource exhaustion) |
+| `E_DIAL_REFUSED` (101) | Server found no dialable address in the request |
+| `E_INTERNAL_ERROR` (0) | Unexpected server error |
+
+**`DialStatus`** — outcome of the dial-back attempt (only meaningful when
+`ResponseStatus` is `OK`):
+
+| Value | Meaning |
+|-------|---------|
+| `OK` (200) | Server connected to the address and completed the nonce exchange |
+| `E_DIAL_ERROR` (100) | Server could not connect to the address (unreachable) |
+| `E_DIAL_BACK_ERROR` (101) | Server connected but the stream-level nonce exchange failed |
+
+### Nonce Verification
+
+The nonce is the core anti-spoofing mechanism. Without it, a malicious server
+could claim any address is reachable (or unreachable) without actually dialing
+it.
+
+1. Client generates a random 64-bit nonce and includes it in the `DialRequest`
+2. Server must echo that nonce in a `DialBack` message on the **new**
+   dial-back connection
+3. Client verifies the nonce matches before accepting the result
+
+The client does **not** verify the peer ID of the dial-back connection — the
+server is expected to use a separate identity for dial-backs.
+
+### Amplification Prevention
+
+When the address the server would dial has a different IP than the client's
+observed connection IP, the server requires the client to send 30,000–100,000
+bytes of data before dialing. This prevents a malicious client from using the
+server as an amplification reflector against a victim's IP address.
+
+---
+
+## Step-by-Step Walkthrough
+
+### Step 1: Node Starts and Listens
+
+The client starts listening on its configured transports:
+
+```
+Listen addresses:
+  /ip4/0.0.0.0/tcp/4001
+  /ip4/0.0.0.0/udp/4001/quic-v1
+```
+
+At this point, the client only knows its **local** addresses (e.g.,
+`/ip4/192.168.1.10/tcp/4001`). It has no knowledge of whether it is behind a
+NAT, what its public IP is, or whether any address is reachable.
+
+### Step 2: Connect to Peers
+
+The client connects to peers — bootstrap nodes, DHT peers, or preconfigured
+addresses. Each outbound connection through a NAT router creates an external
+IP:port mapping.
+
+**What the NAT does:**
+
+| NAT Type | Mapping created |
+|----------|-----------------|
+| No NAT | No mapping — client's IP is already public |
+| EIM NATs (full cone, addr-restricted, port-restricted) | `192.168.1.10:4001` → `203.0.113.50:4001` — same external IP:port for all destinations |
+| Symmetric (ADPM) | `192.168.1.10:4001` → `203.0.113.50:54321` to peer A, `203.0.113.50:54322` to peer B, etc. — different external port per destination |
+
+### Step 3: Identify Exchange
+
+On every new connection, the [Identify protocol](https://github.com/libp2p/specs/blob/master/identify/README.md)
+runs automatically. Each remote peer reports two things:
+
+1. **Observed address** — the IP:port the remote peer sees for the client
+   (i.e., the NAT's external mapping)
+2. **Supported protocols** — including whether it supports
+   `/libp2p/autonat/2/dial-request`
+
+The client uses these to:
+- **Discover AutoNAT servers** — peers supporting the dial-request protocol
+  become eligible probing targets
+- **Collect observed addresses** — external addresses reported by peers become
+  candidates for reachability verification
+
+**What the client learns per NAT type:**
+
+| NAT Type | Observed address from peer A | From peer B | From peer C |
+|----------|------------------------------|-------------|-------------|
+| No NAT | `/ip4/203.0.113.50/tcp/4001` | Same | Same |
+| Full cone | `/ip4/203.0.113.50/tcp/4001` | Same | Same |
+| Addr-restricted | `/ip4/203.0.113.50/tcp/4001` | Same | Same |
+| Port-restricted | `/ip4/203.0.113.50/tcp/4001` | Same | Same |
+| Symmetric | `/ip4/203.0.113.50/tcp/54321` | `/ip4/203.0.113.50/tcp/54322` | `/ip4/203.0.113.50/tcp/54323` |
+
+### Step 4: Observed Address Activation (Gate)
+
+The client does **not** immediately trust a single peer's observation. It
+requires multiple independent peers to report the **same** observed address
+before "activating" it (adding it to the host's advertised address list and
+making it a candidate for AutoNAT v2 probing).
+
+**Activation threshold**: 4 distinct observers must report the same address.
+For IPv4, each distinct IP counts as a separate observer. For IPv6, all IPs
+within the same `/56` prefix count as one observer.
+
+This is the **critical branching point** between EIM and ADPM NATs:
+
+#### EIM NATs (full cone, address-restricted, port-restricted)
+
+All peers see the same external IP:port (e.g., `/ip4/203.0.113.50/tcp/4001`).
+After connecting to 4 peers, the address reaches the activation threshold and
+is added to the host's address list.
+
+```
+Peer A reports: /ip4/203.0.113.50/tcp/4001  → 1 observation
+Peer B reports: /ip4/203.0.113.50/tcp/4001  → 2 observations
+Peer C reports: /ip4/203.0.113.50/tcp/4001  → 3 observations
+Peer D reports: /ip4/203.0.113.50/tcp/4001  → 4 observations → ACTIVATED
+```
+
+**Result**: Address activated. AutoNAT v2 probing proceeds to Step 5.
+
+#### ADPM NAT (symmetric)
+
+Each peer sees a different external port. No single address ever reaches the
+activation threshold.
+
+```
+Peer A reports: /ip4/203.0.113.50/tcp/54321  → 1 observation
+Peer B reports: /ip4/203.0.113.50/tcp/54322  → 1 observation
+Peer C reports: /ip4/203.0.113.50/tcp/54323  → 1 observation
+Peer D reports: /ip4/203.0.113.50/tcp/54324  → 1 observation
+(... no address ever reaches 4 observations)
+```
+
+**Result**: No address activates. AutoNAT v2 **never runs**. The client
+relies on AutoNAT v1 for a coarse reachability verdict (which correctly
+reports "private"). This is the correct outcome — symmetric NAT addresses
+are genuinely unreachable since the external port changes per connection and
+is unpredictable by a third party.
+
+### Step 5: Send DialRequest
+
+Once a public address is activated, the client initiates a probe:
+
+1. **Select a server** — pick a random connected peer that supports
+   `/libp2p/autonat/2/dial-request` and hasn't been used recently (2-minute
+   cooldown per server to distribute load)
+2. **Generate a nonce** — random 64-bit value for dial-back verification
+3. **Open a stream** — on the existing connection to the selected server,
+   open a new stream on `/libp2p/autonat/2/dial-request`
+4. **Send DialRequest** — include the nonce and the address(es) to test
+
+```
+Client → Server:
+  DialRequest {
+    addrs: ["/ip4/203.0.113.50/tcp/4001", "/ip4/203.0.113.50/udp/4001/quic-v1"],
+    nonce: 0x1a2b3c4d5e6f7890
+  }
+```
+
+Addresses are ordered by descending priority. The server picks the **first**
+address it can dial.
+
+**If no eligible server is available** (all throttled or none connected), the
+probe fails with "no peers" and is retried later.
+
+### Step 6: Server Processes the Request
+
+The server receives the DialRequest and processes it through several checks.
+From the client's perspective, this results in one of three message types
+coming back on the stream. Here are the possibilities:
+
+#### 6a. Server rejects the request → `E_REQUEST_REJECTED`
+
+The server has exceeded its rate limit (global: 60 requests/min, per-peer:
+12 requests/min, or max concurrent requests from this peer).
+
+```
+Server → Client:
+  DialResponse {
+    status: E_REQUEST_REJECTED  (100)
+  }
+```
+
+**Client action**: Discard result, try a different server. This does not
+count as a success or failure in the confidence system.
+
+#### 6b. Server can't dial any address → `E_DIAL_REFUSED`
+
+The server iterated through all addresses and found none it can dial (e.g.,
+all are private addresses, or the server lacks the transport).
+
+```
+Server → Client:
+  DialResponse {
+    status: E_DIAL_REFUSED  (101)
+  }
+```
+
+**Client action**: Discard result, try a different server. After 5
+consecutive refusals for the same address, pause probing for 10 minutes.
+
+#### 6c. Server selects an address and checks amplification
+
+The server found a dialable address. Before dialing back, it checks whether
+the address IP matches the client's **observed** connection IP:
+
+- **Same IP** → The client is likely at the address it claims. The server
+  proceeds directly to dial-back (Step 8). No additional messages.
+
+- **Different IP** → The client might be requesting a dial to a victim's
+  address (amplification attack). The server requires the client to prove
+  effort by sending data first (Step 7).
+
+### Step 7: Amplification Prevention (If Required)
+
+When the server requests amplification data, the client receives a
+`DialDataRequest`:
+
+```
+Server → Client:
+  DialDataRequest {
+    addrIdx: 0,                    // which address was selected
+    numBytes: 57342                // random value in [30,000 – 100,000)
+  }
+```
+
+The client sends the requested data in 4096-byte chunks:
+
+```
+Client → Server:
+  DialDataResponse { data: [4096 bytes] }
+  DialDataResponse { data: [4096 bytes] }
+  ... (until >= numBytes sent)
+```
+
+**Client decision**: the client can **refuse** to send dial data for
+low-priority addresses by closing the stream. Each address in the request
+has a `SendDialData` flag controlling this. Refusing means the probe produces
+no result for that address.
+
+After receiving the data, the server waits a random `[0, 3s]` delay (to
+prevent coordinated amplification attacks) before proceeding to dial-back.
+
+### Step 8: Server Dials Back
+
+The server attempts to connect to the selected address using a **separate
+host** — a dedicated libp2p instance with its own private key, different peer
+ID, and a different source port. This is critical: the dial-back comes from
+a **new IP:port** that the client's NAT has never seen before.
+
+This is where NAT filtering determines the outcome:
+
+#### No NAT
+
+```
+Server dials 203.0.113.50:4001
+  → No NAT to block it
+  → Connection succeeds
+  → Server opens /libp2p/autonat/2/dial-back stream
+  → Sends DialBack{nonce}
+```
+
+**Result**: Dial-back succeeds.
+
+#### Full Cone NAT (EIM + EIF)
+
+```
+NAT rule: Allow ANY source IP:port to reach 203.0.113.50:4001
+  → Server's dial-back from new port is allowed through
+  → Connection succeeds
+  → Server sends DialBack{nonce}
+```
+
+**Result**: Dial-back succeeds. Address is genuinely reachable by anyone.
+
+#### Address-Restricted NAT (EIM + ADF)
+
+```
+NAT rule: Allow inbound from any port of an IP the client has previously contacted
+  → Client already has a connection to server's IP (from Step 2)
+  → Server's dial-back from same IP (but different port) is allowed through
+  → Connection succeeds
+  → Server sends DialBack{nonce}
+```
+
+**Result**: Dial-back succeeds. **This is a false positive.** The address
+appears reachable, but only because the client already contacted the server.
+A completely new peer from an unknown IP would be blocked. AutoNAT v2 cannot
+detect this — it would require a completely independent third party (one the
+client has never communicated with) to dial.
+
+#### Port-Restricted NAT (EIM + APDF)
+
+```
+NAT rule: Allow inbound only from exact IP:port pairs the client has previously contacted
+  → Server's dial-back comes from a NEW source port (different from the existing connection)
+  → NAT drops the incoming packet — no matching IP:port entry exists
+  → Connection times out (10s dial timeout)
+```
+
+**Result**: Dial-back fails. Server reports `E_DIAL_ERROR`.
+
+#### Symmetric NAT (ADPM + APDF)
+
+In practice, this step is **never reached** because the address never
+activates at Step 4 (each peer sees a different external port, so no address
+reaches the activation threshold). However, if it were reached (e.g., with a
+lowered activation threshold), the dial-back would fail for two reasons:
+
+1. **Filtering**: symmetric NAT uses APDF filtering (same as port-restricted),
+   so the server's dial-back from a new source port is blocked.
+2. **Mapping**: even if filtering were relaxed, the external port the server
+   is dialing was assigned for a *different* destination — the NAT may not
+   even route the packet to the client's internal socket.
+
+```
+NAT rule: Different external port per destination + APDF filtering
+  → Server dials the external IP:port that was assigned for a different peer
+  → NAT has no matching mapping for inbound from this source IP:port
+  → Connection times out or is rejected
+```
+
+**Result**: Dial-back fails. Server would report `E_DIAL_ERROR`.
+
+### Step 9: Client Receives DialResponse
+
+After the dial-back attempt (successful or not), the server sends a
+`DialResponse` on the original dial-request stream:
+
+```
+Server → Client:
+  DialResponse {
+    status:     OK (200),           // or E_REQUEST_REJECTED, E_DIAL_REFUSED, E_INTERNAL_ERROR
+    addrIdx:    0,                  // which address was tested (only meaningful when status=OK)
+    dialStatus: OK (200)            // or E_DIAL_ERROR, E_DIAL_BACK_ERROR (only meaningful when status=OK)
+  }
+```
+
+The client interprets the response:
+
+| `status` | `dialStatus` | Meaning | Client interpretation |
+|----------|-------------|---------|----------------------|
+| `OK` | `OK` | Server connected and completed dial-back | Proceed to Step 10 (verify nonce) |
+| `OK` | `E_DIAL_BACK_ERROR` | Server connected but stream exchange failed | **Public** — network-level reachability confirmed |
+| `OK` | `E_DIAL_ERROR` | Server could not connect to the address | **Private** — address is unreachable |
+| `E_REQUEST_REJECTED` | — | Server rate-limited | No result — try another server |
+| `E_DIAL_REFUSED` | — | Server couldn't dial any address | No result — try another server |
+| `E_INTERNAL_ERROR` | — | Server internal failure | No result — try another server |
+
+**Why `E_DIAL_BACK_ERROR` = Public**: The server successfully established a
+network connection to the address (TCP handshake completed or QUIC connection
+opened). The failure was at the protocol level (stream negotiation, nonce
+exchange). Network reachability is confirmed regardless of stream-level
+issues.
+
+### Step 10: Dial-Back Verification
+
+When `dialStatus` is `OK`, the client expects a **dial-back connection** on
+a separate stream. Concurrently with Step 9, the client's dial-back handler
+is waiting for an incoming connection:
+
+```
+Server → Client (new connection, different peer ID):
+  Opens stream: /libp2p/autonat/2/dial-back
+  DialBack { nonce: 0x1a2b3c4d5e6f7890 }
+
+Client verifies:
+  1. Nonce matches the one sent in DialRequest? → YES
+  2. Connection's local address consistent with the tested address? → YES
+
+Client → Server (on dial-back stream):
+  DialBackResponse { status: OK }
+```
+
+**Verification checks:**
+
+1. **Nonce match** — The nonce on the dial-back stream must match the one
+   sent in the DialRequest. This proves the server actually dialed the
+   client (not some other peer relaying the nonce).
+
+2. **Address consistency** — The local address of the dial-back connection
+   must match the address being tested. This accounts for DNS→IP resolution,
+   transport normalization (`/wss` → `/tls/ws`), and protocol component
+   stripping (`/p2p/...`, `/certhash/...`).
+
+The client does **NOT** verify the peer ID of the dial-back connection — the
+server is explicitly expected to use a different peer ID (its dedicated dialer
+host).
+
+**If verification fails** (wrong nonce or address mismatch), the dial-back
+is rejected and the probe counts as if no dial-back was received (private).
+
+**If no dial-back arrives** within 5 seconds of receiving the DialResponse,
+the probe times out. Combined with a `dialStatus: OK` from the server, this
+is ambiguous — the server claims it connected, but the client never saw it.
+
+### Step 11: Confidence Accumulation
+
+A single probe is not enough. The client repeats the probe with **different
+servers** and accumulates results in a sliding window. Each probe outcome
+is either a success (public) or failure (private).
+
+The confidence system requires:
+- **Minimum confidence**: `successes - failures >= 2` for public, or
+  `failures - successes >= 2` for private
+- **Target confidence**: 3 net successes (or failures) for high confidence
+- **Sliding window**: last 5 probe outcomes
+
+**Example progression under no NAT / full cone** (address is reachable):
+
+| Probe | Server | Result | Successes | Failures | Net | Status |
+|-------|--------|--------|-----------|----------|-----|--------|
+| 1 | Server A | Public | 1 | 0 | +1 | Unknown |
+| 2 | Server B | Public | 2 | 0 | +2 | **Public** (min confidence reached) |
+| 3 | Server C | Public | 3 | 0 | +3 | Public (high confidence) |
+
+**Example under port-restricted NAT** (address is unreachable):
+
+| Probe | Server | Result | Successes | Failures | Net | Status |
+|-------|--------|--------|-----------|----------|-----|--------|
+| 1 | Server A | Private | 0 | 1 | -1 | Unknown |
+| 2 | Server B | Private | 0 | 2 | -2 | **Private** (min confidence reached) |
+| 3 | Server C | Private | 0 | 3 | -3 | Private (high confidence) |
+
+**Example under address-restricted NAT** (false positive scenario):
+
+| Probe | Server | Result | Successes | Failures | Net | Status |
+|-------|--------|--------|-----------|----------|-----|--------|
+| 1 | Server A | Public | 1 | 0 | +1 | Unknown |
+| 2 | Server B | Public | 2 | 0 | +2 | **Public** (false positive) |
+| 3 | Server C | Public | 3 | 0 | +3 | Public (high confidence) |
+
+The false positive occurs because the client already has connections to the
+servers, and address-restricted NAT allows any port from a known IP.
+
+### Step 12: Reachability Event
+
+Once confidence is reached, the host emits a reachability event:
+
+- **At least one address is Public** → Node is reachable. Stop using relays,
+  advertise direct addresses to the network.
+- **All addresses are Private** → Node is behind NAT. Connect to relay
+  servers, advertise relay addresses instead.
+
+After the initial determination, addresses are **re-probed periodically**
+to detect network changes (e.g., NAT type change, IP change, firewall rule
+change):
+
+- High-confidence primary address: re-probe every **1 hour**
+- High-confidence secondary address: re-probe every **3 hours**
+- Refresh ticker: check every **5 minutes** if any address is stale
+- New address detected: probe after **1 second**
+
+---
+
+## Complete Protocol Diagrams
+
+### Happy Path (Same IP, No Amplification)
 
 ```
 Client                                          Server
   |                                                |
   |  [1] Open stream: /libp2p/autonat/2/dial-request
-  |------ DialRequest{nonce, addrs[]} ------------>|
+  |---- DialRequest{nonce, addrs[]} -------------->|
   |                                                |
   |        Server selects first dialable addr (i)  |
   |        addr[i] IP == client's observed IP      |
   |        → skip amplification prevention         |
   |                                                |
   |  [2] Server opens NEW connection to addr[i]    |
-  |      using a separate dialerHost (different     |
-  |      peer ID, different port)                   |
+  |      using separate host (different peer ID,   |
+  |      different source port)                    |
   |                                                |
-  |<----- [new conn] /libp2p/autonat/2/dial-back --|
-  |       DialBack{nonce} -------------------------|
+  |<--- [new conn] /libp2p/autonat/2/dial-back ----|
+  |     DialBack{nonce} ---------------------------|
   |                                                |
-  |  [3] Client verifies nonce + address consistency
-  |       DialBackResponse{OK} ------------------->|
-  |       (client closes dial-back stream)          |
+  |  [3] Client verifies nonce + address           |
+  |     DialBackResponse{OK} --------------------->|
+  |     (client closes dial-back stream)           |
   |                                                |
-  |  [4] Server reports result on original stream   |
-  |<----- DialResponse{OK, addrIdx=i, dialStatus=OK}
-  |       (server closes dial-request stream)       |
+  |  [4] Server reports result on original stream  |
+  |<--- DialResponse{OK, addrIdx=i, dialStatus=OK} |
+  |     (server closes dial-request stream)        |
 ```
 
-### Happy Path (different IP — amplification prevention)
-
-When the address to dial has a different IP than the client's observed
-connection IP, the server imposes a data cost before dialing:
+### With Amplification Prevention (Different IP)
 
 ```
 Client                                          Server
   |                                                |
-  |------ DialRequest{nonce, addrs[]} ------------>|
+  |---- DialRequest{nonce, addrs[]} -------------->|
   |                                                |
   |        addr[i] IP != client's observed IP      |
-  |        → require dial data                     |
+  |        → require dial data first               |
   |                                                |
-  |<----- DialDataRequest{addrIdx=i, numBytes=N} --|
+  |<--- DialDataRequest{addrIdx=i, numBytes=N} ----|
   |                                                |
-  |------ DialDataResponse{data: 4096B} ---------->|
-  |------ DialDataResponse{data: 4096B} ---------->|
-  |------ ... (until >= N bytes sent) ------------>|
+  |---- DialDataResponse{data: 4096B} ------------>|
+  |---- DialDataResponse{data: 4096B} ------------>|
+  |---- ... (until >= N bytes sent) -------------->|
   |                                                |
   |        Server waits random [0, 3s]             |
   |        Server dials addr[i]                    |
   |                                                |
-  |<----- [new conn] DialBack{nonce} --------------|
-  |------ DialBackResponse{OK} ------------------->|
+  |<--- [new conn] DialBack{nonce} ----------------|
+  |---- DialBackResponse{OK} --------------------->|
   |                                                |
-  |<----- DialResponse{OK, addrIdx=i, dialStatus=OK}
+  |<--- DialResponse{OK, addrIdx=i, dialStatus=OK} |
 ```
 
-### Failure Cases
+### Dial-Back Blocked by NAT
 
-| Scenario | Server Response |
-|----------|----------------|
-| Rate limited / resource exhaustion | `DialResponse{status: E_REQUEST_REJECTED}` |
-| Server can't dial any provided address | `DialResponse{status: E_DIAL_REFUSED}` |
-| Dial attempt fails (unreachable) | `DialResponse{status: OK, dialStatus: E_DIAL_ERROR}` |
-| Dial succeeds but stream fails | `DialResponse{status: OK, dialStatus: E_DIAL_BACK_ERROR}` |
-| Internal server error | `DialResponse{status: E_INTERNAL_ERROR}` |
+```
+Client                                          Server
+  |                                                |
+  |---- DialRequest{nonce, addrs[]} -------------->|
+  |                                                |
+  |        Server dials addr[i]...                 |
+  |        NAT drops incoming packet               |
+  |        Connection times out (10s)              |
+  |                                                |
+  |<--- DialResponse{OK, addrIdx=i,               |
+  |      dialStatus=E_DIAL_ERROR} -----------------|
+  |                                                |
+  |  Client records: PRIVATE                       |
+```
 
-## Message Format
+### Server Rejects or Refuses
+
+```
+Client                                          Server
+  |                                                |
+  |---- DialRequest{nonce, addrs[]} -------------->|
+  |                                                |
+  |  Case A: Rate limited                          |
+  |<--- DialResponse{E_REQUEST_REJECTED} ----------|
+  |                                                |
+  |  Case B: No dialable address                   |
+  |<--- DialResponse{E_DIAL_REFUSED} --------------|
+  |                                                |
+  |  Client: discard, try another server           |
+```
+
+---
+
+## End-to-End Outcomes by NAT Type
+
+### No NAT
+
+```
+Step 1-3:  Peers report client's real public IP
+Step 4:    Address activates after 4 peers confirm it
+Step 5-8:  Server dials back successfully (no NAT to block)
+Step 9-10: DialResponse OK + nonce verified → Public
+Step 11:   3 successes → high confidence Public
+Step 12:   Address is Public ✓ (correct)
+```
+
+### Full Cone NAT (EIM + EIF)
+
+```
+Step 1-3:  All peers see same external IP:port (EIM)
+Step 4:    Address activates after 4 peers confirm it
+Step 5-8:  NAT allows any inbound (EIF) → dial-back succeeds
+Step 9-10: DialResponse OK + nonce verified → Public
+Step 11:   3 successes → high confidence Public
+Step 12:   Address is Public ✓ (correct — genuinely reachable by anyone)
+```
+
+### Address-Restricted NAT (EIM + ADF)
+
+```
+Step 1-3:  All peers see same external IP:port (EIM)
+Step 4:    Address activates after 4 peers confirm it
+Step 5-8:  NAT allows server's IP (already contacted, ADF) → dial-back succeeds
+Step 9-10: DialResponse OK + nonce verified → Public
+Step 11:   3 successes → high confidence Public
+Step 12:   Address is Public ⚠ (FALSE POSITIVE — only reachable from known IPs)
+```
+
+**Why this is a false positive**: ADF filtering allows inbound from any port
+of an IP the client has previously contacted. Since the client already has a
+connection to the server's IP, the dial-back from a different port passes the
+filter. A brand new peer from an unknown IP would be blocked. AutoNAT v2
+cannot detect this — it would require a completely independent third party
+(one the client has never communicated with) to perform the dial-back.
+
+### Port-Restricted NAT (EIM + APDF)
+
+```
+Step 1-3:  All peers see same external IP:port (EIM)
+Step 4:    Address activates after 4 peers confirm it
+Step 5-8:  NAT requires exact IP:port match (APDF) → dial-back from new port blocked
+Step 9-10: DialResponse OK + dialStatus E_DIAL_ERROR → Private
+Step 11:   3 failures → high confidence Private
+Step 12:   Address is Private ✓ (correct — unreachable from new source ports)
+```
+
+### Symmetric NAT (ADPM + APDF)
+
+```
+Step 1-3:  Each peer sees different external port (ADPM)
+Step 4:    No address reaches activation threshold (4 observations)
+           → Address never activates → AutoNAT v2 never runs for this address
+```
+
+If the address *were* to be probed (e.g., with a lowered activation
+threshold):
+
+```
+Step 5-8:  NAT blocks dial-back (APDF filtering + wrong mapping)
+Step 9-10: DialResponse OK + dialStatus E_DIAL_ERROR → Private
+Step 11:   3 failures → high confidence Private
+Step 12:   Address is Private ✓ (correct)
+```
+
+In default go-libp2p, the client falls back to AutoNAT v1 which provides a
+coarse "private" verdict. The outcome is correct either way — symmetric NAT
+addresses are genuinely unreachable since the external port is unpredictable.
+
+---
+
+## Protobuf Wire Format
 
 All messages on the dial-request stream are wrapped in a `Message` envelope:
 
@@ -238,34 +758,33 @@ message Message {
 Messages on the dial-back stream are sent directly (no wrapper).
 
 ### DialRequest
+
 ```protobuf
 message DialRequest {
     repeated bytes addrs = 1;  // multiaddrs, priority descending
     fixed64 nonce = 2;         // random 64-bit verification token
 }
 ```
-- `addrs`: up to 50 addresses inspected (go-libp2p). Ordered by descending
-  priority — the server picks the first one it can dial.
-- `nonce`: random value the server must echo back on the dial-back connection.
 
 ### DialDataRequest
+
 ```protobuf
 message DialDataRequest {
     uint32 addrIdx  = 1;  // zero-based index of selected address
-    uint64 numBytes = 2;  // bytes the client must send [30,000–100,000)
+    uint64 numBytes = 2;  // bytes the client must send [30,000 – 100,000)
 }
 ```
 
 ### DialDataResponse
+
 ```protobuf
 message DialDataResponse {
     bytes data = 1;  // max 4096 bytes per message, min 100 bytes
 }
 ```
-Only the `data` field byte count counts toward the `numBytes` total — protobuf
-framing overhead is excluded.
 
 ### DialBack (on dial-back stream)
+
 ```protobuf
 message DialBack {
     fixed64 nonce = 1;
@@ -273,6 +792,7 @@ message DialBack {
 ```
 
 ### DialBackResponse (on dial-back stream)
+
 ```protobuf
 message DialBackResponse {
     enum DialBackStatus { OK = 0; }
@@ -281,6 +801,7 @@ message DialBackResponse {
 ```
 
 ### DialResponse
+
 ```protobuf
 message DialResponse {
     ResponseStatus status = 1;
@@ -305,373 +826,23 @@ enum DialStatus {
 
 `addrIdx` and `dialStatus` are only meaningful when `status == OK`.
 
-## Server Behavior (go-libp2p)
-
-### Address Selection
-
-The server iterates the client's address list in order and picks the **first
-address it can dial**. An address is dialable if:
-- The server's `dialerHost` transport supports it
-- It's not a private/loopback address (unless `allowPrivateAddrs` is set)
-- The server has the necessary connectivity (e.g., IPv4 for an IPv4 address)
-
-If no address is dialable, the server returns `E_DIAL_REFUSED`.
-
-### Dial-Back Mechanism
-
-The server uses a **separate `dialerHost`** — a dedicated libp2p host with:
-- Its own private key (different peer ID from the server)
-- No reuse of existing connections
-- `network.WithForceDirectDial` to prevent relay usage
-- `swarm.WithReadOnlyBlackHoleDetector` to avoid corrupting black hole detection
-
-After the dial-back completes, the server immediately closes the connection
-(`ClosePeer` + `ClearAddrs` + `RemovePeer`). To ensure the nonce is delivered
-before disconnecting, the server does:
-1. Write `DialBack{nonce}` to the stream
-2. `CloseWrite()` — signal end of writing
-3. `Read(1 byte)` with 5-second deadline — wait for client confirmation
-
-### Rate Limiting
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `serverRPM` | 60 | Global requests per minute (1/sec) |
-| `serverPerPeerRPM` | 12 | Per-peer requests per minute (1/5sec) |
-| `serverDialDataRPM` | 12 | Dial-data requests per minute (1/5sec) |
-| `maxConcurrentRequestsPerPeer` | 2 | Max simultaneous requests from one peer |
-
-Uses a 1-minute sliding window. Rate limit is checked BEFORE reading the request
-message. The dial-data rate limit is checked separately AFTER determining dial
-data is needed.
-
-### Amplification Prevention
-
-**Triggers when**: selected address IP != client's observed connection IP.
-
-**Cost**: client must send `rand(30000, 100000)` bytes of data in 4096-byte
-chunks (minimum 100 bytes per chunk to prevent compute exhaustion).
-
-**Additional mitigation**: after receiving dial data, the server waits a random
-`[0, 3s]` delay before dialing (anti-thundering-herd).
-
-## Client Behavior (go-libp2p)
-
-### Server Discovery
-
-AutoNAT servers are discovered passively via the event bus:
-- `EvtPeerIdentificationCompleted` — when identify reveals a peer supports
-  `/libp2p/autonat/2/dial-request`
-- `EvtPeerProtocolsUpdated` — when a peer's protocol list changes
-- `EvtPeerConnectednessChanged` — when a peer connects/disconnects
-
-A peer is eligible when it is **connected** AND supports the dial-request protocol.
-
-### Server Selection
-
-When a reachability probe is needed:
-1. Eligible peers are iterated in **random order** (shuffled)
-2. Peers whose throttle timer has not expired are skipped
-3. First unthrottled peer is selected and throttled for **2 minutes**
-4. If no peers available, `ErrNoPeers` is returned
-
-### Reachability Interpretation
-
-| Server Response | Client Interpretation |
-|-----------------|----------------------|
-| `dialStatus: OK` | **Public** (reachable) |
-| `dialStatus: E_DIAL_BACK_ERROR` | **Public** (connection succeeded, stream failed) |
-| `dialStatus: E_DIAL_ERROR` | **Private** (unreachable) |
-| `status: E_REQUEST_REJECTED` | No result — try another server |
-| `status: E_DIAL_REFUSED` | No result — try another server |
-
-Note: `E_DIAL_BACK_ERROR` is interpreted as **Public** because the server
-successfully established a connection to the address. The stream-level failure
-doesn't negate the network-level reachability.
-
-### Verification Steps
-
-Before accepting a dial-back result, the client verifies:
-
-1. **Nonce match**: the nonce received on the dial-back stream must match the
-   one sent in the DialRequest.
-2. **Address consistency**: the local address of the dial-back connection must be
-   consistent with the address that was tested. This handles DNS→IP resolution,
-   certhash stripping, and transport normalization.
-
-The client does NOT verify the peer ID of the dial-back connection — the server
-is explicitly allowed to use a different peer ID for dial-backs.
-
-### Confidence System
-
-The probing scheduler (`addrsReachabilityTracker`) maintains per-address confidence:
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `targetConfidence` | 3 | Net successes (or failures) needed for high confidence |
-| `minConfidence` | 2 | Minimum net difference to declare reachable/unreachable |
-| `maxRecentDialsWindow` | 5 | Sliding window of recent probe outcomes |
-| `maxConsecutiveRefusals` | 5 | Refusals before pausing probes for an address |
-
-**Reachability determination**:
-- `successes - failures >= minConfidence` → **Public**
-- `failures - successes >= minConfidence` → **Private**
-- Otherwise → **Unknown** (keep probing)
-
-**Re-probe intervals**:
-- High-confidence primary address: every **1 hour**
-- High-confidence secondary address: every **3 hours**
-- After consecutive refusals: pause for **10 minutes**
-- New address detected: probe after **1 second** delay
-- Refresh ticker: every **5 minutes**
-
-### Primary vs Secondary Addresses
-
-Addresses are grouped by "thin waist" (IP + transport port). Within each group:
-- **Primary**: simplest transport (QUIC-v1 or TCP)
-- **Secondary**: higher-level transports (WebTransport, WebRTC, WSS)
-
-A secondary address inherits `ReachabilityPublic` from its primary. Rationale:
-if the port is network-reachable, protocol-level failures in secondary
-transports typically mean the probing peer doesn't support that transport, not
-that the address is unreachable.
+---
 
 ## Timeouts
 
 | Timeout | Value | Context |
 |---------|-------|---------|
-| Stream deadline (dial-request) | 15 seconds | Entire request-response exchange |
-| Dial-back stream deadline | 5 seconds | Dial-back nonce exchange |
-| Dial-back dial timeout | 10 seconds | Server's connection attempt to client |
-| Amplification delay | 0–3 seconds (random) | Wait after dial data before dialing |
-| Dial-back confirmation read | 5 seconds | Server waits for client to ACK nonce |
+| Dial-request stream deadline | 15s | Entire request-response exchange |
+| Dial-back stream deadline | 5s | Client waiting for nonce on dial-back stream |
+| Dial-back dial timeout | 10s | Server's connection attempt to client |
+| Amplification delay | 0-3s (random) | Server waits after receiving dial data |
+| Dial-back confirmation read | 5s | Server waits for client to ACK nonce |
 
-## Integration with Other Protocols
-
-### [Identify](https://github.com/libp2p/specs/blob/master/identify/README.md)
-The Identify protocol serves two roles in AutoNAT v2:
-
-1. **Server discovery**: when Identify completes and reveals a peer supports
-   `/libp2p/autonat/2/dial-request`, that peer is added to the eligible servers pool.
-2. **Address discovery**: Identify reports the client's **observed address** —
-   the IP:port the remote peer sees. For a node behind NAT, this is the router's
-   external address. The client uses these observed addresses as candidates to
-   verify via AutoNAT v2.
-
-### Observed Address Activation
-
-go-libp2p does **not** immediately accept an observed address from a single peer.
-The `ObservedAddrManager` (`p2p/host/observedaddrs/manager.go`) requires multiple
-independent confirmations before an address is "activated" and added to the
-host's advertised address list.
-
-**Key parameters:**
-- `ActivationThresh = 4` — an observed address must be reported by **at least 4
-  distinct observers** before it's activated.
-- For **IPv4**, each individual IP counts as a separate observer (no subnet grouping).
-- For **IPv6**, all addresses in the same `/56` prefix count as a single observer.
-- Maximum 3 external addresses per local (listen) address.
-
-**Testbed implications:** A Docker testbed with servers on the same subnet
-(e.g., `73.0.0.0/24`) needs at least 4 servers with distinct IPs for the
-client to activate its observed public address. With fewer than 4 servers,
-the observed address never meets the threshold and AutoNAT probing never
-starts. The Heathrow local experiment worked because IPFS bootstrap peers are
-on diverse IPs (5 peers on different /16 networks → 5 distinct observers).
-
-`ActivationThresh` is a package-level `var` (not `const`), so it can be
-overridden for testing:
-```go
-import "github.com/libp2p/go-libp2p/p2p/host/observedaddrs"
-
-func init() {
-    observedaddrs.ActivationThresh = 2
-}
-```
-
-### Transport-Specific Probing Behavior (Docker Testbed Finding)
-
-In the Docker testbed with port-restricted NAT and `OBS_ADDR_THRESH=2`:
-
-- **TCP observed address**: Activated at ~5s, probed by 3 servers in ~1s, correctly
-  determined as **unreachable**. The full flow completed in ~6s total.
-- **QUIC observed address**: Activated at ~5s, but probing **never completed** within
-  120+ seconds. The address stayed as "unknown" indefinitely.
-
-**Root cause**: With port-restricted NAT (iptables `--to-ports` + MASQUERADE), the
-AutoNAT v2 dial-back over QUIC/UDP cannot complete because:
-1. The server's dial-back comes from a different source port than what the client
-   originally connected to
-2. Port-restricted NAT drops the incoming UDP packet since it doesn't match any
-   existing NAT mapping
-3. TCP dial-back also gets blocked, but the timeout is shorter and the probing
-   framework handles it correctly, marking the address as unreachable
-
-**Practical implication**: AutoNAT v2 probing results may differ by transport even
-for the same NAT type. QUIC addresses behind restrictive NATs may never get a
-definitive reachability result, while TCP addresses are correctly classified.
-
-### Non-Port-Preserving NAT Prevents Address Activation (Flight WiFi Finding)
-
-On networks with non-port-preserving NAT (symmetric NAT, CGNAT with port
-randomization), the observed address manager **never activates** a public address:
-
-1. Each outbound connection gets a different external port
-2. Peer A sees us as `/ip4/X.X.X.X/tcp/54321`, peer B sees `/ip4/X.X.X.X/tcp/54322`
-3. These are treated as different multiaddrs — each observed only once
-4. No single address reaches `ActivationThresh` (default 4)
-5. AutoNAT v2 has no addresses to probe; only v1 provides a result
-
-Observed on satellite in-flight WiFi (216.250.199.18 public IP, 711ms avg RTT):
-- 4/5 bootstrap peers connected, but no public address was ever activated
-- Only AutoNAT v1 fired (~31s to `private` result)
-- 1/3 runs showed oscillation (private → unknown), suggesting v1 instability
-  under high-latency conditions
-
-Compare with airport WiFi (port-preserving NAT, 55ms RTT):
-- Public address activated at ~5s (external port matched internal port)
-- AutoNAT v2 probed and confirmed unreachable
-- Stable `private` result at ~17s in 4/4 runs
-
-### Relay (Circuit v2)
-When AutoNAT v2 is enabled and no addresses are confirmed reachable, the host
-adds relay addresses to its advertised set. When at least one address is
-confirmed reachable, relay addresses are excluded.
-
-### Hole Punching
-`HolePunchAddrs()` returns all direct public addresses regardless of AutoNAT v2
-reachability status. This is correct because hole punching targets addresses
-behind NAT.
-
-### Black Hole Detector
-The AutoNAT v2 dialer host uses `ReadOnlyBlackHoleDetector` so failed dial-back
-attempts don't corrupt the node's black hole detection state.
-
-**Known bug (patched):** The original code shares `UDPBlackHoleSuccessCounter`
-between the main host and the `dialerHost`. On fresh servers with zero UDP
-connection history, the counter enters `Blocked` state, causing the
-`dialerHost` to refuse all QUIC/UDP dials (`filterKnownUndialables` returns
-`"dial refused because of black hole"`). Long-running nodes (Kubo) are
-unaffected because their counters accumulate enough successes to reach
-`Allowed` state. **Fix:** Set `UDPBlackHoleSuccessCounter: nil` with
-`CustomUDPBlackHoleSuccessCounter: true` to disable the detector for the
-`dialerHost` entirely. See `go-libp2p-patched/config/config.go`.
-
-## Spec vs Implementation
-
-This section documents where the go-libp2p implementation matches, extends, or
-diverges from the [AutoNAT v2 specification](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md).
-
-### Wire format
-
-The protobuf definition is **identical** to the spec. Protocol IDs match:
-`/libp2p/autonat/2/dial-request` and `/libp2p/autonat/2/dial-back`.
-
-### Spec compliance
-
-| Spec requirement | Status |
-|---|---|
-| Client sends `DialRequest{addrs, nonce}` | Matches |
-| Server picks first dialable address in order | Matches |
-| Server SHOULD NOT dial private addresses | Matches (`manet.IsPublicAddr` check) |
-| Client SHOULD NOT send private addresses | Matches (filtered in `GetReachability`) |
-| Amplification prevention when IP differs | Matches |
-| Dial data: 30k–100k bytes | Matches (`minHandshakeSizeBytes=30_000`, `maxHandshakeSizeBytes=100_000`) |
-| Dial data chunks max 4096 bytes | Matches (client uses 4000-byte buffer) |
-| Min 100 bytes per chunk | Matches (`readDialData` rejects < 100) |
-| Server uses separate peer ID for dial-back | Matches (fresh Ed25519 key) |
-| Nonce verification by client | Matches |
-| Client SHOULD NOT verify peer ID on dial-back | Matches |
-| Servers SHOULD NOT reuse listening port | Matches (separate dialer host) |
-
-### Implementation-specific behavior (not in spec)
-
-**Address consistency check**: The client verifies the dial-back connection's
-local address matches the tested address using `areAddrsConsistent()`. This does
-protocol-by-protocol comparison with special handling for DNS→IP resolution,
-`/wss`→`/tls/ws` normalization, `/sni` stripping, and certhash/p2p component
-removal. The spec only says "examining the local address of the connection."
-
-**`E_DIAL_BACK_ERROR` → Public**: The implementation treats `E_DIAL_BACK_ERROR`
-as reachable (Public) because the server successfully connected at the network
-level. The spec describes what the status means but does not prescribe how the
-client should interpret it.
-
-**`SendDialData` per-address**: Each `Request` has a `SendDialData` boolean.
-The client can accept amplification cost only for high-priority addresses and
-reject `DialDataRequest` for low-priority ones. Not in the spec.
-
-**Anti-thundering-herd delay**: After receiving dial data, the server waits a
-random `[0, 3s]` before dialing. Not in the spec.
-
-**Max message sizes**: `maxMsgSize=8192` (dial-request stream),
-`dialBackMaxMsgSize=1024` (dial-back stream). Not specified.
-
-**Confidence system**: The spec suggests "more than 3 servers report a successful
-dial" as a heuristic. The implementation uses a sliding window with
-`minConfidence=2`, `targetConfidence=3`, primary/secondary address grouping,
-exponential backoff, and per-address refusal tracking. See
-[Confidence System](#confidence-system) above.
-
-### Notable bug fixes
-
-| Version | Date | Fix |
-|---------|------|-----|
-| v0.41.1 | 2025-03-24 | **Amplification policy was comparing wrong addresses** — was comparing client's observed IP with the server's own local IP instead of the dial target. Dial data was almost always requested unnecessarily. |
-| v0.41.1 | 2025-03-24 | **DNS addresses not handled** — `manet.ToIP()` silently failed for DNS multiaddrs, always triggering dial data. |
-| v0.44.0 | 2025-10-07 | **WebSocket normalization** — `/wss` addresses weren't normalized to `/tls/ws` for address consistency checks. |
-
-### Implementation history across languages
-
-#### go-libp2p
-
-| Version | Date | AutoNAT v2 changes |
-|---------|------|-------------------|
-| v0.34.0 | 2024-05-20 | Initial autonatv2 implementation |
-| v0.37.0 | 2024-10-22 | Panic recovery added |
-| v0.40.0 | 2025-02-17 | Multiple concurrent requests per peer (default 2) |
-| v0.41.1 | 2025-03-24 | Critical bug fixes: amplification policy + DNS addr handling |
-| v0.42.0 | 2025-06-18 | `addrsReachabilityTracker` — autonatv2 becomes primary reachability mechanism; metrics added |
-| v0.43.0 | 2025-08-07 | Migrated to log/slog |
-| v0.44.0 | 2025-10-07 | WebSocket normalization fix; removed webrtc/webtransport dependency |
-| v0.47.0 | 2026-01-25 | Latest stable release |
-
-The protobuf wire format has not changed since the initial implementation.
-The core protocol (message exchange, nonce verification, amplification
-prevention) has been stable since v0.41.1 after the bug fixes above.
-
-#### rust-libp2p
-
-| Crate version | libp2p version | Date | AutoNAT v2 changes |
-|---------------|---------------|------|-------------------|
-| libp2p-autonat 0.13.0 | v0.54.1 | 2024-08-19 | Initial autonatv2 implementation ([PR #5526](https://github.com/libp2p/rust-libp2p/pull/5526)) |
-| libp2p-autonat 0.14.0 | v0.55.0 | 2025-01-15 | Verify dial comes from connected peer; deprecate `void` crate |
-| libp2p-autonat 0.15.0 | v0.56.0 | 2025-06-27 | Fix infinite loop on wrong nonce during dial-back ([PR #5848](https://github.com/libp2p/rust-libp2p/pull/5848)) |
-
-#### js-libp2p
-
-| Package version | Date | AutoNAT v2 changes |
-|-----------------|------|-------------------|
-| @libp2p/autonat-v2 1.0.0 | 2025-06-25 | Initial autonatv2 implementation ([PR #3196](https://github.com/libp2p/js-libp2p/pull/3196)) |
-| @libp2p/autonat-v2 2.0.0 | 2025-09-03 | Streams as EventTargets (breaking API change) |
-| @libp2p/autonat-v2 2.0.10 | 2026-01-16 | Latest release (dependency updates) |
-
-#### Timeline summary
-
-| Date | Milestone |
-|------|-----------|
-| 2024-05-20 | **go-libp2p** ships autonatv2 (v0.34.0) — first implementation |
-| 2024-08-19 | **rust-libp2p** ships autonatv2 (v0.54.1) |
-| 2025-03-24 | go-libp2p critical bug fixes (v0.41.1) |
-| 2025-06-18 | go-libp2p makes autonatv2 primary reachability mechanism (v0.42.0) |
-| 2025-06-25 | **js-libp2p** ships autonatv2 (@libp2p/autonat-v2 1.0.0) |
+---
 
 ## References
 
 - [AutoNAT v2 Specification](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md)
 - [Identify Specification](https://github.com/libp2p/specs/blob/master/identify/README.md)
-- [go-libp2p implementation](https://github.com/libp2p/go-libp2p/tree/master/p2p/protocol/autonatv2)
-- [go-libp2p address reachability tracker](https://github.com/libp2p/go-libp2p/blob/master/p2p/host/basic/addrs_reachability_tracker.go)
-- [rust-libp2p implementation](https://github.com/libp2p/rust-libp2p/tree/master/protocols/autonat/src/v2)
-- [js-libp2p implementation](https://github.com/libp2p/js-libp2p/tree/main/packages/protocol-autonat-v2)
-- [Amplification attack analysis (issue #640)](https://github.com/libp2p/specs/issues/640)
+- [go-libp2p AutoNAT v2 Implementation Details](go-libp2p-autonat-implementation.md)
+- [NAT Type Classification](https://www.rfc-editor.org/rfc/rfc4787)
