@@ -1,6 +1,6 @@
 # AutoNAT v2 Measurement Project — Planning
 
-Source: Notion project "Libp2p CF 2026" (exported 2026-02-25)
+Source: Notion project "Libp2p CF 2026" (exported 2026-02-27)
 
 ## Project Goals
 
@@ -16,40 +16,40 @@ Measure AutoNAT v2 behavior across different NAT types in a controlled lab:
 
 ## Task List
 
-`[x]` completed · `[-]` in progress · `[ ]` not started
+`[x]` completed · `[-]` in progress · `[?]` needs input · `[ ]` not started
 
 **Phase 0: Preparation**
 
-- [-] P0.1 — Study AutoNAT v2 specification
+- [x] P0.1 — Study AutoNAT v2 specification
 - [-] P0.2 — Review go-libp2p AutoNAT implementation
 
 **Phase 1: Core Setup**
 
 - [x] P1.1 — Set up minimal Docker topology
 - [x] P1.2 — Get AutoNAT working in test environment
-- [ ] P1.3 — Add basic OpenTelemetry tracing
-- [-] P1.4 — Implement first measurement: False Negative Rate
-- [x] P1.5 — Create simple test runner script
+- [-] P1.3 — Add basic OpenTelemetry tracing
+- [ ] P1.4 — Implement first measurement: False Negative Rate
+- [-] P1.5 — Create simple test runner script
 - [ ] P1.6 — Design controllable AutoNAT server interface
-- [ ] P1.7 — Implement controllable AutoNAT server
-- [ ] P1.8 — Integrate controllable servers into test framework
+- [?] P1.7 — Implement controllable AutoNAT server
+- [?] P1.8 — Integrate controllable servers into test framework
 
 **Phase 2: Symmetric NAT Testing**
 
 - [-] P2.1 — Implement Symmetric NAT configuration
-- [-] P2.2 — Run False Negative measurement for Symmetric NAT
+- [ ] P2.2 — Run False Negative measurement for Symmetric NAT
 
 **Phase 3: Additional Measurements**
 
-- [-] P3.1 — Implement False Positive Rate measurement
-- [-] P3.2 — Implement Time-to-Confidence measurement
+- [ ] P3.1 — Implement False Positive Rate measurement
+- [ ] P3.2 — Implement Time-to-Confidence measurement
 - [ ] P3.3 — Implement Time-to-Update measurement
 - [ ] P3.4 — Implement Protocol Overhead measurement *(low priority)*
 
 **Phase 4: Test Framework**
 
-- [ ] P4.1 — Define declarative test description schema
-- [ ] P4.2 — Build test parser and orchestrator
+- [-] P4.1 — Define declarative test description schema
+- [-] P4.2 — Build test parser and orchestrator
 - [-] P4.3 — Add latency simulation
 
 **Phase 5: Instrumentation & Analysis**
@@ -60,15 +60,15 @@ Measure AutoNAT v2 behavior across different NAT types in a controlled lab:
 
 **Phase 6: Measurement & Reporting**
 
-- [-] P6.1 — Run measurements across Port-Restricted and Symmetric NAT
-- [-] P6.2 — Analyze results and identify patterns
+- [?] P6.1 — Run measurements across Port-Restricted and Symmetric NAT
+- [?] P6.2 — Analyze results and identify patterns
 - [-] P6.3 — Draft findings report
 
 **Phase 7: Advanced NAT Types**
 
 - [-] P7.1 — Implement Restricted Cone (address-restricted) NAT configuration
 - [-] P7.2 — Implement Full Cone NAT configuration
-- [-] P7.3 — Run measurements for Restricted Cone and Full Cone NAT
+- [?] P7.3 — Run measurements for Restricted Cone and Full Cone NAT
 
 ---
 
@@ -89,7 +89,7 @@ recommendations (3+ server confirmations heuristic).
 
 #### P0.2 — Review go-libp2p AutoNAT implementation
 - **Status:** In progress
-- **Notes:** Deep-dived into `p2p/protocol/autonatv2/`, found black hole detector bug (#16b) and address-restricted false positive (#1)
+- **Notes:** Deep-dived into `p2p/protocol/autonatv2/`, found black hole detector limitation (#16b) and address-restricted false positive (#1). Documented in `docs/go-libp2p-autonat-implementation.md` and `docs/udp-black-hole-detector.md`
 
 Study the go-libp2p AutoNAT implementation: where AutoNAT state is managed,
 how state transitions occur, what events/callbacks exist, how confidence/
@@ -121,7 +121,7 @@ protocol runs and determines reachability, check logs for dial-back attempts,
 manually verify correct reachability status.
 
 #### P1.3 — Add basic OpenTelemetry tracing
-- **Status:** Not started
+- **Status:** In progress
 
 Instrument go-libp2p's AutoNAT with OpenTelemetry: span for each probe,
 events for dial-back success/failure and reachability status changes, attributes
@@ -131,7 +131,7 @@ go-libp2p's event bus can be used without code changes; if not, create minimal
 fork with instrumentation.
 
 #### P1.4 — Implement first measurement: False Negative Rate
-- **Status:** In progress
+- **Status:** Not started
 - **Notes:** Measured across all NAT types — no false negatives observed for port-restricted/symmetric NAT
 
 A "false negative" = node IS reachable but AutoNAT incorrectly reports
@@ -141,7 +141,7 @@ run AutoNAT, check if it correctly identifies as "public", count incorrect
 (total runs).
 
 #### P1.5 — Create simple test runner script
-- **Status:** Completed
+- **Status:** In progress
 - **Notes:** `testbed/run.sh`, `testbed/run-matrix.sh`, `testbed/run-local.sh`, `testbed/run-flight-wifi.sh`
 
 Script that orchestrates a complete test run: start Docker Compose, wait for
@@ -160,7 +160,7 @@ connection drops). 4) Selective behavior (different responses per address or
 over time).
 
 #### P1.7 — Implement controllable AutoNAT server
-- **Status:** Not started
+- **Status:** Needs input
 
 Implement the controllable server from P1.6. Options: wrapper around go-libp2p
 server (intercept dial-back, override based on config), custom implementation
@@ -169,7 +169,7 @@ Config via YAML/environment (response_type, probability, delay_ms, error
 injection settings).
 
 #### P1.8 — Integrate controllable servers into test framework
-- **Status:** Not started
+- **Status:** Needs input
 
 Integrate controllable servers into Docker testbed: Docker image accepting
 behavior config via env vars or mounted config, update docker-compose.yml to
@@ -190,7 +190,7 @@ iptables script, update router to accept NAT type as env var, update
 docker-compose.yml. Validate via STUN-based NAT type detection.
 
 #### P2.2 — Run False Negative measurement for Symmetric NAT
-- **Status:** In progress
+- **Status:** Not started
 - **Notes:** Correctly detected as private (~13-18s). v2 never fires (Issue #17: address activation threshold never met). Confirmed in testbed + flight WiFi field data
 
 Execute False Negative Rate measurement with symmetric NAT. Run same test
@@ -203,7 +203,7 @@ measurement data, comparison notes with port-restricted.
 ### Phase 3: Additional Measurements
 
 #### P3.1 — Implement False Positive Rate measurement
-- **Status:** In progress
+- **Status:** Not started
 - **Notes:** Discovered Issue #1: address-restricted NAT false positive. Filed as [go-libp2p#3467](https://github.com/libp2p/go-libp2p/issues/3467)
 
 A "false positive" = node is NOT reachable but AutoNAT reports "public". Set
@@ -212,7 +212,7 @@ incorrect "public" reports. For standard configs, false positives should be
 rare — high rates indicate protocol issues.
 
 #### P3.2 — Implement Time-to-Confidence measurement
-- **Status:** In progress
+- **Status:** Not started
 - **Notes:** Measured convergence times across NAT types (3-6s TCP reachable, 6-11s QUIC, 13-18s private). Formal metric not yet isolated
 
 Measure how long AutoNAT takes to reach a confident determination. Collect:
@@ -242,7 +242,7 @@ scenarios: idle node, varying peer counts, different re-check intervals.
 ### Phase 4: Test Framework
 
 #### P4.1 — Define declarative test description schema
-- **Status:** Not started
+- **Status:** In progress
 - **Notes:** Current approach uses shell scripts with flags (`--packet-loss`, `--latency`, `--tcp-block-port`, `--port-remap`)
 
 Design YAML schema for test scenarios: topology (nat_type, num_servers,
@@ -251,7 +251,7 @@ iteration count, timeout. Deliverables: schema definition (JSON Schema),
 example test files, documentation.
 
 #### P4.2 — Build test parser and orchestrator
-- **Status:** Not started
+- **Status:** In progress
 - **Notes:** `run-matrix.sh` partially covers this
 
 Tooling to execute tests from YAML descriptions: parse and validate against
@@ -272,19 +272,19 @@ low (10ms), medium (50ms), high (150ms), variable (high jitter).
 ### Phase 5: Instrumentation & Analysis
 
 #### P5.1 — Define implementation-agnostic trace format
-- **Status:** In progress
-- **Notes:** Current output is JSONL with event types: `started`, `connected`, `reachability_changed`, `reachable_addrs_changed`, `addresses_updated`. Not yet aligned with OTel
+- **Status:** Done
+- **Notes:** All output uses OpenTelemetry traces. Testbed lifecycle events are on an `autonat.session` span; AutoNAT v2 internals are separate spans (`autonatv2.refresh_cycle`, `autonatv2.server_selection`, `autonatv2.probe`). See `docs/otel-tracing.md`.
 
 Design a trace/event format that any libp2p implementation can emit (go, rust,
 js). Potentially add to libp2p specs.
 
 #### P5.2 — Document instrumentation requirements
-- **Status:** In progress
-- **Notes:** Events documented in `docs/testbed.md` output format section
+- **Status:** Done
+- **Notes:** Full span/event reference in `docs/otel-tracing.md`
 
 Specify what instrumentation other libp2p implementations need: events to emit
-(names, when, required/optional fields), export mechanism (OTel preferred,
-JSON Lines fallback), OTLP config, example implementations and pseudocode.
+(names, when, required/optional fields), export mechanism (OpenTelemetry),
+OTLP config, example implementations and pseudocode.
 
 #### P5.3 — Create trace analysis tooling
 - **Status:** Not started
@@ -301,7 +301,7 @@ raw data, optional visualizations.
 ### Phase 6: Measurement & Reporting
 
 #### P6.1 — Run measurements across Port-Restricted and Symmetric NAT
-- **Status:** In progress
+- **Status:** Needs input
 - **Notes:** Full matrix: 5 NAT types × 3 transports × 7 servers = 15 tests, all passing. Packet loss/latency experiments need re-run (testbed limitation: `none` NAT bypasses router)
 
 Execute the complete measurement suite across both supported NAT types. Run
@@ -310,7 +310,7 @@ metrics. Latency variations recommended (10ms, 100ms). Deliverables: complete
 dataset, summary tables, raw trace archives.
 
 #### P6.2 — Analyze results and identify patterns
-- **Status:** In progress
+- **Status:** Needs input
 - **Notes:** Two issues confirmed (#1 false positive, #16b QUIC black hole), two field-confirmed (#17 symmetric bypass, #8 v1 oscillation). Analysis in `docs/report.md`
 
 Analyze measurement data: cross-NAT comparison (do rates differ by NAT type?),
@@ -352,7 +352,7 @@ forwarding. Limitation: requires knowing ports in advance (not dynamic).
 Document limitations. Validate via STUN.
 
 #### P7.3 — Run measurements for Restricted Cone and Full Cone NAT
-- **Status:** In progress
+- **Status:** Needs input
 - **Notes:** Full-cone: correctly reachable. Address-restricted: false positive confirmed (Issue #1)
 
 Execute measurement suite for restricted cone and full cone NAT. Document
@@ -364,31 +364,32 @@ results.
 
 ## Summary
 
-| Phase | Total | Completed | In Progress | Not Started |
-|-------|-------|-----------|-------------|-------------|
-| Phase 0: Preparation | 2 | 0 | 2 | 0 |
-| Phase 1: Core Setup | 7 | 0 | 4 | 3 |
-| Phase 2: Symmetric NAT | 2 | 0 | 2 | 0 |
-| Phase 3: Measurements | 4 | 0 | 2 | 2 |
-| Phase 4: Test Framework | 3 | 0 | 1 | 2 |
-| Phase 5: Instrumentation | 3 | 0 | 2 | 1 |
-| Phase 6: Reporting | 3 | 0 | 3 | 0 |
-| Phase 7: Advanced NATs | 3 | 0 | 3 | 0 |
-| **Total** | **27** | **0** | **19** | **8** |
+| Phase | Total | Done | In Progress | Needs Input | Not Started |
+|-------|-------|------|-------------|-------------|-------------|
+| Phase 0: Preparation | 2 | 1 | 1 | 0 | 0 |
+| Phase 1: Core Setup | 8 | 3 | 2 | 2 | 1 |
+| Phase 2: Symmetric NAT | 2 | 0 | 1 | 0 | 1 |
+| Phase 3: Measurements | 4 | 0 | 0 | 0 | 4 |
+| Phase 4: Test Framework | 3 | 0 | 3 | 0 | 0 |
+| Phase 5: Instrumentation | 3 | 0 | 2 | 0 | 1 |
+| Phase 6: Reporting | 3 | 0 | 1 | 2 | 0 |
+| Phase 7: Advanced NATs | 3 | 0 | 2 | 1 | 0 |
+| **Total** | **28** | **4** | **12** | **5** | **7** |
 
 ## Key Deliverables
 
-- [-] Docker testbed with 5 NAT types — `testbed/docker/compose.yml`
-- [-] NAT verification test suite — `tests/verify-nat.sh` (12/12 pass)
-- [-] Baseline test matrix (15/15 pass) — `testbed/run-matrix.sh`
-- [-] QUIC dial-back fix — `go-libp2p-patched/config/config.go`
-- [-] Filed Issue #1 on go-libp2p — https://github.com/libp2p/go-libp2p/issues/3467
+- [x] Docker testbed with 5 NAT types — `testbed/docker/compose.yml`
+- [x] NAT verification test suite — `testbed/verify-nat.sh` (12/12 pass)
+- [x] Baseline test matrix (15/15 pass) — `testbed/run.sh`
+- [x] QUIC dial-back workaround — see `docs/udp-black-hole-detector.md`
+- [x] Filed Issue #1 on go-libp2p — https://github.com/libp2p/go-libp2p/issues/3467
 - [-] Hotel WiFi + Flight WiFi testbed reproductions
 - [-] Findings report — `docs/report.md`
-- [ ] OpenTelemetry tracing integration
+- [-] OpenTelemetry tracing integration — `docs/otel-tracing.md`
+- [-] Protocol documentation — `docs/autonat-v2.md`, `docs/go-libp2p-autonat-implementation.md`
 - [ ] Packet loss / latency experiments (need re-run with `full-cone` NAT)
 - [ ] Time-to-Update measurement
-- [ ] Controllable AutoNAT server for rate-limit testing
+- [?] Controllable AutoNAT server for rate-limit testing
 - [ ] Trace analysis tooling
 
 ## Outstanding Issues

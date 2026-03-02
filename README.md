@@ -82,13 +82,13 @@ reachable. A node cannot know on its own whether it sits behind a NAT — it
 needs an external peer to try connecting to it.
 
 In AutoNAT v2, the client sends a
-[DialRequest](docs/autonat-v2.md#protocol-flow) containing its addresses and a
+[DialRequest](docs/autonat-v2.md#messages) containing its addresses and a
 random nonce. The server selects an address and attempts to **dial back** to
 the client using a separate connection (different peer ID, different source
 port). If the connection succeeds and the nonce matches, the address is
 confirmed reachable. The client repeats this with multiple servers to build
-[confidence](docs/autonat-v2.md#confidence-system) (default: 3 confirmations
-needed).
+[confidence](docs/autonat-v2.md#step-11-confidence-accumulation) (default: 3
+confirmations needed).
 
 Key design choices in v2 compared to [v1](https://github.com/libp2p/specs/blob/master/autonat/autonat-v1.md):
 - Tests **individual addresses** rather than the node as a whole
@@ -100,7 +100,7 @@ implementation details, see [AutoNAT v2 Protocol](docs/autonat-v2.md).
 
 ### Detection Issues in Production
 
-AutoNAT v2 results are unreliable in production. Nodes report incorrect
+AutoNAT v2 results may be unreliable in production. Nodes report incorrect
 reachability — false positives, false negatives, and oscillating detection.
 Incorrect reachability has real consequences:
 
@@ -168,129 +168,37 @@ three real-world field experiments (airport, in-flight WiFi, hotel WiFi).
 See [Testbed & Experiments](docs/testbed.md) for the full architecture and
 experiment catalog.
 
-## How It Works
-
-The lab creates a Docker network topology with:
-- A **NAT router** container (Alpine + iptables) that simulates different NAT types
-- **AutoNAT server** containers (go-libp2p nodes)
-- A **client** container behind the NAT router
-
-The client probes the servers to determine its reachability. We compare the
-detected result against the ground truth (we know the NAT type because we
-configured it).
-
-```
-┌─────────────── public-net ──────────────────┐
-│  server-1    server-2    ...    server-N     │
-│  router (public side)                        │
-└─────────────────────────────────────────────┘
-
-┌─────────────── private-net ─────────────────┐
-│  router (private side, runs NAT)             │
-│  client (test subject)                       │
-└─────────────────────────────────────────────┘
-```
-
 ## Quick Start
 
 ```bash
-# Build the node binary and router image
-docker compose -f testbed/docker/compose.yml build
-
-# Run the full experiment matrix (40 scenarios)
-./testbed/run.sh testbed/scenarios/matrix.yaml
-
-# Preview what will run
+# Preview the full matrix (40 scenarios) without running anything
 ./testbed/run.sh testbed/scenarios/matrix.yaml --dry-run
 
-# Run a single scenario subset
+# Run a single scenario
 ./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=none,transport=quic,server_count=5
 
-# Run the flight WiFi reproduction
-./testbed/run.sh testbed/scenarios/flight-wifi.yaml
+# Run the full matrix
+./testbed/run.sh testbed/scenarios/matrix.yaml
 
-# Results are saved to results/testbed/, results/local/, etc.
-ls results/
-```
-
-## Local (Non-Docker) Mode
-
-Run the AutoNAT client directly on your machine behind your real NAT,
-connecting to public IPFS/libp2p servers. Useful for gathering baseline
-results and comparing with the Docker testbed:
-
-```bash
-# Single run with default settings (both transports, 120s timeout)
-./testbed/run-local.sh
-
-# QUIC only, shorter timeout
-./testbed/run-local.sh --transport=quic --timeout=60
-
-# Multiple runs to check consistency
+# Run directly on your machine (no Docker, real network)
 ./testbed/run-local.sh --runs=3 --label=home-wifi
 ```
 
-Results are saved to `results/local/` with the same structure as
-testbed results.
-
-## Public Server Mode
-
-Instead of local servers, the client can bootstrap to the real IPFS/libp2p
-network and use actual public AutoNAT servers:
-
-```bash
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=ipfs-network
-```
-
-This tests the same NAT scenarios against real infrastructure. Requires
-internet access.
-
-## Verifying the NAT Testbed
-
-Before running AutoNAT experiments, verify that the NAT simulation itself is
-correct. The test suite uses plain TCP/UDP (no libp2p) to confirm each NAT
-type's filtering and mapping behavior:
-
-```bash
-# Run all 12 tests across all 5 NAT types (~3 minutes)
-./testbed/verify-nat.sh
-
-# Run a single NAT type
-./testbed/verify-nat.sh address-restricted
-```
-
-See [docs/testbed.md](docs/testbed.md) for the full test matrix and
-iptables implementation details.
+See [Running Experiments](testbed/README.md) for all options, scenario files,
+filtering, and Docker compose usage.
 
 ## Documentation
 
-- [AutoNAT v2 Protocol](docs/autonat-v2.md) — protocol spec and go-libp2p implementation
+- [AutoNAT v2 Protocol](docs/autonat-v2.md) — protocol walkthrough from the client perspective
+- [go-libp2p Implementation](docs/go-libp2p-autonat-implementation.md) — implementation details, constants, confidence system
+- [UDP Black Hole Detector](docs/udp-black-hole-detector.md) — detector interaction with AutoNAT v2, testbed workaround
 - [Findings Report](docs/report.md) — confirmed issues, root cause analysis
 - [Testbed & Experiments](docs/testbed.md) — Docker architecture, iptables rules, experiment catalog
+- [OpenTelemetry Tracing](docs/otel-tracing.md) — trace format, span hierarchy, querying traces
+- [Running Experiments](testbed/README.md) — quick start, scenario files, runner usage
 - [Project Planning](docs/planning.md) — task tracking and phases
 - [Obol Impact](docs/obol.md) — impact analysis for Obol Network
 - [Avail Impact](docs/avail.md) — impact analysis for Avail Network
-
-## Network Layout
-
-```
-public-net  (73.0.0.0/24)   servers + router public side
-private-net (10.0.1.0/24)   client + router private side
-```
-
-The public network uses a non-reserved range (73.0.0.0/24) because go-libp2p's
-`manet.IsPublicAddr()` filters all private, reserved, and CGNAT ranges. The
-router's public IP (73.0.0.2) is what servers report as the client's observed
-address via Identify, and AutoNAT v2 only probes addresses that pass
-`IsPublicAddr()`. The private network uses a standard RFC 1918 range (10.0.1.0/24)
-— the client's private address is correctly filtered, just like in production.
-
-## Requirements
-
-- **Native Linux host** (Docker Desktop on macOS does not work — see
-  [docs/testbed.md](docs/testbed.md#requirements) for details)
-- Tested on Ubuntu 22.04
-- Docker, Docker Compose, `yq`, `jq`, `python3`, Go toolchain
 
 ## Project Structure
 
@@ -300,24 +208,20 @@ autonat/
 ├── testbed/                 # Docker testbed, Go source, and runner scripts
 │   ├── main.go              # libp2p node binary (server + client roles)
 │   ├── go.mod               # Go module definition
-│   ├── go.sum               # Go dependency checksums
 │   ├── docker/              # Docker build files
-│   │   ├── compose.yml      # Network topology (profiles: local, test, public)
+│   │   ├── compose.yml      # Network topology (profiles: local, test, public, mock)
 │   │   ├── node/            # AutoNAT node container
-│   │   │   ├── Dockerfile
-│   │   │   └── entrypoint.sh
 │   │   └── router/          # NAT router (iptables simulator)
-│   │       ├── Dockerfile
-│   │       └── entrypoint.sh
 │   ├── run.sh               # YAML-driven experiment runner
 │   ├── run-local.sh         # Local experiment runner (no Docker, real NAT)
-│   ├── eval-assertions.py   # Assertion evaluator for experiment logs
+│   ├── eval-assertions.py   # Assertion evaluator for OTEL traces
 │   ├── scenarios/           # YAML scenario definitions
 │   │   ├── matrix.yaml      # Full NAT × transport × server matrix (40 scenarios)
 │   │   ├── packet-loss.yaml # Packet loss sweep (6 scenarios)
 │   │   ├── high-latency.yaml# High latency sweep (4 scenarios)
 │   │   ├── hotel-wifi.yaml  # Hotel WiFi reproduction with assertions
-│   │   └── flight-wifi.yaml # Flight WiFi reproduction with assertions
+│   │   ├── flight-wifi.yaml # Flight WiFi reproduction with assertions
+│   │   └── mock-server.yaml # Mock server behaviors (8 scenarios)
 │   └── verify-nat.sh        # NAT verification (12 tests, no libp2p)
 └── results/                 # Experiment output (gitignored)
 ```

@@ -36,7 +36,7 @@ type LogEvent struct {
 var startTime time.Time
 
 func main() {
-	role := flag.String("role", "client", "Node role: server or client")
+	role := flag.String("role", "client", "Node role: server, client, or mock-server")
 	transport := flag.String("transport", "both", "Transport: tcp, quic, or both")
 	listenAddr := flag.String("listen", "0.0.0.0", "Listen IP address")
 	listenPort := flag.Int("port", 4001, "Listen port")
@@ -46,6 +46,8 @@ func main() {
 	addrFile := flag.String("addr-file", "", "Write this node's multiaddr to file (for server discovery)")
 	peerDir := flag.String("peer-dir", "", "Directory to read peer multiaddrs from (client reads server addr files)")
 	obsAddrThresh := flag.Int("obs-addr-thresh", 0, "Override observed address activation threshold (default: 0 = use go-libp2p default of 4)")
+	behaviorFlag := flag.String("behavior", "force-unreachable", "Mock server behavior (mock-server role only)")
+	delayFlag := flag.Int("delay", 0, "Mock server response delay in milliseconds (mock-server role only)")
 	flag.Parse()
 
 	if *obsAddrThresh > 0 {
@@ -70,6 +72,49 @@ func main() {
 
 	// Build listen addresses based on transport flag
 	listenAddrs := buildListenAddrs(*listenAddr, *listenPort, *transport)
+
+	// Mock server mode: skip the standard host entirely and use a custom one.
+	if *role == "mock-server" {
+		behavior, err := parseBehavior(*behaviorFlag)
+		if err != nil {
+			log.Fatalf("Invalid behavior: %v", err)
+		}
+		delay := time.Duration(*delayFlag) * time.Millisecond
+
+		ms, err := startMockServer(listenAddrs, behavior, delay)
+		if err != nil {
+			log.Fatalf("Failed to start mock server: %v", err)
+		}
+		defer ms.Close()
+
+		mockHost := ms.Host()
+		emitLog(logOutput, LogEvent{
+			Type:      "started",
+			PeerID:    mockHost.ID().String(),
+			Addresses: multiaddrsToStrings(mockHost.Addrs()),
+			Message:   fmt.Sprintf("role=mock-server behavior=%s delay=%s", behavior, delay),
+		})
+
+		log.Printf("Mock server started: %s (behavior=%s, delay=%s)", mockHost.ID(), behavior, delay)
+		for _, addr := range mockHost.Addrs() {
+			log.Printf("  Listening on: %s/p2p/%s", addr, mockHost.ID())
+		}
+
+		if *addrFile != "" {
+			writeAddrFile(mockHost, *addrFile)
+		}
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+
+		emitLog(logOutput, LogEvent{
+			Type:    "shutdown",
+			Message: "received signal, shutting down",
+		})
+		log.Println("Shutting down...")
+		return
+	}
 
 	// Build libp2p options
 	opts := []libp2p.Option{

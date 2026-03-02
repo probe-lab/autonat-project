@@ -1,15 +1,17 @@
 # Running Experiments
 
-Experiments are defined as YAML scenario files and executed by a single runner
-script (`run.sh`). Each scenario file specifies NAT types, transports, server
-counts, network conditions, and optional assertions. The runner expands
-matrices, starts Docker containers, monitors for convergence, evaluates
-assertions, and collects results.
+Practical guide for running experiments: commands, scenario files, YAML
+schema, filtering, assertions, and result output.
+
+For **testbed architecture** (Docker networking, iptables rules, NAT
+implementation, verification tests) and the **experiment catalog** (goals,
+expected results, status), see
+[Testbed Architecture & Experiments](../docs/testbed.md).
 
 ## Prerequisites
 
-See [docs/testbed.md](../docs/testbed.md#requirements) for host requirements
-(Linux only) and software installation instructions.
+See [Testbed Architecture](../docs/testbed.md#requirements) for host
+requirements (Linux only) and software installation instructions.
 
 ## Quick Start
 
@@ -34,19 +36,22 @@ See [docs/testbed.md](../docs/testbed.md#requirements) for host requirements
 
 All scenario files live in `testbed/scenarios/`:
 
-| File | Scenarios | Experiments | What it tests |
-|------|-----------|-------------|---------------|
-| `matrix.yaml` | 40 | 1-7, 11-12 | Full NAT type x transport x server count matrix |
-| `packet-loss.yaml` | 6 | 9 | Packet loss at 1%, 5%, 10% (full-cone, both transports) |
-| `high-latency.yaml` | 4 | 10 | Latency at 200ms, 500ms one-way (full-cone, both transports) |
-| `hotel-wifi.yaml` | 1 | 13 | TCP blocked on port 4001, port remap 4001:29538 |
-| `flight-wifi.yaml` | 3 runs | 14 | Symmetric NAT + 350ms latency (700ms RTT) |
+| File | Scenarios | What it tests |
+|------|-----------|---------------|
+| `matrix.yaml` | 40 | Full NAT type x transport x server count matrix |
+| `packet-loss.yaml` | 6 | Packet loss at 1%, 5%, 10% (full-cone, both transports) |
+| `high-latency.yaml` | 4 | Latency at 200ms, 500ms one-way (full-cone, both transports) |
+| `hotel-wifi.yaml` | 1 | TCP blocked on port 4001, port remap 4001:29538 |
+| `flight-wifi.yaml` | 3 runs | Symmetric NAT + 350ms latency (700ms RTT) |
+| `mock-server.yaml` | 8 | Mock server behaviors: reject, unreachable, reachable, wrong nonce, etc. |
 
-The last two include assertions that automatically validate expected behavior
-(e.g., "AutoNAT v2 should never fire under symmetric NAT").
+The WiFi scenarios include assertions that automatically validate expected
+behavior (e.g., "AutoNAT v2 should never fire under symmetric NAT"). The mock
+server scenarios test how an unmodified client reacts to controlled protocol
+responses.
 
-See [testbed.md](../docs/testbed.md) for detailed descriptions
-of each experiment, iptables rules, and the NAT verification test suite.
+See the [experiment catalog](../docs/testbed.md#experiment-catalog) for goals,
+expected results, and status of each experiment.
 
 ### matrix.yaml Breakdown
 
@@ -63,38 +68,20 @@ This produces 40 scenarios covering:
 | 30 local | 3, 5, 7 | All NAT types × both transports × 3 server counts |
 | 10 network | ipfs-network | All NAT types × both transports against real IPFS DHT |
 
-Use `--filter` to run the subsets that correspond to individual experiments:
+Use `--filter` to run subsets:
 
 ```bash
-# Exp 1: Baseline true positive (no NAT, 5 servers)
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=none,server_count=5
+# Single NAT type + transport + server count
+./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=none,transport=quic,server_count=5
 
-# Exp 2: Baseline true negative (symmetric NAT, 5 servers)
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=symmetric,server_count=5
-
-# Exp 3: NAT type matrix, TCP only
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=transport=tcp,server_count=5
-
-# Exp 4: NAT type matrix, QUIC only
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=transport=quic,server_count=5
-
-# Exp 5: Address-restricted deep dive (5 runs)
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=address-restricted,server_count=5 --runs=5
-
-# Exp 6-7: Server count impact (all server counts for a given NAT type)
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=none
+# All transports and server counts for one NAT type
 ./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=symmetric
 
-# Exp 11-12: Public server experiments only
+# Public IPFS server experiments only
 ./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=ipfs-network
 
-# All 30 local experiments (exclude ipfs-network)
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=3
+# All local experiments (exclude ipfs-network)
 ./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=5
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=server_count=7
-
-# Single NAT type across all server counts and transports
-./testbed/run.sh testbed/scenarios/matrix.yaml --filter=nat_type=port-restricted
 ```
 
 ## Runner Usage
@@ -192,12 +179,21 @@ matrix:
 | `timeout_s` | no | 120 | Max seconds to wait for convergence |
 | `runs` | no | 1 | Repeat this scenario N times |
 | `obs_addr_thresh` | no | auto | Observer address activation threshold (auto: 2 if servers<4, else 4) |
+| `mock_behaviors` | no | — | Array of 3 mock server behaviors (uses `mock` Docker profile instead of real servers) |
+| `mock_delays` | no | [0,0,0] | Array of 3 response delays in ms (one per mock server) |
 | `assertions` | no | — | List of assertions to evaluate against the experiment log |
 
 **Note on `packet_loss` and `latency_ms`:** These require traffic to flow
 through the router. `nat_type: none` places the client directly on `public-net`
 (bypassing the router), so use `full-cone` instead when testing network
 degradation.
+
+**Note on `mock_behaviors`:** When present, `server_count` is ignored. The
+runner uses the `mock` Docker profile (3 mock servers + `client-mock` on the
+public network). Each element sets the `--behavior` flag for the corresponding
+mock server. Valid behaviors: `reject`, `refuse`, `force-unreachable`,
+`internal-error`, `timeout`, `force-reachable`, `wrong-nonce`, `no-dialback-msg`.
+See [mock server behaviors](../docs/testbed.md#mock-server-behaviors) for details.
 
 **Note on `server_count: ipfs-network`:** The client bootstraps to the real
 IPFS/libp2p DHT and discovers actual AutoNAT v2 servers on the internet. The
@@ -207,7 +203,7 @@ local environment.
 
 ### Assertions
 
-Assertions are evaluated against the JSONL experiment log after each run by
+Assertions are evaluated against the OTEL trace file after each run by
 `eval-assertions.py`. Three types are supported:
 
 ```yaml
@@ -260,14 +256,16 @@ results/testbed/flight-wifi-20260225T110000Z/
   symmetric-both-5-lat350-run3.assertions.json
 ```
 
-Each `.json` file contains the experiment's JSONL event log. When assertions
-are present, a corresponding `.assertions.json` file contains the pass/fail
-results.
+Each `.json` file contains the experiment's OTEL trace output (one span per
+line). When assertions are present, a corresponding `.assertions.json` file
+contains the pass/fail results. See
+[OpenTelemetry Tracing](../docs/otel-tracing.md) for the span hierarchy,
+attributes, and querying examples.
 
 ## Local (Non-Docker) Mode
 
-`run-local.sh` runs the AutoNAT client directly on your machine (no Docker)
-against the real IPFS/libp2p network. It is not affected by the YAML runner:
+`run-local.sh` runs the AutoNAT client directly on your machine (no Docker,
+no simulated NAT) against the real IPFS/libp2p network:
 
 ```bash
 ./testbed/run-local.sh
@@ -276,6 +274,19 @@ against the real IPFS/libp2p network. It is not affected by the YAML runner:
 ```
 
 Results are saved to `results/local/`.
+
+This is similar to the `server_count=ipfs-network` mode (Docker `--profile
+public`), which also discovers AutoNAT servers from the real IPFS DHT.
+The difference is where the client runs:
+
+| Mode | Client runs | NAT | Server discovery |
+|------|-------------|-----|------------------|
+| `run-local.sh` | Directly on host | Host's real network (home WiFi, office, etc.) | Real IPFS DHT |
+| `ipfs-network` (Docker) | In container behind simulated NAT | Controlled via `NAT_TYPE` env var | Real IPFS DHT |
+
+Use `run-local.sh` to test how your actual network behaves. Use
+`ipfs-network` to test real IPFS servers under a specific, reproducible NAT
+configuration.
 
 ## Manual Docker Compose Usage
 
@@ -293,8 +304,22 @@ NAT_TYPE=none TRANSPORT=tcp $DC --profile 5servers up --build
 # Start with 7 servers
 NAT_TYPE=none $DC --profile 5servers --profile 7servers up --build
 
-# Public server mode (no local servers, real IPFS DHT)
+# Public server mode (no local servers, real IPFS DHT — same servers as run-local.sh)
 NAT_TYPE=symmetric $DC --profile public up --build
+
+# Mock servers: all force-unreachable
+MOCK_BEHAVIOR_1=force-unreachable MOCK_BEHAVIOR_2=force-unreachable \
+MOCK_BEHAVIOR_3=force-unreachable $DC --profile mock up --build
+
+# Mock servers: 2 reachable + 1 unreachable (majority reachable)
+MOCK_BEHAVIOR_1=force-reachable MOCK_BEHAVIOR_2=force-reachable \
+MOCK_BEHAVIOR_3=force-unreachable $DC --profile mock up --build
+
+# Mock servers: with 3s response delay
+MOCK_BEHAVIOR_1=force-unreachable MOCK_DELAY_1=3000 \
+MOCK_BEHAVIOR_2=force-unreachable MOCK_DELAY_2=3000 \
+MOCK_BEHAVIOR_3=force-unreachable MOCK_DELAY_3=3000 \
+$DC --profile mock up --build
 
 # Add network degradation
 NAT_TYPE=full-cone PACKET_LOSS=5 LATENCY_MS=100 $DC up --build
