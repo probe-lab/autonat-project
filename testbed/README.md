@@ -139,7 +139,8 @@ Scenario file: packet-loss.yaml (6 scenarios)
 ## YAML Schema
 
 Scenario files use either an explicit scenario list or a matrix that expands
-via Cartesian product:
+via Cartesian product. Exactly one of `scenarios` or `matrix` must be present
+at the root level (not both).
 
 ```yaml
 name: string              # Required. Identifier used in result directory names.
@@ -165,23 +166,47 @@ matrix:
   server_count: [3, 5, 7, ipfs-network]
 ```
 
+### Matrix Mode
+
+When using `matrix`, every field value **must be an array**. The runner computes
+the Cartesian product of all arrays to generate scenarios. Any scenario field
+listed below can appear in a matrix:
+
+```yaml
+matrix:
+  nat_type: [full-cone]
+  transport: [tcp, quic]
+  server_count: [7]
+  packet_loss: [1, 5, 10]       # 2 transports × 3 loss values = 6 scenarios
+```
+
+Fields not included in the matrix use their defaults. You cannot mix scalar
+values in a matrix — use `defaults` for fixed values and only put varying
+dimensions in `matrix`.
+
 ### Scenario Fields
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
+| Field | Required | Default | Valid values |
+|-------|----------|---------|--------------|
 | `nat_type` | yes | — | `none`, `full-cone`, `address-restricted`, `port-restricted`, `symmetric` |
 | `transport` | yes | — | `tcp`, `quic`, `both` |
-| `server_count` | yes | — | `3`, `5`, `7`, or `ipfs-network` (real IPFS DHT) |
-| `packet_loss` | no | 0 | Packet loss % applied via `tc netem` on router |
-| `latency_ms` | no | 0 | One-way latency in ms via `tc netem` (RTT = 2x) |
-| `tcp_block_port` | no | — | Block outbound TCP to this port on router |
-| `port_remap` | no | — | Remap source port `"internal:external"` (e.g. `"4001:29538"`) |
-| `timeout_s` | no | 120 | Max seconds to wait for convergence |
-| `runs` | no | 1 | Repeat this scenario N times |
-| `obs_addr_thresh` | no | auto | Observer address activation threshold (auto: 2 if servers<4, else 4) |
-| `mock_behaviors` | no | — | Array of 3 mock server behaviors (uses `mock` Docker profile instead of real servers) |
-| `mock_delays` | no | [0,0,0] | Array of 3 response delays in ms (one per mock server) |
-| `assertions` | no | — | List of assertions to evaluate against the experiment log |
+| `server_count` | yes | — | `3`, `5`, `7`, or `ipfs-network` (ignored when `mock_behaviors` is set) |
+| `packet_loss` | no | 0 | Integer 0–100 (percentage via `tc netem` on router) |
+| `latency_ms` | no | 0 | Non-negative integer, one-way ms via `tc netem` (RTT = 2×) |
+| `tcp_block_port` | no | — | Port number 1–65535 |
+| `port_remap` | no | — | `"INT:INT"` format (e.g. `"4001:29538"`) |
+| `timeout_s` | no | 120 | Positive integer (seconds) |
+| `runs` | no | 1 | Positive integer |
+| `obs_addr_thresh` | no | auto | Positive integer (see auto-computation below) |
+| `mock_behaviors` | no | — | Array of exactly 3 behavior strings (see below) |
+| `mock_delays` | no | [0,0,0] | Array of exactly 3 non-negative integers (ms per mock server) |
+| `assertions` | no | — | List of assertions (see below) |
+
+**`obs_addr_thresh` auto-computation:** When not explicitly set, the runner
+computes the observer address activation threshold as:
+- **2** if `mock_behaviors` is set (mock mode always uses 3 servers)
+- **2** if `server_count` < 4
+- **4** otherwise (server_count ≥ 4 or `ipfs-network`)
 
 **Note on `packet_loss` and `latency_ms`:** These require traffic to flow
 through the router. `nat_type: none` places the client directly on `public-net`
@@ -191,9 +216,21 @@ degradation.
 **Note on `mock_behaviors`:** When present, `server_count` is ignored. The
 runner uses the `mock` Docker profile (3 mock servers + `client-mock` on the
 public network). Each element sets the `--behavior` flag for the corresponding
-mock server. Valid behaviors: `reject`, `refuse`, `force-unreachable`,
-`internal-error`, `timeout`, `force-reachable`, `wrong-nonce`, `no-dialback-msg`.
-See [mock server behaviors](../docs/testbed.md#mock-server-behaviors) for details.
+mock server. Valid behavior strings:
+
+| Behavior | Category | Description |
+|----------|----------|-------------|
+| `reject` | A (response only) | `E_REQUEST_REJECTED` — no result, try another server |
+| `refuse` | A | `E_DIAL_REFUSED` — no result, try another server |
+| `force-unreachable` | A | `OK` + `E_DIAL_ERROR` — +1 failure (unreachable) |
+| `internal-error` | A | `E_INTERNAL_ERROR` — no result |
+| `timeout` | A | Never responds — stream timeout |
+| `force-reachable` | B (dial-back) | Dial back + `OK` + `OK` — +1 success (reachable) |
+| `wrong-nonce` | B | Dial back with nonce-1 — client rejects |
+| `no-dialback-msg` | B | Connect but no DialBack msg — client timeout |
+
+See [mock server behaviors](../docs/testbed.md#mock-server-behaviors) for
+implementation details.
 
 **Note on `server_count: ipfs-network`:** The client bootstraps to the real
 IPFS/libp2p DHT and discovers actual AutoNAT v2 servers on the internet. The
@@ -205,6 +242,12 @@ local environment.
 
 Assertions are evaluated against the OTEL trace file after each run by
 `eval-assertions.py`. Three types are supported:
+
+| Assertion type | Behavior |
+|----------------|----------|
+| `no_event` | **FAIL** if any matching event exists in the log |
+| `has_event` | **FAIL** if no matching event exists in the log |
+| `info` | Extract and display a value from matching events (never fails) |
 
 ```yaml
 assertions:
@@ -227,6 +270,37 @@ assertions:
     select: first             # or "last"
     label: "Bootstrap latency (first peer)"
 ```
+
+**Assertion fields:**
+
+| Field | Required | Used by | Description |
+|-------|----------|---------|-------------|
+| `type` | yes | all | `no_event`, `has_event`, or `info` |
+| `event` | yes | all | Event type to match (see valid event types below) |
+| `filter` | no | all | Filter criteria (see filter fields below) |
+| `message` | yes | `no_event`, `has_event` | Assertion description shown on pass/fail |
+| `extract` | yes | `info` | Field name to extract from the matched event |
+| `select` | no | `info` | `first` (default) or `last` — which matched event to extract from |
+| `label` | no | `info` | Display label (defaults to `message` if omitted) |
+
+**Valid event types** (emitted by the testbed node):
+
+| Event | Description |
+|-------|-------------|
+| `started` | Node started (server or client) |
+| `shutdown` | Node shutting down |
+| `reachability_changed` | AutoNAT v1 reachability result |
+| `reachable_addrs_changed` | AutoNAT v2 address reachability result |
+| `addresses_updated` | Observed address activated by `ObservedAddrManager` |
+| `connected` | Successfully connected to a peer |
+| `connect_failed` | Failed to connect to a peer |
+| `bootstrap_start` | Bootstrap process started |
+| `bootstrap_connected` | Connected to a bootstrap peer |
+| `bootstrap_error` | Bootstrap peer connection failed |
+| `bootstrap_done` | Bootstrap process completed |
+| `peer_discovery_start` | Peer discovery (from DHT routing table) started |
+| `peer_discovery_done` | Peer discovery completed |
+| `peer_discovery_timeout` | Peer discovery timed out |
 
 **Filter fields:**
 
