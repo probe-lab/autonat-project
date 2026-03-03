@@ -240,8 +240,20 @@ local environment.
 
 ### Assertions
 
-Assertions are evaluated against the OTEL trace file after each run by
-`eval-assertions.py`. Three types are supported:
+Assertions are validated and evaluated in two stages:
+
+1. **Pre-flight validation** (`run.sh`): Before any containers start, the
+   runner checks that assertion `type` values are valid (`no_event`,
+   `has_event`, `info`). Invalid types cause an immediate error with the
+   scenario index and field name.
+
+2. **Post-run evaluation** (`eval-assertions.py`): After each experiment run,
+   the runner pipes the assertion definitions into `eval-assertions.py` along
+   with the OTEL trace file. The script matches events, applies filters, and
+   produces pass/fail results saved as `.assertions.json` alongside the
+   experiment output.
+
+Three assertion types are supported:
 
 | Assertion type | Behavior |
 |----------------|----------|
