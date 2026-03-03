@@ -94,6 +94,165 @@ SCENARIOS=$(echo "$SCENARIOS" | jq --argjson dt "$DEFAULT_TIMEOUT" --argjson dr 
     }]
 ')
 
+# --- Validate scenario structure and field values ---
+
+# Check that exactly one of matrix/scenarios is present
+HAS_MATRIX=$(echo "$YAML_JSON" | jq 'has("matrix")')
+HAS_SCENARIOS=$(echo "$YAML_JSON" | jq 'has("scenarios")')
+if [[ "$HAS_MATRIX" == "true" && "$HAS_SCENARIOS" == "true" ]]; then
+    echo "Validation error: YAML file has both 'matrix' and 'scenarios' — use one or the other."
+    exit 1
+fi
+if [[ "$HAS_MATRIX" == "false" && "$HAS_SCENARIOS" == "false" ]]; then
+    echo "Validation error: YAML file has neither 'matrix' nor 'scenarios' — one is required."
+    exit 1
+fi
+
+# If matrix mode, verify all values are arrays
+if [[ "$HAS_MATRIX" == "true" ]]; then
+    NON_ARRAYS=$(echo "$YAML_JSON" | jq -r '.matrix | to_entries[] | select(.value | type != "array") | .key')
+    if [[ -n "$NON_ARRAYS" ]]; then
+        echo "Validation error: matrix fields must be arrays. Non-array fields: $NON_ARRAYS"
+        exit 1
+    fi
+fi
+
+validate_scenario() {
+    local idx=$1
+    local s=$2
+    local prefix="Validation error (scenario #$((idx+1)))"
+
+    # nat_type
+    local nat_type
+    nat_type=$(echo "$s" | jq -r '.nat_type // empty')
+    if [[ -n "$nat_type" ]]; then
+        case "$nat_type" in
+            none|full-cone|address-restricted|port-restricted|symmetric) ;;
+            *) echo "$prefix: invalid nat_type '$nat_type' (expected: none, full-cone, address-restricted, port-restricted, symmetric)"; exit 1 ;;
+        esac
+    fi
+
+    # transport
+    local transport
+    transport=$(echo "$s" | jq -r '.transport // empty')
+    if [[ -n "$transport" ]]; then
+        case "$transport" in
+            tcp|quic|both) ;;
+            *) echo "$prefix: invalid transport '$transport' (expected: tcp, quic, both)"; exit 1 ;;
+        esac
+    fi
+
+    # server_count (only validate if mock_behaviors is not set)
+    local has_mock
+    has_mock=$(echo "$s" | jq '.mock_behaviors != null')
+    if [[ "$has_mock" == "false" ]]; then
+        local server_count
+        server_count=$(echo "$s" | jq -r '.server_count // empty')
+        if [[ -n "$server_count" ]]; then
+            case "$server_count" in
+                3|4|5|6|7|ipfs-network) ;;
+                *) echo "$prefix: invalid server_count '$server_count' (expected: integer 3-7 or 'ipfs-network')"; exit 1 ;;
+            esac
+        fi
+    fi
+
+    # mock_behaviors: must be array of exactly 3 valid behavior strings
+    if [[ "$has_mock" == "true" ]]; then
+        local mock_len
+        mock_len=$(echo "$s" | jq '.mock_behaviors | length')
+        if [[ "$mock_len" -ne 3 ]]; then
+            echo "$prefix: mock_behaviors must have exactly 3 elements (got $mock_len)"
+            exit 1
+        fi
+        local invalid_behaviors
+        invalid_behaviors=$(echo "$s" | jq -r '.mock_behaviors[] | select(. as $b | ["reject","refuse","force-unreachable","internal-error","timeout","force-reachable","wrong-nonce","no-dialback-msg"] | index($b) | not)')
+        if [[ -n "$invalid_behaviors" ]]; then
+            echo "$prefix: invalid mock_behaviors value(s): $invalid_behaviors"
+            echo "  Valid: reject, refuse, force-unreachable, internal-error, timeout, force-reachable, wrong-nonce, no-dialback-msg"
+            exit 1
+        fi
+    fi
+
+    # mock_delays: must be array of exactly 3 non-negative integers
+    local has_delays
+    has_delays=$(echo "$s" | jq '.mock_delays != null')
+    if [[ "$has_delays" == "true" ]]; then
+        local delays_len
+        delays_len=$(echo "$s" | jq '.mock_delays | length')
+        if [[ "$delays_len" -ne 3 ]]; then
+            echo "$prefix: mock_delays must have exactly 3 elements (got $delays_len)"
+            exit 1
+        fi
+        local invalid_delays
+        invalid_delays=$(echo "$s" | jq -r '.mock_delays[] | select(type != "number" or . < 0 or . != (. | floor))')
+        if [[ -n "$invalid_delays" ]]; then
+            echo "$prefix: mock_delays values must be non-negative integers (got invalid: $invalid_delays)"
+            exit 1
+        fi
+    fi
+
+    # port_remap: must match INT:INT format
+    local port_remap
+    port_remap=$(echo "$s" | jq -r '.port_remap // empty')
+    if [[ -n "$port_remap" ]]; then
+        if ! [[ "$port_remap" =~ ^[0-9]+:[0-9]+$ ]]; then
+            echo "$prefix: invalid port_remap '$port_remap' (expected format: 'INT:INT', e.g. '4001:29538')"
+            exit 1
+        fi
+    fi
+
+    # tcp_block_port: must be valid port number 1-65535
+    local tcp_block_port
+    tcp_block_port=$(echo "$s" | jq -r '.tcp_block_port // empty')
+    if [[ -n "$tcp_block_port" ]]; then
+        if ! [[ "$tcp_block_port" =~ ^[0-9]+$ ]] || [[ "$tcp_block_port" -lt 1 || "$tcp_block_port" -gt 65535 ]]; then
+            echo "$prefix: invalid tcp_block_port '$tcp_block_port' (expected: integer 1-65535)"
+            exit 1
+        fi
+    fi
+
+    # packet_loss: must be 0-100
+    local packet_loss
+    packet_loss=$(echo "$s" | jq -r '.packet_loss // 0')
+    if ! [[ "$packet_loss" =~ ^[0-9]+$ ]] || [[ "$packet_loss" -lt 0 || "$packet_loss" -gt 100 ]]; then
+        echo "$prefix: invalid packet_loss '$packet_loss' (expected: integer 0-100)"
+        exit 1
+    fi
+
+    # timeout_s: must be positive integer
+    local timeout_s
+    timeout_s=$(echo "$s" | jq -r '.timeout_s')
+    if ! [[ "$timeout_s" =~ ^[0-9]+$ ]] || [[ "$timeout_s" -lt 1 ]]; then
+        echo "$prefix: invalid timeout_s '$timeout_s' (expected: positive integer)"
+        exit 1
+    fi
+
+    # runs: must be positive integer
+    local runs
+    runs=$(echo "$s" | jq -r '.runs')
+    if ! [[ "$runs" =~ ^[0-9]+$ ]] || [[ "$runs" -lt 1 ]]; then
+        echo "$prefix: invalid runs '$runs' (expected: positive integer)"
+        exit 1
+    fi
+
+    # assertions: validate types if present
+    local has_assertions
+    has_assertions=$(echo "$s" | jq '.assertions != null')
+    if [[ "$has_assertions" == "true" ]]; then
+        local invalid_types
+        invalid_types=$(echo "$s" | jq -r '.assertions[].type | select(. as $t | ["no_event","has_event","info"] | index($t) | not)')
+        if [[ -n "$invalid_types" ]]; then
+            echo "$prefix: invalid assertion type(s): $invalid_types (expected: no_event, has_event, info)"
+            exit 1
+        fi
+    fi
+}
+
+# Validate each expanded scenario
+for ((vi=0; vi<$(echo "$SCENARIOS" | jq 'length'); vi++)); do
+    validate_scenario "$vi" "$(echo "$SCENARIOS" | jq ".[$vi]")"
+done
+
 # Apply CLI overrides
 if [[ -n "$OPT_TIMEOUT" ]]; then
     SCENARIOS=$(echo "$SCENARIOS" | jq --argjson t "$OPT_TIMEOUT" '[.[] | .timeout_s = $t]')
