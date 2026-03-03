@@ -8,12 +8,12 @@ require (
 	github.com/libp2p/go-msgio v0.3.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	go.opentelemetry.io/otel v1.40.0
-	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.40.0
-	go.opentelemetry.io/otel/sdk v1.40.0
+	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.38.0
+	go.opentelemetry.io/otel/sdk v1.38.0
 	go.opentelemetry.io/otel/trace v1.40.0
 )
 
-replace github.com/libp2p/go-libp2p v0.47.0 => ../../go-libp2p
+replace github.com/libp2p/go-libp2p v0.47.0 => github.com/probe-lab/go-libp2p v0.38.2-0.20260303105539-54b6cec9f206
 
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect

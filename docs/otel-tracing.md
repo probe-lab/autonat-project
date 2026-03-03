@@ -161,38 +161,34 @@ attributes into dicts, then matches on event name and attribute filters.
 
 Assertion types: `has_event`, `no_event`, `info` (see scenario YAML files).
 
-## Docker Setup
+## Patched go-libp2p
 
-The patched go-libp2p is synced into the Docker build context by `run.sh`:
-
-```bash
-rsync -a --delete ../go-libp2p/ testbed/go-libp2p-patched/ --exclude='.git'
-```
-
-The Dockerfile copies it and adjusts the `replace` directive:
-
-```dockerfile
-COPY go-libp2p-patched/ /app/go-libp2p-patched/
-RUN go mod edit -replace github.com/libp2p/go-libp2p=./go-libp2p-patched
-```
-
-For local development, `go.mod` uses a relative path:
+The OTEL spans inside go-libp2p (`autonatv2.probe`, `autonatv2.server_selection`,
+`autonatv2.refresh_cycle`) live on a fork branch:
 
 ```
-replace github.com/libp2p/go-libp2p v0.47.0 => ../../go-libp2p
+github.com/probe-lab/go-libp2p @ v0.47.0-autonat_otel
 ```
+
+The testbed's `go.mod` uses a `replace` directive to pull the patched version:
+
+```
+replace github.com/libp2p/go-libp2p v0.47.0 => github.com/probe-lab/go-libp2p v0.47.0-autonat_otel
+```
+
+Docker builds fetch it automatically via `go mod download` — no local copy or
+rsync step is needed.
 
 ## Files Modified
 
 | File | What changed |
 |------|-------------|
-| `go-libp2p/p2p/protocol/autonatv2/client.go` | `autonatv2.probe` span |
-| `go-libp2p/p2p/protocol/autonatv2/autonat.go` | `autonatv2.server_selection` span |
-| `go-libp2p/p2p/host/basic/addrs_reachability_tracker.go` | `autonatv2.refresh_cycle` span |
+| [`probe-lab/go-libp2p`](https://github.com/probe-lab/go-libp2p/tree/v0.47.0-autonat_otel) `client.go` | `autonatv2.probe` span |
+| [`probe-lab/go-libp2p`](https://github.com/probe-lab/go-libp2p/tree/v0.47.0-autonat_otel) `autonat.go` | `autonatv2.server_selection` span |
+| [`probe-lab/go-libp2p`](https://github.com/probe-lab/go-libp2p/tree/v0.47.0-autonat_otel) `addrs_reachability_tracker.go` | `autonatv2.refresh_cycle` span |
 | `testbed/main.go` | `autonat.session` span, `--trace-file` flag |
 | `testbed/go.mod` | `replace` directive, OTEL SDK deps |
 | `testbed/eval-assertions.py` | Reads OTEL traces instead of JSONL |
-| `testbed/docker/node/Dockerfile` | COPY go-libp2p-patched |
 | `testbed/docker/compose.yml` | `--trace-file` on all clients |
-| `testbed/run.sh` | rsync go-libp2p, trace.json as primary output |
+| `testbed/run.sh` | trace.json as primary output |
 | `testbed/run-local.sh` | Uses trace file for convergence detection |

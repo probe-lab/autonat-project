@@ -307,12 +307,6 @@ fi
 
 # --- Execute scenarios ---
 
-# Sync patched go-libp2p into Docker build context
-echo "Syncing patched go-libp2p for Docker build..."
-rsync -a --delete "$PROJECT_DIR/../go-libp2p/" "$SCRIPT_DIR/go-libp2p-patched/" \
-    --exclude='.git' --exclude='vendor'
-echo "Done."
-
 DC="docker compose -f testbed/docker/compose.yml"
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RESULT_DIR="results/testbed/${SCENARIO_NAME}-${TIMESTAMP}"
