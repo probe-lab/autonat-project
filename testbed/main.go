@@ -23,6 +23,7 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -51,12 +52,14 @@ func main() {
 	obsAddrThresh := flag.Int("obs-addr-thresh", 0, "Override observed address activation threshold (default: 0 = use go-libp2p default of 4)")
 	behaviorFlag := flag.String("behavior", "force-unreachable", "Mock server behavior (mock-server role only)")
 	delayFlag := flag.Int("delay", 0, "Mock server response delay in milliseconds (mock-server role only)")
+	dhtMode := flag.String("dht-mode", "auto", "DHT mode: auto, client, or server")
 	traceFile := flag.String("trace-file", "", "Output file for OTEL traces (JSON); empty = no tracing")
+	otlpEndpoint := flag.String("otlp-endpoint", "", "Optional OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318); can be used alongside --trace-file")
 	flag.Parse()
 
 	// Initialize OTEL tracing if requested
-	if *traceFile != "" {
-		shutdown, err := initTracer(*traceFile)
+	if *traceFile != "" || *otlpEndpoint != "" {
+		shutdown, err := initTracer(*traceFile, *otlpEndpoint)
 		if err != nil {
 			log.Fatalf("Failed to initialize tracer: %v", err)
 		}
@@ -182,7 +185,7 @@ func main() {
 
 	if *role == "client" {
 		if *bootstrap {
-			go bootstrapDHT(ctx, h, sessionSpan)
+			go bootstrapDHT(ctx, h, *dhtMode, sessionSpan)
 		} else if *peerDir != "" {
 			go discoverFromDir(ctx, h, *peerDir, sessionSpan)
 		} else if *peers != "" {
@@ -213,18 +216,51 @@ func buildListenAddrs(ip string, port int, transport string) []string {
 	var addrs []string
 	switch transport {
 	case "tcp":
-		addrs = append(addrs, fmt.Sprintf("/ip4/%s/tcp/%d", ip, port))
+		addrs = append(addrs,
+			fmt.Sprintf("/ip4/%s/tcp/%d", ip, port),
+			fmt.Sprintf("/ip6/::/tcp/%d", port),
+		)
 	case "quic":
-		addrs = append(addrs, fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", ip, port))
+		addrs = append(addrs,
+			fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", ip, port),
+			fmt.Sprintf("/ip6/::/udp/%d/quic-v1", port),
+		)
 	case "both":
 		addrs = append(addrs,
 			fmt.Sprintf("/ip4/%s/tcp/%d", ip, port),
 			fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", ip, port),
+			fmt.Sprintf("/ip6/::/tcp/%d", port),
+			fmt.Sprintf("/ip6/::/udp/%d/quic-v1", port),
+		)
+	case "all":
+		addrs = append(addrs,
+			fmt.Sprintf("/ip4/%s/tcp/%d", ip, port),
+			fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", ip, port),
+			fmt.Sprintf("/ip4/%s/udp/%d/quic-v1/webtransport", ip, port),
+			fmt.Sprintf("/ip4/%s/udp/%d/webrtc-direct", ip, port),
+			fmt.Sprintf("/ip6/::/tcp/%d", port),
+			fmt.Sprintf("/ip6/::/udp/%d/quic-v1", port),
+			fmt.Sprintf("/ip6/::/udp/%d/quic-v1/webtransport", port),
+			fmt.Sprintf("/ip6/::/udp/%d/webrtc-direct", port),
 		)
 	default:
-		log.Fatalf("Unknown transport: %s (use tcp, quic, or both)", transport)
+		log.Fatalf("Unknown transport: %s (use tcp, quic, both, or all)", transport)
 	}
 	return addrs
+}
+
+func parseDHTMode(mode string) dht.ModeOpt {
+	switch mode {
+	case "auto":
+		return dht.ModeAutoServer
+	case "client":
+		return dht.ModeClient
+	case "server":
+		return dht.ModeServer
+	default:
+		log.Fatalf("Unknown DHT mode: %s (use auto, client, or server)", mode)
+		return dht.ModeAutoServer
+	}
 }
 
 // subscribeAllEvents subscribes to all relevant event bus events and dispatches them.
@@ -397,12 +433,14 @@ func connectToPeers(ctx context.Context, h host.Host, peersStr string, sessionSp
 	}
 }
 
-func bootstrapDHT(ctx context.Context, h host.Host, sessionSpan trace.Span) {
+func bootstrapDHT(ctx context.Context, h host.Host, dhtMode string, sessionSpan trace.Span) {
+	mode := parseDHTMode(dhtMode)
 	addEvent(sessionSpan, "bootstrap_start",
 		attribute.String("message", "connecting to IPFS DHT bootstrap peers"),
+		attribute.String("dht_mode", dhtMode),
 	)
 
-	d, err := dht.New(ctx, h, dht.Mode(dht.ModeClient))
+	d, err := dht.New(ctx, h, dht.Mode(mode))
 	if err != nil {
 		log.Printf("Failed to create DHT: %v", err)
 		addEvent(sessionSpan, "bootstrap_error",
@@ -579,31 +617,48 @@ func multiaddrsToStrings(addrs []ma.Multiaddr) []string {
 	return strs
 }
 
-// initTracer sets up an OTEL TracerProvider that exports spans as JSON to a file.
-// Each span is written as a single-line JSON object (JSONL format).
-func initTracer(path string) (func(), error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return nil, fmt.Errorf("create trace file: %w", err)
+// initTracer sets up an OTEL TracerProvider with one or both exporters:
+//   - path: write spans as JSONL to a file (empty = skip)
+//   - otlpEndpoint: export via OTLP HTTP to a collector/Jaeger (empty = skip)
+func initTracer(path string, otlpEndpoint string) (func(), error) {
+	var opts []sdktrace.TracerProviderOption
+	var closers []func()
+
+	if path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			return nil, fmt.Errorf("create trace file: %w", err)
+		}
+		exporter, err := stdouttrace.New(stdouttrace.WithWriter(f))
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("create file exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithBatcher(exporter))
+		closers = append(closers, func() { f.Close() })
 	}
 
-	exporter, err := stdouttrace.New(
-		stdouttrace.WithWriter(f),
-	)
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("create stdout exporter: %w", err)
+	if otlpEndpoint != "" {
+		ctx := context.Background()
+		exporter, err := otlptracehttp.New(ctx,
+			otlptracehttp.WithEndpointURL(otlpEndpoint+"/v1/traces"),
+			otlptracehttp.WithInsecure(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create OTLP exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithBatcher(exporter))
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-	)
+	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
 
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		tp.Shutdown(ctx)
-		f.Close()
+		for _, c := range closers {
+			c()
+		}
 	}, nil
 }

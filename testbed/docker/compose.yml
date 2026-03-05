@@ -8,6 +8,9 @@
 #   mock       - Mock AutoNAT v2 servers with controllable behaviors
 #   public     - AutoNAT experiment with real IPFS/libp2p servers
 #   test       - Lightweight NAT verification (socat, no Go binary)
+#   otel       - Optional Jaeger collector for OTLP trace visualization
+#               Add to any profile: --profile local --profile otel
+#               Jaeger UI available at http://localhost:16686
 #
 # Environment variables:
 #   NAT_TYPE       - none, full-cone, address-restricted, port-restricted, symmetric
@@ -43,6 +46,27 @@ networks:
 
 volumes:
   peer-addrs:  # shared volume for server address discovery
+
+# === Optional OTel collector (profile: otel) ===
+# Jaeger all-in-one with OTLP HTTP support.
+# Add --profile otel to any experiment run to enable trace visualization.
+# Client nodes must also pass --otlp-endpoint=http://jaeger:4318 to export via OTLP.
+#
+# Usage:
+#   docker compose --profile local --profile otel up
+#   open http://localhost:16686
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    profiles: ["otel"]
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4318:4318"     # OTLP HTTP receiver
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.50
 
 # Shared build config for autonat node containers (servers + clients).
 # Build context is testbed/ where Go source lives.
@@ -201,6 +225,7 @@ services:
       --port=4001
       --peer-dir=/peer-addrs
       --trace-file=/results/trace.json
+      --otlp-endpoint=${OTLP_ENDPOINT:-}
       --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
     volumes:
       - peer-addrs:/peer-addrs:ro
