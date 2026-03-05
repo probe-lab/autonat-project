@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/host/observedaddrs"
 	ma "github.com/multiformats/go-multiaddr"
 	"go.opentelemetry.io/otel"
@@ -27,6 +29,15 @@ import (
 )
 
 var startTime time.Time
+
+// peerStats tracks counts for high-frequency peer events (printed as periodic summary).
+var peerStats struct {
+	identified     atomic.Int64
+	identifyFailed atomic.Int64
+	connected      atomic.Int64
+	disconnected   atomic.Int64
+	protoUpdated   atomic.Int64
+}
 
 func main() {
 	role := flag.String("role", "client", "Node role: server, client, or mock-server")
@@ -149,12 +160,25 @@ func main() {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Subscribe to reachability events (v1: EvtLocalReachabilityChanged, v2: EvtHostReachableAddrsChanged)
-	go subscribeReachability(ctx, h, sessionSpan)
-	go subscribeReachableAddrs(ctx, h, sessionSpan)
+	// Subscribe to all event bus events
+	go subscribeAllEvents(ctx, h, sessionSpan)
 
-	// Subscribe to address update events
-	go subscribeAddressUpdates(ctx, h, sessionSpan)
+	// Print periodic summary of high-frequency peer events
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				log.Printf("[peer summary] identified=%d identify_failed=%d connected=%d disconnected=%d proto_updated=%d",
+					peerStats.identified.Load(), peerStats.identifyFailed.Load(),
+					peerStats.connected.Load(), peerStats.disconnected.Load(),
+					peerStats.protoUpdated.Load())
+			}
+		}
+	}()
 
 	if *role == "client" {
 		if *bootstrap {
@@ -203,10 +227,22 @@ func buildListenAddrs(ip string, port int, transport string) []string {
 	return addrs
 }
 
-func subscribeReachability(ctx context.Context, h host.Host, sessionSpan trace.Span) {
-	sub, err := h.EventBus().Subscribe(new(event.EvtLocalReachabilityChanged))
+// subscribeAllEvents subscribes to all relevant event bus events and dispatches them.
+func subscribeAllEvents(ctx context.Context, h host.Host, sessionSpan trace.Span) {
+	sub, err := h.EventBus().Subscribe([]any{
+		new(event.EvtLocalReachabilityChanged),
+		new(event.EvtHostReachableAddrsChanged),
+		new(event.EvtNATDeviceTypeChanged),
+		new(event.EvtLocalAddressesUpdated),
+		new(event.EvtPeerIdentificationCompleted),
+		new(event.EvtPeerIdentificationFailed),
+		new(event.EvtPeerConnectednessChanged),
+		new(event.EvtPeerProtocolsUpdated),
+		new(event.EvtLocalProtocolsUpdated),
+		new(event.EvtAutoRelayAddrsUpdated),
+	})
 	if err != nil {
-		log.Printf("Failed to subscribe to reachability events: %v", err)
+		log.Printf("Failed to subscribe to events: %v", err)
 		return
 	}
 	defer sub.Close()
@@ -219,84 +255,114 @@ func subscribeReachability(ctx context.Context, h host.Host, sessionSpan trace.S
 			if !ok {
 				return
 			}
-			reachEvt := evt.(event.EvtLocalReachabilityChanged)
-			reachStr := reachabilityString(reachEvt.Reachability)
-			log.Printf("REACHABILITY CHANGED: %s", reachStr)
-			addEvent(sessionSpan, "reachability_changed",
-				attribute.String("reachability", reachStr),
-				attribute.StringSlice("addresses", multiaddrsToStrings(h.Addrs())),
-			)
+			handleEvent(evt, h, sessionSpan)
 		}
 	}
 }
 
-func subscribeReachableAddrs(ctx context.Context, h host.Host, sessionSpan trace.Span) {
-	sub, err := h.EventBus().Subscribe(new(event.EvtHostReachableAddrsChanged))
-	if err != nil {
-		log.Printf("Failed to subscribe to reachable addrs events: %v", err)
-		return
-	}
-	defer sub.Close()
+func handleEvent(evt interface{}, h host.Host, sessionSpan trace.Span) {
+	switch tevt := evt.(type) {
+	case event.EvtLocalReachabilityChanged:
+		reachStr := reachabilityString(tevt.Reachability)
+		log.Printf("REACHABILITY CHANGED: %s", reachStr)
+		addEvent(sessionSpan, "reachability_changed",
+			attribute.String("reachability", reachStr),
+			attribute.StringSlice("addresses", multiaddrsToStrings(h.Addrs())),
+		)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt, ok := <-sub.Out():
-			if !ok {
-				return
-			}
-			reachEvt := evt.(event.EvtHostReachableAddrsChanged)
-			log.Printf("REACHABLE ADDRS CHANGED: reachable=%d unreachable=%d unknown=%d",
-				len(reachEvt.Reachable), len(reachEvt.Unreachable), len(reachEvt.Unknown))
-			for _, a := range reachEvt.Reachable {
-				log.Printf("  REACHABLE:   %s", a)
-			}
-			for _, a := range reachEvt.Unreachable {
-				log.Printf("  UNREACHABLE: %s", a)
-			}
-			for _, a := range reachEvt.Unknown {
-				log.Printf("  UNKNOWN:     %s", a)
-			}
-			addEvent(sessionSpan, "reachable_addrs_changed",
-				attribute.StringSlice("addresses", multiaddrsToStrings(reachEvt.Reachable)),
-				attribute.StringSlice("unreachable", multiaddrsToStrings(reachEvt.Unreachable)),
-				attribute.StringSlice("unknown", multiaddrsToStrings(reachEvt.Unknown)),
-			)
+	case event.EvtHostReachableAddrsChanged:
+		log.Printf("REACHABLE ADDRS CHANGED: reachable=%d unreachable=%d unknown=%d",
+			len(tevt.Reachable), len(tevt.Unreachable), len(tevt.Unknown))
+		for _, a := range tevt.Reachable {
+			log.Printf("  REACHABLE:   %s", a)
 		}
-	}
-}
-
-func subscribeAddressUpdates(ctx context.Context, h host.Host, sessionSpan trace.Span) {
-	sub, err := h.EventBus().Subscribe(new(event.EvtLocalAddressesUpdated))
-	if err != nil {
-		log.Printf("Failed to subscribe to address events: %v", err)
-		return
-	}
-	defer sub.Close()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt, ok := <-sub.Out():
-			if !ok {
-				return
-			}
-			addrEvt := evt.(event.EvtLocalAddressesUpdated)
-			var current []string
-			for _, a := range addrEvt.Current {
-				current = append(current, a.Address.String())
-			}
-			var removed []string
-			for _, a := range addrEvt.Removed {
-				removed = append(removed, a.Address.String())
-			}
-			addEvent(sessionSpan, "addresses_updated",
-				attribute.StringSlice("addresses", current),
-				attribute.StringSlice("removed", removed),
-			)
+		for _, a := range tevt.Unreachable {
+			log.Printf("  UNREACHABLE: %s", a)
 		}
+		for _, a := range tevt.Unknown {
+			log.Printf("  UNKNOWN:     %s", a)
+		}
+		addEvent(sessionSpan, "reachable_addrs_changed",
+			attribute.StringSlice("reachable", multiaddrsToStrings(tevt.Reachable)),
+			attribute.StringSlice("unreachable", multiaddrsToStrings(tevt.Unreachable)),
+			attribute.StringSlice("unknown", multiaddrsToStrings(tevt.Unknown)),
+		)
+
+	case event.EvtNATDeviceTypeChanged:
+		log.Printf("NAT DEVICE TYPE (%s): %s", tevt.TransportProtocol, tevt.NatDeviceType)
+		addEvent(sessionSpan, "nat_device_type_changed",
+			attribute.String("transport_protocol", string(tevt.TransportProtocol)),
+			attribute.String("nat_device_type", tevt.NatDeviceType.String()),
+		)
+
+	case event.EvtLocalAddressesUpdated:
+		var current []string
+		for _, a := range tevt.Current {
+			current = append(current, a.Address.String())
+		}
+		var removed []string
+		for _, a := range tevt.Removed {
+			removed = append(removed, a.Address.String())
+		}
+		addEvent(sessionSpan, "addresses_updated",
+			attribute.StringSlice("current", current),
+			attribute.StringSlice("removed", removed),
+		)
+
+	case event.EvtPeerIdentificationCompleted:
+		peerStats.identified.Add(1)
+		addEvent(sessionSpan, "peer_identification_completed",
+			attribute.String("peer_id", tevt.Peer.String()),
+			attribute.String("observed_addr", tevt.ObservedAddr.String()),
+			attribute.StringSlice("protocols", protocolIDsToStrings(tevt.Protocols)),
+			attribute.String("agent_version", tevt.AgentVersion),
+		)
+
+	case event.EvtPeerIdentificationFailed:
+		peerStats.identifyFailed.Add(1)
+		addEvent(sessionSpan, "peer_identification_failed",
+			attribute.String("peer_id", tevt.Peer.String()),
+			attribute.String("reason", tevt.Reason.Error()),
+		)
+
+	case event.EvtPeerConnectednessChanged:
+		connStr := connectednessString(tevt.Connectedness)
+		if tevt.Connectedness == network.Connected {
+			peerStats.connected.Add(1)
+		} else {
+			peerStats.disconnected.Add(1)
+		}
+		addEvent(sessionSpan, "peer_connectedness_changed",
+			attribute.String("peer_id", tevt.Peer.String()),
+			attribute.String("connectedness", connStr),
+		)
+
+	case event.EvtPeerProtocolsUpdated:
+		peerStats.protoUpdated.Add(1)
+		addEvent(sessionSpan, "peer_protocols_updated",
+			attribute.String("peer_id", tevt.Peer.String()),
+			attribute.StringSlice("added", protocolIDsToStrings(tevt.Added)),
+			attribute.StringSlice("removed", protocolIDsToStrings(tevt.Removed)),
+		)
+
+	case event.EvtLocalProtocolsUpdated:
+		log.Printf("LOCAL PROTOCOLS UPDATED: added=%d removed=%d", len(tevt.Added), len(tevt.Removed))
+		addEvent(sessionSpan, "local_protocols_updated",
+			attribute.StringSlice("added", protocolIDsToStrings(tevt.Added)),
+			attribute.StringSlice("removed", protocolIDsToStrings(tevt.Removed)),
+		)
+
+	case event.EvtAutoRelayAddrsUpdated:
+		log.Printf("AUTO-RELAY ADDRS UPDATED: %d relay addresses", len(tevt.RelayAddrs))
+		for _, addr := range tevt.RelayAddrs {
+			log.Printf("  RELAY: %s", addr)
+		}
+		addEvent(sessionSpan, "auto_relay_addrs_updated",
+			attribute.StringSlice("relay_addrs", multiaddrsToStrings(tevt.RelayAddrs)),
+		)
+
+	default:
+		log.Printf("Unknown event: %T", evt)
 	}
 }
 
@@ -484,6 +550,25 @@ func reachabilityString(r network.Reachability) string {
 	default:
 		return "unknown"
 	}
+}
+
+func connectednessString(c network.Connectedness) string {
+	switch c {
+	case network.Connected:
+		return "connected"
+	case network.NotConnected:
+		return "not_connected"
+	default:
+		return fmt.Sprintf("connectedness(%d)", c)
+	}
+}
+
+func protocolIDsToStrings(ids []protocol.ID) []string {
+	strs := make([]string, len(ids))
+	for i, id := range ids {
+		strs[i] = string(id)
+	}
+	return strs
 }
 
 func multiaddrsToStrings(addrs []ma.Multiaddr) []string {
