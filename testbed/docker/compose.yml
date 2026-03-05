@@ -75,6 +75,14 @@ x-node-build: &node-build
     context: ..
     dockerfile: docker/node/Dockerfile
 
+# Shared healthcheck timing for server containers.
+# test command is overridden per server to check its specific addr file.
+x-server-healthcheck: &server-healthcheck
+  interval: 2s
+  timeout: 5s
+  retries: 15
+  start_period: 5s
+
 services:
   # NAT Router: sits between public-net and private-net
   router:
@@ -113,6 +121,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/server-1"]
 
   server-2:
     <<: *node-build
@@ -128,6 +139,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/server-2"]
 
   server-3:
     <<: *node-build
@@ -143,6 +157,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/server-3"]
 
   server-4:
     <<: *node-build
@@ -158,6 +175,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/server-4"]
 
   server-5:
     <<: *node-build
@@ -173,6 +193,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/server-5"]
 
   server-6:
     <<: *node-build
@@ -188,6 +211,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/server-6"]
 
   server-7:
     <<: *node-build
@@ -203,6 +229,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/server-7"]
 
   # === Client node behind NAT ===
   # Reads server multiaddrs from the shared volume.
@@ -211,10 +240,14 @@ services:
     cap_add:
       - NET_ADMIN  # needed to set default gateway to router
     depends_on:
-      - router
-      - server-1
-      - server-2
-      - server-3
+      router:
+        condition: service_started
+      server-1:
+        condition: service_healthy
+      server-2:
+        condition: service_healthy
+      server-3:
+        condition: service_healthy
     profiles: ["local"]
     environment:
       - GATEWAY=auto
@@ -241,9 +274,12 @@ services:
   client-nonat:
     <<: *node-build
     depends_on:
-      - server-1
-      - server-2
-      - server-3
+      server-1:
+        condition: service_healthy
+      server-2:
+        condition: service_healthy
+      server-3:
+        condition: service_healthy
     profiles: ["nonat"]
     environment:
       - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
@@ -308,6 +344,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/mock-server-1"]
 
   mock-server-2:
     <<: *node-build
@@ -327,6 +366,9 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/mock-server-2"]
 
   mock-server-3:
     <<: *node-build
@@ -346,15 +388,21 @@ services:
       - peer-addrs:/peer-addrs
     networks:
       - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/mock-server-3"]
 
   # Client for mock server experiments — on public network (no NAT)
   # so mock servers can dial back directly for Category B behaviors.
   client-mock:
     <<: *node-build
     depends_on:
-      - mock-server-1
-      - mock-server-2
-      - mock-server-3
+      mock-server-1:
+        condition: service_healthy
+      mock-server-2:
+        condition: service_healthy
+      mock-server-3:
+        condition: service_healthy
     profiles: ["mock"]
     environment:
       - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}

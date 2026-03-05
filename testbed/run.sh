@@ -10,6 +10,7 @@ set -euo pipefail
 #   --timeout=N       Override timeout per scenario (seconds)
 #   --runs=N          Override number of runs per scenario
 #   --filter=K=V,...  Filter scenarios (AND logic): nat_type=symmetric,transport=quic
+#   --output=PATH     Output directory (default: results/testbed/<name>-<timestamp>)
 #   --dry-run         Print expanded scenarios without executing
 #
 # Examples:
@@ -31,6 +32,7 @@ shift
 OPT_TIMEOUT=""
 OPT_RUNS=""
 OPT_FILTER=""
+OPT_OUTPUT=""
 DRY_RUN=false
 
 for arg in "$@"; do
@@ -38,6 +40,7 @@ for arg in "$@"; do
         --timeout=*)  OPT_TIMEOUT="${arg#*=}" ;;
         --runs=*)     OPT_RUNS="${arg#*=}" ;;
         --filter=*)   OPT_FILTER="${arg#*=}" ;;
+        --output=*)   OPT_OUTPUT="${arg#*=}" ;;
         --dry-run)    DRY_RUN=true ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
@@ -309,7 +312,11 @@ fi
 
 DC="docker compose -f testbed/docker/compose.yml"
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-RESULT_DIR="results/testbed/${SCENARIO_NAME}-${TIMESTAMP}"
+if [[ -n "$OPT_OUTPUT" ]]; then
+    RESULT_DIR="$OPT_OUTPUT"
+else
+    RESULT_DIR="results/testbed/${SCENARIO_NAME}-${TIMESTAMP}"
+fi
 mkdir -p "$RESULT_DIR"
 
 TOTAL_PASS=0
@@ -435,8 +442,28 @@ for ((i=0; i<TOTAL; i++)); do
         # shellcheck disable=SC2086
         $DC $PROFILES up --build -d
 
-        # Wait for containers to start
-        sleep 5
+        # Wait for server containers to become healthy (addr file written = node ready)
+        printf "  Waiting for servers"
+        HEALTH_DEADLINE=$(( $(date +%s) + 60 ))
+        while true; do
+            if [[ $(date +%s) -ge $HEALTH_DEADLINE ]]; then
+                echo " (timeout, proceeding anyway)"
+                break
+            fi
+            # Count containers with a healthcheck that haven't reached healthy yet
+            NOT_HEALTHY=$(
+                # shellcheck disable=SC2086
+                $DC $PROFILES ps --format json 2>/dev/null \
+                | jq -r 'select(.Health != "" and .Health != "healthy") | .Service' \
+                2>/dev/null | wc -l | tr -d ' '
+            )
+            if [[ "$NOT_HEALTHY" == "0" ]]; then
+                echo " ready"
+                break
+            fi
+            sleep 2
+            printf "."
+        done
 
         # Monitor logs for reachability events
         START_EPOCH=$(date +%s)
