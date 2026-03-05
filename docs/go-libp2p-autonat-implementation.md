@@ -237,15 +237,7 @@ distinct IPs.
 
 ### Discovery (autonat.go `background()`)
 
-The AutoNAT orchestrator subscribes to three events:
-
-1. `EvtPeerIdentificationCompleted` — peer just completed Identify, check if
-   it supports `/libp2p/autonat/2/dial-request`
-2. `EvtPeerProtocolsUpdated` — peer's protocol list changed
-3. `EvtPeerConnectednessChanged` — peer connected or disconnected
-
-A peer is eligible when it is **connected** AND supports the dial-request
-protocol. Disconnected peers are immediately removed.
+A peer is eligible when it is **connected** AND supports the dial-request protocol. Disconnected peers are immediately removed. See the [Events](#events) section for the event subscriptions used to maintain this pool.
 
 ### Selection (autonat.go `GetReachability()`)
 
@@ -375,6 +367,42 @@ full analysis, testbed workaround, and upstream fix proposal.
 
 ---
 
+## Events
+
+### Subscribing to Reachability Changes
+
+**`EvtHostReachableAddrsChanged`** — emitted on the host event bus whenever any address changes reachability state. This is the correct event to subscribe to for AutoNAT v2.
+
+> ⚠️ **Do not use `EvtLocalReachabilityChanged`** — that event is AutoNAT v1 only and is not emitted by the v2 subsystem.
+
+The orchestrator subscribes to three events to maintain the eligible server pool:
+
+- `EvtPeerIdentificationCompleted` — peer just completed Identify; check if it supports `/libp2p/autonat/2/dial-request`
+- `EvtPeerProtocolsUpdated` — peer's protocol list changed
+- `EvtPeerConnectednessChanged` — peer connected or disconnected
+
+---
+
+## Metrics and Logging
+
+### Upstream go-libp2p (v0.47.0)
+
+**Structured logging** via `log/slog` in `autonat.go`, `client.go`, and `server.go` — logs probe attempts, dial-back results, and server selection decisions. Migrated from zap to slog in v0.43.0.
+
+**Prometheus metrics** added in v0.42.0 in `addrs_reachability_tracker.go`. Tracks address reachability state changes (Public/Private/Unknown counts per address). Does not expose per-probe timing or dial-back success/failure counts.
+
+### Our Fork (`v0.47.0-autonat_otel`)
+
+OpenTelemetry tracing added in [probe-lab/go-libp2p branch `v0.47.0-autonat_otel`](https://github.com/probe-lab/go-libp2p/tree/v0.47.0-autonat_otel) ([commit `54b6cec9`](https://github.com/probe-lab/go-libp2p/commit/54b6cec9f2068855616cd35ef656d249c50ccb05)), across:
+
+- `p2p/protocol/autonatv2/client.go` — `autonatv2.probe` span: dial request, response, dial-back, nonce verification
+- `p2p/protocol/autonatv2/autonat.go` — `autonatv2.server_selection` span: candidates, throttled peers, selected peer
+- `p2p/host/basic/addrs_reachability_tracker.go` — `autonatv2.refresh_cycle` span: per-probe results, backoff state
+
+Full span and attribute reference: [`docs/otel-tracing.md`](otel-tracing.md)
+
+---
+
 ## Refresh Cycle
 
 The `addrsReachabilityTracker.background()` goroutine runs the main loop:
@@ -443,8 +471,8 @@ delay.
 | v0.37.0 | 2024-10-22 | Panic recovery added |
 | v0.40.0 | 2025-02-17 | Multiple concurrent requests per peer (default 2) |
 | v0.41.1 | 2025-03-24 | Critical bug fixes: amplification policy + DNS handling |
-| v0.42.0 | 2025-06-18 | `addrsReachabilityTracker` — autonatv2 becomes primary reachability mechanism; metrics |
-| v0.43.0 | 2025-08-07 | Migrated to log/slog |
+| v0.42.0 | 2025-06-18 | `addrsReachabilityTracker` — autonatv2 becomes primary reachability mechanism; Prometheus metrics added for address reachability state |
+| v0.43.0 | 2025-08-07 | Logging migrated from zap to `log/slog` |
 | v0.44.0 | 2025-10-07 | WebSocket normalization fix; removed webrtc/webtransport dependency |
 | v0.47.0 | 2026-01-25 | Latest stable release |
 

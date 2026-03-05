@@ -19,6 +19,8 @@ Two categories of data are captured:
 
 ## Enabling Tracing
 
+### File export (default)
+
 Pass `--trace-file=<path>` to the autonat-node binary:
 
 ```bash
@@ -30,6 +32,26 @@ Pass `--trace-file=<path>` to the autonat-node binary:
 ```
 
 When `--trace-file` is empty (the default), no tracing overhead is incurred.
+
+### OTLP export (optional, for Jaeger visualization)
+
+Pass `--otlp-endpoint=<url>` to additionally export traces via OTLP HTTP to a collector. Both flags can be used together:
+
+```bash
+./autonat-node --role=client --trace-file=/tmp/trace.json --otlp-endpoint=http://localhost:4318
+```
+
+To start the testbed with Jaeger:
+
+```bash
+# Start experiment + Jaeger
+OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile local --profile otel up
+
+# Open Jaeger UI
+open http://localhost:16686
+```
+
+Jaeger runs as an optional `otel` compose profile and does not affect normal testbed runs.
 
 ## Output Format
 
@@ -129,6 +151,15 @@ Events (in order):
 3. `response_received` — server response (`response_status`, `dial_status`, `addr_idx`)
 4. `dial_back_received` — dial-back received (`addr`)
 5. `dial_back_timeout` — no dial-back within timeout (`reason`)
+
+`probe_completed` event on `autonatv2.refresh_cycle` (emitted after each probe):
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `addr` | string | Address that was probed |
+| `reachability` | string | Result: `public`, `private`, `unknown` |
+| `all_addrs_refused` | bool | Server refused all addresses |
+| `autonat.confidence` | int | Current confidence score for the address (successes − failures in sliding window) |
 
 ## Querying Traces
 

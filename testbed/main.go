@@ -23,6 +23,7 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -53,11 +54,12 @@ func main() {
 	delayFlag := flag.Int("delay", 0, "Mock server response delay in milliseconds (mock-server role only)")
 	dhtMode := flag.String("dht-mode", "auto", "DHT mode: auto, client, or server")
 	traceFile := flag.String("trace-file", "", "Output file for OTEL traces (JSON); empty = no tracing")
+	otlpEndpoint := flag.String("otlp-endpoint", "", "Optional OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318); can be used alongside --trace-file")
 	flag.Parse()
 
 	// Initialize OTEL tracing if requested
-	if *traceFile != "" {
-		shutdown, err := initTracer(*traceFile)
+	if *traceFile != "" || *otlpEndpoint != "" {
+		shutdown, err := initTracer(*traceFile, *otlpEndpoint)
 		if err != nil {
 			log.Fatalf("Failed to initialize tracer: %v", err)
 		}
@@ -615,31 +617,48 @@ func multiaddrsToStrings(addrs []ma.Multiaddr) []string {
 	return strs
 }
 
-// initTracer sets up an OTEL TracerProvider that exports spans as JSON to a file.
-// Each span is written as a single-line JSON object (JSONL format).
-func initTracer(path string) (func(), error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return nil, fmt.Errorf("create trace file: %w", err)
+// initTracer sets up an OTEL TracerProvider with one or both exporters:
+//   - path: write spans as JSONL to a file (empty = skip)
+//   - otlpEndpoint: export via OTLP HTTP to a collector/Jaeger (empty = skip)
+func initTracer(path string, otlpEndpoint string) (func(), error) {
+	var opts []sdktrace.TracerProviderOption
+	var closers []func()
+
+	if path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			return nil, fmt.Errorf("create trace file: %w", err)
+		}
+		exporter, err := stdouttrace.New(stdouttrace.WithWriter(f))
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("create file exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithBatcher(exporter))
+		closers = append(closers, func() { f.Close() })
 	}
 
-	exporter, err := stdouttrace.New(
-		stdouttrace.WithWriter(f),
-	)
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("create stdout exporter: %w", err)
+	if otlpEndpoint != "" {
+		ctx := context.Background()
+		exporter, err := otlptracehttp.New(ctx,
+			otlptracehttp.WithEndpointURL(otlpEndpoint+"/v1/traces"),
+			otlptracehttp.WithInsecure(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create OTLP exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithBatcher(exporter))
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-	)
+	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
 
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		tp.Shutdown(ctx)
-		f.Close()
+		for _, c := range closers {
+			c()
+		}
 	}, nil
 }
