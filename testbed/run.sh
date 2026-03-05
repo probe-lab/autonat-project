@@ -463,12 +463,12 @@ for ((i=0; i<TOTAL; i++)); do
         # Show relevant logs
         $DC logs "$CLIENT_CONTAINER" 2>/dev/null | grep -E "REACHABLE|UNREACHABLE|REACHABILITY|Connected|connect_failed|peer_discovery" || true
 
-        # Copy results
-        if [[ -f "results/testbed/experiment.json" ]]; then
-            cp "results/testbed/experiment.json" "$RESULT_FILE"
-            rm -f "results/testbed/experiment.json"
+        # Copy trace results
+        if [[ -f "results/testbed/trace.json" ]]; then
+            cp "results/testbed/trace.json" "$RESULT_FILE"
+            rm -f "results/testbed/trace.json"
         else
-            echo "  Warning: no experiment.json found"
+            echo "  Warning: no trace.json found"
         fi
 
         # Run assertions if present

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Evaluate assertions against JSONL experiment logs.
+"""Evaluate assertions against OTEL trace output.
 
-Usage: echo '<assertions_json>' | python3 eval-assertions.py <logfile.jsonl>
+Usage: echo '<assertions_json>' | python3 eval-assertions.py <trace.json>
 
-Reads assertions (JSON array) from stdin, evaluates them against the JSONL log
-file, and prints results as a JSON array to stdout.
+Reads assertions (JSON array) from stdin, evaluates them against events
+extracted from OTEL trace spans, and prints results as a JSON array to stdout.
+
+The trace file contains one JSON object per line (JSONL), each representing
+an OTEL span. Events are extracted from span Events arrays and flattened
+into dicts with attribute keys as fields.
 
 Assertion types:
   no_event  - FAIL if any matching event exists
@@ -16,29 +20,76 @@ import json
 import sys
 
 
+def extract_attr_value(attr_value):
+    """Extract the plain value from an OTEL attribute Value object."""
+    if isinstance(attr_value, dict):
+        # OTEL SDK format: {"Type": "STRING", "Value": "foo"}
+        # or nested: {"Type": "STRINGSLICE", "Value": [...]}
+        return attr_value.get("Value", attr_value)
+    return attr_value
+
+
+def flatten_attributes(attrs):
+    """Convert OTEL Attributes list to a flat dict."""
+    result = {}
+    if not attrs:
+        return result
+    for attr in attrs:
+        key = attr.get("Key", "")
+        value = extract_attr_value(attr.get("Value", {}))
+        result[key] = value
+    return result
+
+
 def load_events(path):
+    """Load events from OTEL trace JSONL file.
+
+    Extracts events from all spans and flattens them into dicts
+    compatible with the assertion matching format:
+      {"type": <event_name>, "elapsed_ms": ..., <attr_key>: <attr_value>, ...}
+    """
     events = []
     with open(path) as f:
         for line in f:
             line = line.strip()
-            if line:
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+            if not line:
+                continue
+            try:
+                span = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            # Extract events from the span
+            span_events = span.get("Events", [])
+            if not span_events:
+                continue
+
+            for evt in span_events:
+                flat = flatten_attributes(evt.get("Attributes", []))
+                flat["type"] = evt.get("Name", "")
+                flat["_span_name"] = span.get("Name", "")
+                flat["_time"] = evt.get("Time", "")
+                # Convert stringified numbers
+                if "elapsed_ms" in flat:
+                    try:
+                        flat["elapsed_ms"] = int(flat["elapsed_ms"])
+                    except (ValueError, TypeError):
+                        pass
+                events.append(flat)
+
     return events
 
 
 def matches(event, event_type, filters):
-    # Check event type — match against "type" or "event" field
-    etype = event.get("type") or event.get("event", "")
+    # Check event type
+    etype = event.get("type", "")
     if etype != event_type:
         return False
     if not filters:
         return True
     for key, val in filters.items():
         if key == "address_contains":
-            addrs = json.dumps(event.get("addresses", event.get("address", "")))
+            addrs = json.dumps(event.get("addresses", ""))
             if val not in addrs:
                 return False
         elif key == "message_contains":
@@ -82,11 +133,11 @@ def evaluate(assertion, events):
 
     if atype == "info":
         field = assertion.get("extract", "")
-        select = assertion.get("select", "first")
+        select_ = assertion.get("select", "first")
         label = assertion.get("label", message)
         value = None
         if matched:
-            target = matched[0] if select == "first" else matched[-1]
+            target = matched[0] if select_ == "first" else matched[-1]
             value = target.get(field)
         return {
             "type": atype,
@@ -101,12 +152,12 @@ def evaluate(assertion, events):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: echo '<assertions_json>' | python3 eval-assertions.py <logfile>", file=sys.stderr)
+        print("Usage: echo '<assertions_json>' | python3 eval-assertions.py <trace.json>", file=sys.stderr)
         sys.exit(1)
 
-    log_path = sys.argv[1]
+    trace_path = sys.argv[1]
     assertions = json.loads(sys.stdin.read())
-    events = load_events(log_path)
+    events = load_events(trace_path)
     results = [evaluate(a, events) for a in assertions]
     json.dump(results, sys.stdout, indent=2)
     print()

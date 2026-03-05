@@ -85,17 +85,17 @@ ALL_RUNS_JSON="[]"
 for ((run=1; run<=RUNS; run++)); do
     echo "--- Run $run/$RUNS ---"
 
-    RAW_LOG="${RESULT_BASE}-run${run}.jsonl"
+    TRACE_LOG="${RESULT_BASE}-run${run}.trace.json"
     NODE_PID=""
 
     # Start the node
-    "$BINARY" --role=client --bootstrap --transport="$TRANSPORT" --port="$PORT" --log-file="$RAW_LOG" &
+    "$BINARY" --role=client --bootstrap --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG" &
     NODE_PID=$!
 
-    echo "Started node (PID $NODE_PID), logging to $RAW_LOG"
+    echo "Started node (PID $NODE_PID), tracing to $TRACE_LOG"
     echo "Waiting for reachability events (timeout: ${TIMEOUT}s, stable after: ${STABLE_WAIT}s)..."
 
-    # Monitor for convergence
+    # Monitor for convergence using stderr log output (grep docker logs style)
     START_EPOCH=$(date +%s)
     LAST_EVENT_EPOCH=0
     CONVERGED=false
@@ -118,17 +118,14 @@ for ((run=1; run<=RUNS; run++)); do
             break
         fi
 
-        # Check for reachability events
-        if [[ -f "$RAW_LOG" ]]; then
-            LAST_REACH=$(grep '"reachability_changed"' "$RAW_LOG" 2>/dev/null | tail -1 || true)
-            if [[ -n "$LAST_REACH" ]]; then
-                LAST_REACH_MS=$(echo "$LAST_REACH" | jq -r '.elapsed_ms')
-                LAST_REACH_STATUS=$(echo "$LAST_REACH" | jq -r '.reachability')
+        # Check for reachability events in trace file
+        if [[ -f "$TRACE_LOG" ]]; then
+            # Look for session span events with reachability_changed
+            LAST_REACH=$(jq -r 'select(.Name == "autonat.session") | .Events[]? | select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "elapsed_ms") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
+            LAST_REACH_STATUS=$(jq -r 'select(.Name == "autonat.session") | .Events[]? | select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "reachability") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
 
-                # Convert elapsed_ms to epoch for comparison
-                LAST_EVENT_EPOCH=$((START_EPOCH + LAST_REACH_MS / 1000))
-
-                # Check stability: no new event for STABLE_WAIT seconds
+            if [[ -n "$LAST_REACH" && "$LAST_REACH" != "null" ]]; then
+                LAST_EVENT_EPOCH=$((START_EPOCH + LAST_REACH / 1000))
                 SINCE_LAST=$((NOW - LAST_EVENT_EPOCH))
                 if [[ $SINCE_LAST -ge $STABLE_WAIT ]]; then
                     echo ""
@@ -151,12 +148,12 @@ for ((run=1; run<=RUNS; run++)); do
 
     echo ""
 
-    # Parse results
-    if [[ ! -f "$RAW_LOG" ]] || [[ ! -s "$RAW_LOG" ]]; then
-        echo "Warning: no log output for run $run"
+    # Parse results from trace file
+    if [[ ! -f "$TRACE_LOG" ]] || [[ ! -s "$TRACE_LOG" ]]; then
+        echo "Warning: no trace output for run $run"
         RUN_JSON=$(jq -n \
             --argjson run "$run" \
-            --arg raw_log "$RAW_LOG" \
+            --arg trace_log "$TRACE_LOG" \
             '{
                 run: $run,
                 final_reachability: "none",
@@ -164,34 +161,41 @@ for ((run=1; run<=RUNS; run++)); do
                 time_to_stable_ms: null,
                 events: [],
                 bootstrap_peers_connected: 0,
-                raw_log: $raw_log
+                trace_log: $trace_log
             }')
     else
-        # Extract metrics using jq
-        FIRST_REACH=$(grep '"reachability_changed"' "$RAW_LOG" | head -1 || true)
-        LAST_REACH=$(grep '"reachability_changed"' "$RAW_LOG" | tail -1 || true)
+        # Extract reachability events from OTEL trace
+        REACH_EVENTS=$(jq -r '
+            select(.Name == "autonat.session") | .Events[]? |
+            select(.Name == "reachability_changed") |
+            { elapsed_ms: (.Attributes[] | select(.Key == "elapsed_ms") | .Value.Value),
+              reachability: (.Attributes[] | select(.Key == "reachability") | .Value.Value) }
+        ' "$TRACE_LOG" 2>/dev/null || true)
 
         FIRST_MS="null"
         LAST_MS="null"
         FINAL_STATUS="none"
 
-        if [[ -n "$FIRST_REACH" ]]; then
-            FIRST_MS=$(echo "$FIRST_REACH" | jq '.elapsed_ms')
-        fi
-        if [[ -n "$LAST_REACH" ]]; then
-            LAST_MS=$(echo "$LAST_REACH" | jq '.elapsed_ms')
-            FINAL_STATUS=$(echo "$LAST_REACH" | jq -r '.reachability')
+        if [[ -n "$REACH_EVENTS" ]]; then
+            FIRST_MS=$(echo "$REACH_EVENTS" | jq -s '.[0].elapsed_ms' 2>/dev/null || echo "null")
+            LAST_MS=$(echo "$REACH_EVENTS" | jq -s '.[-1].elapsed_ms' 2>/dev/null || echo "null")
+            FINAL_STATUS=$(echo "$REACH_EVENTS" | jq -rs '.[-1].reachability' 2>/dev/null || echo "none")
         fi
 
-        BOOTSTRAP_COUNT=$(grep -c '"bootstrap_connected"' "$RAW_LOG" 2>/dev/null || echo "0")
+        BOOTSTRAP_COUNT=$(jq -r '
+            select(.Name == "autonat.session") | .Events[]? |
+            select(.Name == "bootstrap_connected") | .Name
+        ' "$TRACE_LOG" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 
-        # Extract all reachability-related events
-        EVENTS_RAW=$(grep -E '"reachability_changed"|"reachable_addrs_changed"' "$RAW_LOG" 2>/dev/null || true)
-        if [[ -n "$EVENTS_RAW" ]]; then
-            EVENTS=$(echo "$EVENTS_RAW" | jq -s '[.[] | {elapsed_ms, type, reachability, addresses}]' 2>/dev/null || echo "[]")
-        else
-            EVENTS="[]"
-        fi
+        # Extract reachability-related events
+        EVENTS=$(jq -s '[
+            .[] | select(.Name == "autonat.session") | .Events[]? |
+            select(.Name == "reachability_changed" or .Name == "reachable_addrs_changed") |
+            { type: .Name,
+              elapsed_ms: (.Attributes[] | select(.Key == "elapsed_ms") | .Value.Value),
+              reachability: ((.Attributes[] | select(.Key == "reachability") | .Value.Value) // null),
+              addresses: ((.Attributes[] | select(.Key == "addresses") | .Value.Value) // null) }
+        ]' "$TRACE_LOG" 2>/dev/null || echo "[]")
 
         RUN_JSON=$(jq -n \
             --argjson run "$run" \
@@ -200,7 +204,7 @@ for ((run=1; run<=RUNS; run++)); do
             --argjson last_ms "$LAST_MS" \
             --argjson events "$EVENTS" \
             --argjson bootstrap "$BOOTSTRAP_COUNT" \
-            --arg raw_log "$RAW_LOG" \
+            --arg trace_log "$TRACE_LOG" \
             '{
                 run: $run,
                 final_reachability: $final,
@@ -208,7 +212,7 @@ for ((run=1; run<=RUNS; run++)); do
                 time_to_stable_ms: $last_ms,
                 events: $events,
                 bootstrap_peers_connected: $bootstrap,
-                raw_log: $raw_log
+                trace_log: $trace_log
             }')
 
         echo "  Reachability: $FINAL_STATUS"

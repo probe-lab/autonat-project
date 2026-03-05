@@ -200,7 +200,7 @@ services:
       --transport=${TRANSPORT:-both}
       --port=4001
       --peer-dir=/peer-addrs
-      --log-file=/results/experiment.json
+      --trace-file=/results/trace.json
       --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
     volumes:
       - peer-addrs:/peer-addrs:ro
@@ -227,7 +227,7 @@ services:
       --transport=${TRANSPORT:-both}
       --port=4001
       --peer-dir=/peer-addrs
-      --log-file=/results/experiment.json
+      --trace-file=/results/trace.json
       --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
     volumes:
       - peer-addrs:/peer-addrs:ro
@@ -252,7 +252,7 @@ services:
       --transport=${TRANSPORT:-both}
       --port=4001
       --bootstrap
-      --log-file=/results/experiment.json
+      --trace-file=/results/trace.json
       --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
     volumes:
       - ../../results/testbed:/results
@@ -338,7 +338,7 @@ services:
       --transport=${TRANSPORT:-both}
       --port=4001
       --peer-dir=/peer-addrs
-      --log-file=/results/experiment.json
+      --trace-file=/results/trace.json
       --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
     volumes:
       - peer-addrs:/peer-addrs:ro
