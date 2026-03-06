@@ -13,7 +13,7 @@
 1. [Glossary](#glossary)
 2. [Executive Summary](#executive-summary)
 3. [Background: NAT Types and Traversal](#background-nat-types-and-traversal)
-4. [AutoNAT v2 Protocol — Step by Step](#autonat-v2-protocol--step-by-step)
+4. [Protocol Walkthrough](#protocol-walkthrough)
 5. [Issue 1: Address-Restricted NAT False Positive](#issue-1-address-restricted-nat-false-positive)
 6. [Issue 2: QUIC Dial-Back Failure on Fresh Servers](#issue-2-quic-dial-back-failure-on-fresh-servers)
 7. [Additional Confirmed Issues](#additional-confirmed-issues)
@@ -118,144 +118,7 @@ Private network                NAT Router                  Internet
 The critical question is: **what happens when an unsolicited packet arrives
 at the public IP?** The answer depends on the NAT type.
 
-### NAT Mapping Behavior
-
-When the device behind NAT contacts multiple destinations, the router must
-decide which external port to use. There are two approaches:
-
-**Endpoint-Independent Mapping (EIM)** — same port for all destinations:
-
-```
-Device 192.168.1.10:4001 → Server A (1.2.3.4:80)
-  NAT assigns: 203.0.113.1:50000
-
-Device 192.168.1.10:4001 → Server B (5.6.7.8:80)
-  NAT reuses:  203.0.113.1:50000    ← SAME external port
-
-Both Server A and Server B see the device as 203.0.113.1:50000
-```
-
-This is also called **static mapping** or **consistent mapping**. It's
-predictable — all peers see the same external address.
-
-**Address- and Port-Dependent Mapping (ADPM)** — different port per destination:
-
-```
-Device 192.168.1.10:4001 → Server A (1.2.3.4:80)
-  NAT assigns: 203.0.113.1:50000
-
-Device 192.168.1.10:4001 → Server B (5.6.7.8:80)
-  NAT assigns: 203.0.113.1:61234    ← DIFFERENT external port
-
-Server A sees 203.0.113.1:50000
-Server B sees 203.0.113.1:61234     ← different address!
-```
-
-This is also called **symmetric** or **dynamic mapping**. It's unpredictable —
-each peer sees a different external address. This makes it impossible for
-peers to agree on a single public address for the device, which is why
-AutoNAT v2's address activation threshold is never met (Issue #17).
-
-### NAT Filtering Behavior
-
-Once a mapping exists, the router must decide what **unsolicited inbound
-traffic** to allow. This is the filtering policy:
-
-**Endpoint-Independent Filtering (EIF)** — allow everything:
-
-```
-Device contacted Server A (1.2.3.4) → mapping: 203.0.113.1:50000
-
-Inbound from 1.2.3.4:80    → ALLOWED (contacted)
-Inbound from 1.2.3.4:9999  → ALLOWED (same IP, different port)
-Inbound from 9.9.9.9:80    → ALLOWED (completely unknown IP)
-
-Any host on the internet can send to 203.0.113.1:50000
-```
-
-This is called **full-cone NAT**. Once the mapping exists, it's like a public
-port — anyone can reach it. Rare in practice; equivalent to having a public
-IP for that port.
-
-**Address-Dependent Filtering (ADF)** — allow contacted IPs only:
-
-```
-Device contacted Server A (1.2.3.4) → mapping: 203.0.113.1:50000
-
-Inbound from 1.2.3.4:80    → ALLOWED (contacted IP, original port)
-Inbound from 1.2.3.4:9999  → ALLOWED (contacted IP, different port)
-Inbound from 9.9.9.9:80    → BLOCKED (unknown IP)
-
-Only hosts the device has talked to can send back, from any port
-```
-
-This is called **address-restricted cone NAT**. The NAT keeps a list of
-"trusted" IPs based on outbound traffic. This is the NAT type that causes
-Issue #1 — the AutoNAT server's dial-back comes from a trusted IP. See
-[Real-World Prevalence](#real-world-prevalence) for how common this type
-actually is.
-
-**Address- and Port-Dependent Filtering (APDF)** — allow exact IP:port only:
-
-```
-Device contacted Server A at 1.2.3.4:80 → mapping: 203.0.113.1:50000
-
-Inbound from 1.2.3.4:80    → ALLOWED (exact match)
-Inbound from 1.2.3.4:9999  → BLOCKED (same IP but different port)
-Inbound from 9.9.9.9:80    → BLOCKED (unknown IP)
-
-Only the exact IP:port the device contacted can send back
-```
-
-This is called **port-restricted cone NAT**. Common in managed networks
-(airports, hotels). The AutoNAT server's dial-back comes from a different
-port (the `dialerHost` uses an ephemeral port, not the server's listen port),
-so it is correctly blocked.
-
-### The Four NAT Types
-
-Combining mapping and filtering produces the classic four NAT types:
-
-```
-              EIF              ADF                APDF
-           (any source)    (contacted IPs)   (contacted IP:port)
-         ┌──────────────┬────────────────┬──────────────────┐
-  EIM    │  Full-cone   │ Addr-restricted│  Port-restricted  │
-(static) │              │                │                   │
-         │ Anyone can   │ Only contacted │ Only contacted    │
-         │ reach the    │ IPs can reach  │ IP:port can reach │
-         │ mapped port  │ (any port)     │ (exact match)     │
-         ├──────────────┼────────────────┼──────────────────┤
-  ADPM   │   (rare)     │    (rare)      │    Symmetric      │
-(dynamic)│              │                │                   │
-         │              │                │ Different port per │
-         │              │                │ dest + strict filter│
-         └──────────────┴────────────────┴──────────────────┘
-```
-
-**Full-cone (EIM + EIF):** The most permissive NAT. Once a mapping is
-created by outbound traffic, any host on the internet can send packets to
-the mapped external port. The device is effectively publicly reachable on
-that port. Rare — usually only achieved via explicit configuration (DMZ,
-port forwarding, or UPnP).
-
-**Address-restricted cone (EIM + ADF):** The default on most home routers.
-Consistent external port (all peers see the same address), but only hosts the
-device has previously contacted can send inbound traffic. "Contacted" means
-the device sent at least one packet to that IP. The filter checks IP only,
-not port — any port from a trusted IP is allowed.
-
-**Port-restricted cone (EIM + APDF):** Common in managed networks (airports,
-hotels, corporate WiFi). Same consistent mapping as address-restricted, but
-the filter checks both IP and port. Only the exact IP:port the device sent
-traffic to can respond. A connection from the same IP but a different port is
-blocked.
-
-**Symmetric (ADPM + APDF):** The most restrictive NAT. Different external
-port for each destination, and only the exact destination IP:port can
-respond. Common on mobile carriers (CGNAT), satellite internet, and
-enterprise networks. Makes peer-to-peer connections nearly impossible
-because no peer can predict the external port.
+For the full NAT mapping/filtering taxonomy (EIM, ADPM, EIF, ADF, APDF) and NAT type classification, see [autonat-v2.md](autonat-v2.md#nat-types-quick-reference).
 
 ### How NAT Filtering Affects AutoNAT v2 Dial-Back
 
@@ -435,270 +298,14 @@ do not (each peer sees a different external port).
 
 ---
 
-## AutoNAT v2 Protocol — Step by Step
+## Protocol Walkthrough
 
-### Stage 0: Address Discovery and Activation (prerequisite)
-
-Before AutoNAT v2 runs, the client must have a public address to test.
-
-```
-Client                              Peers (potential servers)
-  │                                       │
-  │──── connect (TCP or QUIC) ───────────→│  Bootstrap / DHT
-  │←─── Identify protocol ───────────────→│  Exchange addresses
-  │                                       │
-  │  Each peer reports via Identify:       │
-  │  "I see you as 73.0.0.2:4001"         │
-  │                                       │
-  │  ObservedAddrManager collects these    │
-  │  Requires ActivationThresh=4 peers     │
-  │  reporting the SAME multiaddr to       │
-  │  "activate" it as a public address     │
-```
-
-**go-libp2p code:** `p2p/host/basic/basic_host.go` — `ObservedAddrManager`
-
-**Issues at this stage:**
-- **Issue #17:** Symmetric NAT (ADPM) assigns a different port per peer, so
-  no address reaches the activation threshold. v2 never starts.
-- **Issue #18:** TCP port blocking means no TCP observed addresses; only QUIC
-  addresses are discovered.
-
-### Stage 1: Server Selection
-
-The client selects a server to probe against.
-
-```
-Client
-  │
-  │  Filter connected peers:
-  │  1. Must support /libp2p/autonat/2/dial-request
-  │  2. Must not be throttled (2min cooldown per server)
-  │  3. Pick one at random
-  │
-  │  If no unthrottled peers → ErrNoPeers, retry later
-```
-
-**go-libp2p code:** `p2p/protocol/autonatv2/client.go` — `getServer()`
-
-### Stage 2: DialRequest
-
-The client sends a request containing its public addresses and a random nonce.
-
-```
-Client                                     Server (main host, peer ID: A)
-  │                                              │
-  │── open /libp2p/autonat/2/dial-request ──────→│
-  │── DialRequest { addrs: [addr1, addr2],  ────→│
-  │                  nonce: 0xABCD1234 }         │
-```
-
-**Spec reference:**
-
-> "client sends a request with a priority ordered list of addresses and a nonce"
-
-> "Client SHOULD NOT send any private address as defined in RFC 1918"
-
-**go-libp2p code:** `client.go` — `sendDialRequest()`
-
-### Stage 3: Address Selection and Amplification Check
-
-The server selects which address to test and checks whether amplification
-prevention is needed.
-
-```
-                                           Server
-                                              │
-  1. Select first address it CAN dial         │
-     (dialerHost.Network().CanDial(addr))     │
-                                              │
-  2. Compare addr IP vs client's observed IP  │
-     │                                        │
-     ├─ SAME IP → skip to Stage 4             │
-     │                                        │
-     └─ DIFFERENT IP → amplification check:   │
-        Server sends DialDataRequest          │
-        Client must send 30-100KB of data     │
-        Server waits random 0-3s              │
-        Then proceeds to Stage 4              │
-```
-
-**Spec reference:**
-
-> "If this selected address has an IP address different from the requesting
-> node's observed IP address, server initiates the Amplification attack
-> prevention mechanism"
-
-> "To make amplification attacks unattractive, servers SHOULD ask for 30k to
-> 100k bytes"
-
-**go-libp2p code:** `server.go` — `serveDialRequest()`,
-`amplificationAttackPrevention()`
-
-### Stage 4: Dial-Back Connection (THE CRITICAL STEP)
-
-The server uses a separate `dialerHost` to connect back to the client's
-address. This is where both Issue #1 and Issue #2 manifest.
-
-```
-                                           Server
-                                              │
-  dialerHost is a second libp2p host:         │
-  - Different private key → different peer ID │
-  - Same machine → SAME IP ADDRESS            │
-  - Same transports (TCP + QUIC)              │
-  - No listening addresses                    │
-                                              │
-             dialerHost (peer ID: B, IP: 1.2.3.4)
-                    │
-                    │── TCP or QUIC dial ──→ Client's address
-                    │
-                    │   NAT decision (if client is behind NAT):
-                    │   Full-cone (EIF)     → allow (any source)
-                    │   Addr-restricted (ADF) → allow (same IP!) ← ISSUE #1
-                    │   Port-restricted (APDF) → block (different port)
-                    │   Symmetric (APDF)     → N/A (v2 never reaches here)
-```
-
-**Spec reference:**
-
-> "The server dials the selected address, opens a stream with Protocol ID
-> `/libp2p/autonat/2/dial-back`"
-
-The spec also says:
-
-> "the server is free to use a separate peerID for the dial backs"
-
-This explicitly allows — and the implementation uses — a different peer ID
-on the **same machine** (same IP). The spec never requires or mentions using
-a different IP address.
-
-**go-libp2p code:** `server.go:373-414` — `dialBack()`
-
-```go
-func (as *server) dialBack(ctx context.Context, p peer.ID, addr ma.Multiaddr, nonce uint64) pb.DialStatus {
-    as.dialerHost.Peerstore().AddAddr(p, addr, peerstore.TempAddrTTL)
-
-    // Dial from same IP, different peer ID
-    err := as.dialerHost.Connect(ctx, peer.AddrInfo{ID: p})
-    if err != nil {
-        return pb.DialStatus_E_DIAL_ERROR
-    }
-    // ...
-}
-```
-
-**`dialerHost` creation** — `config/config.go:makeAutoNATV2Host()`:
-
-```go
-autoNatCfg := Config{
-    PrivKey:            autonatPrivKey,      // different key → different peer ID
-    Transports:         cfg.Transports,      // same transports (TCP + QUIC)
-    SecurityTransports: cfg.SecurityTransports,
-    ListenAddrs:        autoNatListenAddrs,  // PATCH: ephemeral QUIC+TCP ports
-    // PATCH: Don't share black hole counters — fresh servers block QUIC
-    UDPBlackHoleSuccessCounter:        nil,
-    CustomUDPBlackHoleSuccessCounter:  true,
-    IPv6BlackHoleSuccessCounter:       nil,
-    CustomIPv6BlackHoleSuccessCounter: true,
-}
-```
-
-### Stage 5: Nonce Exchange
-
-If the dial-back connection succeeds, the server sends the nonce on the
-dial-back stream for the client to verify.
-
-```
-dialerHost (peer ID: B)                    Client
-  │                                              │
-  │── open /libp2p/autonat/2/dial-back ─────────→│
-  │── DialBack { nonce: 0xABCD1234 } ──────────→│
-  │                                              │
-  │   Client verifies:                           │
-  │   received nonce == sent nonce? → valid      │
-  │                                              │
-  │←── DialBackResponse { status: OK } ──────────│
-  │── close stream ─────────────────────────────→│
-```
-
-**Spec reference:**
-
-> "The client MUST check that the nonce received in the `DialBack` is the
-> same as the nonce it sent in the `DialRequest`. If the nonce is different,
-> it MUST discard this response."
-
-> "Clients SHOULD only rely on the nonce and not on the peerID for verifying
-> the dial back"
-
-### Stage 6: DialResponse
-
-The server reports the outcome on the original request stream.
-
-```
-Client                                     Server (main host)
-  │                                              │
-  │←── DialResponse {                            │
-  │      status: OK,                             │
-  │      addrIdx: 0,                             │
-  │      dialStatus: OK | E_DIAL_ERROR           │
-  │    } ────────────────────────────────────────│
-  │── close stream ─────────────────────────────→│
-```
-
-**Spec reference — DialStatus values:**
-
-> **`OK`**: "the server was able to connect to the client and successfully
-> send a nonce on the `/libp2p/autonat/2/dial-back` stream"
-
-> **`E_DIAL_ERROR`**: "the server was unable to connect to the client on the
-> selected address, indicating the selected address is not publicly reachable"
-
-> **`E_DIAL_BACK_ERROR`**: "the server was able to connect to the client on
-> the selected address, but an error occurred while sending a nonce"
-
-The spec equates "server could connect and send nonce" with "address is
-publicly reachable." This is the core assumption that fails for
-address-restricted NAT: the server can connect because the NAT trusts its IP,
-but arbitrary peers from other IPs cannot.
-
-### Stage 7: Confidence Accumulation
-
-The client accumulates results from multiple servers before declaring an
-address reachable or unreachable.
-
-```
-Client
-  │
-  │  Per-address sliding window (5 probes):
-  │  - Need minConfidence=2 net difference
-  │  - 3+ OK → emit REACHABLE
-  │  - 3+ DIAL_ERROR → emit UNREACHABLE
-  │
-  │  Repeat with different servers
-  │  Emit EvtHostReachableAddrsChanged event
-```
-
-**Spec reference:**
-
-> "consider an address reachable if more than 3 servers report a successful
-> dial and to consider an address unreachable if more than 3 servers report
-> unsuccessful dials"
-
-### Where Each Issue Hits
-
-```
-Stage 0 (Address activation)   ←── Issue #17: Symmetric NAT blocks activation
-                                ←── Issue #18: TCP blocking → QUIC-only
-Stage 1 (Server selection)
-Stage 2 (DialRequest)
-Stage 3 (Amplification check)
-Stage 4 (Dial-back connection)  ←── Issue #1:   Same-IP passes ADF filter
-                                ←── Issue #2:   Black hole detector blocks QUIC (FIXED)
-Stage 5 (Nonce exchange)
-Stage 6 (DialResponse)          ←── Issue #1:   OK reported → false positive
-Stage 7 (Confidence)            ←── Issue #8:   v1 oscillation (when v2 skipped)
-```
+For a step-by-step walkthrough of the AutoNAT v2 protocol (address activation,
+server selection, DialRequest, amplification prevention, dial-back, nonce
+verification, confidence accumulation), see
+[autonat-v2.md](autonat-v2.md). For go-libp2p implementation details
+(constants, structs, confidence system), see
+[go-libp2p-autonat-implementation.md](go-libp2p-autonat-implementation.md).
 
 ---
 
@@ -787,10 +394,10 @@ All runs on native Linux VM (Docker Desktop macOS has a separate DNAT issue).
 
 | NAT Type | Command | Result |
 |----------|---------|--------|
-| `full-cone` | `./testbed/run.sh full-cone tcp 5` | **Reachable ~3s** |
-| `address-restricted` | `./testbed/run.sh address-restricted tcp 5` | **Reachable ~3s** (false positive) |
-| `port-restricted` | `./testbed/run.sh port-restricted tcp 5` | Unreachable ~3s |
-| `symmetric` | `./testbed/run.sh symmetric tcp 5` | v2 never fires (120s) |
+| `full-cone` | `NAT_TYPE=full-cone TRANSPORT=tcp ./testbed/run.sh testbed/scenarios/matrix.yaml` | **Reachable ~3s** |
+| `address-restricted` | `NAT_TYPE=address-restricted TRANSPORT=tcp ./testbed/run.sh ...` | **Reachable ~3s** (false positive) |
+| `port-restricted` | `NAT_TYPE=port-restricted TRANSPORT=tcp ./testbed/run.sh ...` | Unreachable ~3s |
+| `symmetric` | `NAT_TYPE=symmetric TRANSPORT=tcp ./testbed/run.sh ...` | v2 never fires (120s) |
 
 Address-restricted shows identical behavior to full-cone despite the node
 being unreachable from arbitrary IPs.
@@ -869,7 +476,7 @@ Defense-in-depth measure that doesn't require spec changes.
 
 - **Category:** Testbed limitation (go-libp2p black hole detector interaction)
 - **Severity:** High — affects all freshly started AutoNAT v2 servers
-- **Status:** CONFIRMED and WORKED AROUND (2026-02-24)
+- **Status:** CONFIRMED and WORKED AROUND in probe-lab fork; upstream fix pending
 
 ### Summary
 
@@ -917,7 +524,7 @@ dialable=[] errs=[{/ip4/1.2.3.4/udp/4001/quic-v1 dial refused because of black h
 
 1. QUIC v2 stayed "unknown" with 5 servers → added 7 servers → still unknown
 2. Compared testbed (fails) vs public IPFS servers (works) — key insight
-3. Added `replace` directive to use `go-libp2p-patched` → still unknown
+3. Added `replace` directive to use `probe-lab/go-libp2p` fork → still unknown
 4. Debug logging in `server.go`: `canDial=false` for QUIC
 5. Added listen addresses for `dialerHost` → `canDial` still false
 6. Exposed `filterKnownUndialables` via debug method → found `"black hole"` error
@@ -927,8 +534,10 @@ dialable=[] errs=[{/ip4/1.2.3.4/udp/4001/quic-v1 dial refused because of black h
 ### Recommendations
 
 1. **go-libp2p fix:** The `dialerHost` should not share black hole counters
-   with the main host. See
-   [upstream fix](udp-black-hole-detector.md#proper-upstream-fix) for details.
+   with the main host. The probe-lab fork (`v0.47.0-autonat_otel`) already
+   applies this workaround locally. See
+   [upstream fix](udp-black-hole-detector.md#proper-upstream-fix) for the
+   proposed upstream fix.
 
 2. **Server count:** With `targetConfidence=3` and 2 primary addresses
    (TCP + QUIC), at least 6 servers are needed (3 per address). Use 7 for
