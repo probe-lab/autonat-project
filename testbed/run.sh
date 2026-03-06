@@ -93,6 +93,10 @@ SCENARIOS=$(echo "$SCENARIOS" | jq --argjson dt "$DEFAULT_TIMEOUT" --argjson dr 
         obs_addr_thresh: (.obs_addr_thresh // null),
         mock_behaviors: (.mock_behaviors // null),
         mock_delays: (.mock_delays // null),
+        mock_jitters: (.mock_jitters // null),
+        mock_probabilities: (.mock_probabilities // null),
+        mock_tcp_behaviors: (.mock_tcp_behaviors // null),
+        mock_quic_behaviors: (.mock_quic_behaviors // null),
         assertions: (.assertions // null)
     }]
 ')
@@ -193,6 +197,62 @@ validate_scenario() {
             exit 1
         fi
     fi
+
+    # mock_jitters: must be array of exactly 3 non-negative integers
+    local has_jitters
+    has_jitters=$(echo "$s" | jq '.mock_jitters != null')
+    if [[ "$has_jitters" == "true" ]]; then
+        local jitters_len
+        jitters_len=$(echo "$s" | jq '.mock_jitters | length')
+        if [[ "$jitters_len" -ne 3 ]]; then
+            echo "$prefix: mock_jitters must have exactly 3 elements (got $jitters_len)"
+            exit 1
+        fi
+        local invalid_jitters
+        invalid_jitters=$(echo "$s" | jq -r '.mock_jitters[] | select(type != "number" or . < 0 or . != (. | floor))')
+        if [[ -n "$invalid_jitters" ]]; then
+            echo "$prefix: mock_jitters values must be non-negative integers (got invalid: $invalid_jitters)"
+            exit 1
+        fi
+    fi
+
+    # mock_probabilities: must be array of exactly 3 numbers in [0.0, 1.0]
+    local has_probs
+    has_probs=$(echo "$s" | jq '.mock_probabilities != null')
+    if [[ "$has_probs" == "true" ]]; then
+        local probs_len
+        probs_len=$(echo "$s" | jq '.mock_probabilities | length')
+        if [[ "$probs_len" -ne 3 ]]; then
+            echo "$prefix: mock_probabilities must have exactly 3 elements (got $probs_len)"
+            exit 1
+        fi
+        local invalid_probs
+        invalid_probs=$(echo "$s" | jq -r '.mock_probabilities[] | select(type != "number" or . < 0 or . > 1)')
+        if [[ -n "$invalid_probs" ]]; then
+            echo "$prefix: mock_probabilities values must be numbers in [0.0, 1.0] (got invalid: $invalid_probs)"
+            exit 1
+        fi
+    fi
+
+    # mock_tcp_behaviors / mock_quic_behaviors: optional array of 3 valid behavior strings or nulls
+    for field in mock_tcp_behaviors mock_quic_behaviors; do
+        local has_field
+        has_field=$(echo "$s" | jq ".$field != null")
+        if [[ "$has_field" == "true" ]]; then
+            local field_len
+            field_len=$(echo "$s" | jq ".$field | length")
+            if [[ "$field_len" -ne 3 ]]; then
+                echo "$prefix: $field must have exactly 3 elements (got $field_len)"
+                exit 1
+            fi
+            local invalid_field
+            invalid_field=$(echo "$s" | jq -r ".$field[] | select(. != null) | select(. as \$b | [\"reject\",\"refuse\",\"force-unreachable\",\"internal-error\",\"timeout\",\"force-reachable\",\"wrong-nonce\",\"no-dialback-msg\",\"probabilistic\",\"actual\"] | index(\$b) | not)")
+            if [[ -n "$invalid_field" ]]; then
+                echo "$prefix: invalid $field value(s): $invalid_field"
+                exit 1
+            fi
+        fi
+    done
 
     # port_remap: must match INT:INT format
     local port_remap
@@ -345,9 +405,13 @@ for ((i=0; i<TOTAL; i++)); do
     HAS_ASSERTIONS=$(echo "$S" | jq '.assertions != null')
     HAS_MOCK=$(echo "$S" | jq '.mock_behaviors != null')
 
-    # Extract mock behaviors and delays (arrays → per-server env vars)
+    # Extract mock behaviors and per-server options (arrays → per-server env vars)
     MOCK_BEHAVIOR_1="" MOCK_BEHAVIOR_2="" MOCK_BEHAVIOR_3=""
     MOCK_DELAY_1="" MOCK_DELAY_2="" MOCK_DELAY_3=""
+    MOCK_JITTER_1="" MOCK_JITTER_2="" MOCK_JITTER_3=""
+    MOCK_PROBABILITY_1="" MOCK_PROBABILITY_2="" MOCK_PROBABILITY_3=""
+    MOCK_TCP_BEHAVIOR_1="" MOCK_TCP_BEHAVIOR_2="" MOCK_TCP_BEHAVIOR_3=""
+    MOCK_QUIC_BEHAVIOR_1="" MOCK_QUIC_BEHAVIOR_2="" MOCK_QUIC_BEHAVIOR_3=""
     if [[ "$HAS_MOCK" == "true" ]]; then
         MOCK_BEHAVIOR_1=$(echo "$S" | jq -r '.mock_behaviors[0] // "force-unreachable"')
         MOCK_BEHAVIOR_2=$(echo "$S" | jq -r '.mock_behaviors[1] // "force-unreachable"')
@@ -355,6 +419,18 @@ for ((i=0; i<TOTAL; i++)); do
         MOCK_DELAY_1=$(echo "$S" | jq -r '.mock_delays[0] // 0')
         MOCK_DELAY_2=$(echo "$S" | jq -r '.mock_delays[1] // 0')
         MOCK_DELAY_3=$(echo "$S" | jq -r '.mock_delays[2] // 0')
+        MOCK_JITTER_1=$(echo "$S" | jq -r '.mock_jitters[0] // 0')
+        MOCK_JITTER_2=$(echo "$S" | jq -r '.mock_jitters[1] // 0')
+        MOCK_JITTER_3=$(echo "$S" | jq -r '.mock_jitters[2] // 0')
+        MOCK_PROBABILITY_1=$(echo "$S" | jq -r '.mock_probabilities[0] // 0.5')
+        MOCK_PROBABILITY_2=$(echo "$S" | jq -r '.mock_probabilities[1] // 0.5')
+        MOCK_PROBABILITY_3=$(echo "$S" | jq -r '.mock_probabilities[2] // 0.5')
+        MOCK_TCP_BEHAVIOR_1=$(echo "$S" | jq -r '.mock_tcp_behaviors[0] // ""')
+        MOCK_TCP_BEHAVIOR_2=$(echo "$S" | jq -r '.mock_tcp_behaviors[1] // ""')
+        MOCK_TCP_BEHAVIOR_3=$(echo "$S" | jq -r '.mock_tcp_behaviors[2] // ""')
+        MOCK_QUIC_BEHAVIOR_1=$(echo "$S" | jq -r '.mock_quic_behaviors[0] // ""')
+        MOCK_QUIC_BEHAVIOR_2=$(echo "$S" | jq -r '.mock_quic_behaviors[1] // ""')
+        MOCK_QUIC_BEHAVIOR_3=$(echo "$S" | jq -r '.mock_quic_behaviors[2] // ""')
     fi
 
     # Compute obs_addr_thresh if not overridden
@@ -433,6 +509,10 @@ for ((i=0; i<TOTAL; i++)); do
         export OBS_ADDR_THRESH="$OBS_THRESH"
         export MOCK_BEHAVIOR_1 MOCK_BEHAVIOR_2 MOCK_BEHAVIOR_3
         export MOCK_DELAY_1 MOCK_DELAY_2 MOCK_DELAY_3
+        export MOCK_JITTER_1 MOCK_JITTER_2 MOCK_JITTER_3
+        export MOCK_PROBABILITY_1 MOCK_PROBABILITY_2 MOCK_PROBABILITY_3
+        export MOCK_TCP_BEHAVIOR_1 MOCK_TCP_BEHAVIOR_2 MOCK_TCP_BEHAVIOR_3
+        export MOCK_QUIC_BEHAVIOR_1 MOCK_QUIC_BEHAVIOR_2 MOCK_QUIC_BEHAVIOR_3
 
         # Clean up from previous runs
         # shellcheck disable=SC2086

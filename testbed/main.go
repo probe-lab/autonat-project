@@ -52,6 +52,10 @@ func main() {
 	obsAddrThresh := flag.Int("obs-addr-thresh", 0, "Override observed address activation threshold (default: 0 = use go-libp2p default of 4)")
 	behaviorFlag := flag.String("behavior", "force-unreachable", "Mock server behavior (mock-server role only)")
 	delayFlag := flag.Int("delay", 0, "Mock server response delay in milliseconds (mock-server role only)")
+	jitterFlag := flag.Int("jitter", 0, "Random jitter added to delay in milliseconds; actual delay = delay + rand(0, jitter) (mock-server role only)")
+	probabilityFlag := flag.Float64("probability", 0.5, "P(reachable) for probabilistic behavior, 0.0–1.0 (mock-server role only)")
+	tcpBehaviorFlag := flag.String("tcp-behavior", "", "Behavior override for TCP addresses; overrides --behavior for TCP probes (mock-server role only)")
+	quicBehaviorFlag := flag.String("quic-behavior", "", "Behavior override for QUIC addresses; overrides --behavior for QUIC probes (mock-server role only)")
 	dhtMode := flag.String("dht-mode", "auto", "DHT mode: auto, client, or server")
 	traceFile := flag.String("trace-file", "", "Output file for OTEL traces (JSON); empty = no tracing")
 	otlpEndpoint := flag.String("otlp-endpoint", "", "Optional OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318); can be used alongside --trace-file")
@@ -81,18 +85,40 @@ func main() {
 	if *role == "mock-server" {
 		behavior, err := parseBehavior(*behaviorFlag)
 		if err != nil {
-			log.Fatalf("Invalid behavior: %v", err)
+			log.Fatalf("Invalid --behavior: %v", err)
 		}
-		delay := time.Duration(*delayFlag) * time.Millisecond
 
-		ms, err := startMockServer(listenAddrs, behavior, delay)
+		cfg := MockServerConfig{
+			Behavior:    behavior,
+			Delay:       time.Duration(*delayFlag) * time.Millisecond,
+			Jitter:      time.Duration(*jitterFlag) * time.Millisecond,
+			Probability: *probabilityFlag,
+		}
+
+		if *tcpBehaviorFlag != "" {
+			b, err := parseBehavior(*tcpBehaviorFlag)
+			if err != nil {
+				log.Fatalf("Invalid --tcp-behavior: %v", err)
+			}
+			cfg.TCPBehavior = &b
+		}
+		if *quicBehaviorFlag != "" {
+			b, err := parseBehavior(*quicBehaviorFlag)
+			if err != nil {
+				log.Fatalf("Invalid --quic-behavior: %v", err)
+			}
+			cfg.QUICBehavior = &b
+		}
+
+		ms, err := startMockServer(listenAddrs, cfg)
 		if err != nil {
 			log.Fatalf("Failed to start mock server: %v", err)
 		}
 		defer ms.Close()
 
 		mockHost := ms.Host()
-		log.Printf("Mock server started: %s (behavior=%s, delay=%s)", mockHost.ID(), behavior, delay)
+		log.Printf("Mock server started: %s (behavior=%s, delay=%s, jitter=%s, probability=%.2f)",
+			mockHost.ID(), behavior, cfg.Delay, cfg.Jitter, cfg.Probability)
 		for _, addr := range mockHost.Addrs() {
 			log.Printf("  Listening on: %s/p2p/%s", addr, mockHost.ID())
 		}
