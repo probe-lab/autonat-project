@@ -622,6 +622,10 @@ echo "=== Summary: $SCENARIO_NAME ==="
 echo "Total:  $SCENARIO_NUM"
 echo "Passed: $TOTAL_PASS"
 echo "Failed: $TOTAL_FAIL"
+if [[ $SCENARIO_NUM -gt 0 ]]; then
+    FNR=$(awk "BEGIN { printf \"%.4f\", $TOTAL_FAIL / $SCENARIO_NUM }")
+    echo "FNR:    $FNR  ($TOTAL_FAIL false negatives out of $SCENARIO_NUM runs)"
+fi
 echo "Output: $RESULT_DIR/"
 
 if [[ $TOTAL_FAIL -gt 0 ]]; then

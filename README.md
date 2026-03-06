@@ -196,7 +196,7 @@ filtering, and Docker compose usage.
 - [Testbed & Experiments](docs/testbed.md) — Docker architecture, iptables rules, experiment catalog
 - [OpenTelemetry Tracing](docs/otel-tracing.md) — trace format, span hierarchy, querying traces
 - [Running Experiments](testbed/README.md) — quick start, scenario files, runner usage
-- [Project Planning](docs/planning.md) — task tracking and phases
+- [Project Planning](https://github.com/orgs/probe-lab/projects/2) — task tracking and phases
 - [Obol Impact](docs/obol.md) — impact analysis for Obol Network
 - [Avail Impact](docs/avail.md) — impact analysis for Avail Network
 
