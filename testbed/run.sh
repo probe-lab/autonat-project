@@ -97,6 +97,8 @@ SCENARIOS=$(echo "$SCENARIOS" | jq --argjson dt "$DEFAULT_TIMEOUT" --argjson dr 
         mock_probabilities: (.mock_probabilities // null),
         mock_tcp_behaviors: (.mock_tcp_behaviors // null),
         mock_quic_behaviors: (.mock_quic_behaviors // null),
+        port_forward: (.port_forward // null),
+        upnp: (.upnp // null),
         assertions: (.assertions // null)
     }]
 ')
@@ -401,6 +403,8 @@ for ((i=0; i<TOTAL; i++)); do
     RUNS=$(echo "$S" | jq -r '.runs')
     TCP_BLOCK_PORT=$(echo "$S" | jq -r '.tcp_block_port // empty')
     PORT_REMAP=$(echo "$S" | jq -r '.port_remap // empty')
+    PORT_FORWARD=$(echo "$S" | jq -r '.port_forward // empty')
+    UPNP=$(echo "$S" | jq -r '.upnp // empty')
     OBS_THRESH=$(echo "$S" | jq -r '.obs_addr_thresh // empty')
     HAS_ASSERTIONS=$(echo "$S" | jq '.assertions != null')
     HAS_MOCK=$(echo "$S" | jq '.mock_behaviors != null')
@@ -505,7 +509,7 @@ for ((i=0; i<TOTAL; i++)); do
         fi
 
         # Export environment for docker compose
-        export NAT_TYPE TRANSPORT PACKET_LOSS LATENCY_MS TCP_BLOCK_PORT PORT_REMAP
+        export NAT_TYPE TRANSPORT PACKET_LOSS LATENCY_MS TCP_BLOCK_PORT PORT_REMAP PORT_FORWARD UPNP
         export OBS_ADDR_THRESH="$OBS_THRESH"
         export MOCK_BEHAVIOR_1 MOCK_BEHAVIOR_2 MOCK_BEHAVIOR_3
         export MOCK_DELAY_1 MOCK_DELAY_2 MOCK_DELAY_3
@@ -622,6 +626,10 @@ echo "=== Summary: $SCENARIO_NAME ==="
 echo "Total:  $SCENARIO_NUM"
 echo "Passed: $TOTAL_PASS"
 echo "Failed: $TOTAL_FAIL"
+if [[ $SCENARIO_NUM -gt 0 ]]; then
+    FNR=$(awk "BEGIN { printf \"%.4f\", $TOTAL_FAIL / $SCENARIO_NUM }")
+    echo "FNR:    $FNR  ($TOTAL_FAIL false negatives out of $SCENARIO_NUM runs)"
+fi
 echo "Output: $RESULT_DIR/"
 
 if [[ $TOTAL_FAIL -gt 0 ]]; then

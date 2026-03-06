@@ -97,6 +97,9 @@ services:
       - LATENCY_MS=${LATENCY_MS:-0}
       - TCP_BLOCK_PORT=${TCP_BLOCK_PORT:-}
       - PORT_REMAP=${PORT_REMAP:-}
+      - PORT_FORWARD=${PORT_FORWARD:-}
+      - PORT_FORWARD_PORT=${PORT_FORWARD_PORT:-4001}
+      - UPNP=${UPNP:-}
       - CLIENT_PRIVATE_IP=10.0.1.10
     networks:
       public-net:

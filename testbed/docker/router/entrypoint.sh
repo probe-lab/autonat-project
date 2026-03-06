@@ -23,12 +23,25 @@ TCP_BLOCK_PORT="${TCP_BLOCK_PORT:-}"
 # Simulates NATs that use EIM but don't preserve the listen port (hotel WiFi behavior).
 PORT_REMAP="${PORT_REMAP:-}"
 
+# Static port forwarding (PORT_FORWARD=true)
+# Adds DNAT rules to expose the client's listen port through the router's public IP.
+# Most useful combined with port-restricted or symmetric NAT.
+PORT_FORWARD="${PORT_FORWARD:-}"
+PORT_FORWARD_PORT="${PORT_FORWARD_PORT:-4001}"
+
+# UPnP/NAT-PMP emulation (UPNP=true)
+# Runs miniupnpd on the private-net interface so the client can request
+# port mappings dynamically via libp2p's NATPortMap() (go-nat library).
+UPNP="${UPNP:-}"
+
 echo "=== NAT Router ==="
 echo "NAT type:          $NAT_TYPE"
 echo "Packet loss:       ${PACKET_LOSS}%"
 echo "Latency:           ${LATENCY_MS}ms"
 echo "TCP block port:    ${TCP_BLOCK_PORT:-none}"
 echo "Port remap:        ${PORT_REMAP:-none}"
+echo "Port forward:      ${PORT_FORWARD:-disabled} (port=${PORT_FORWARD_PORT})"
+echo "UPnP:              ${UPNP:-disabled}"
 
 # Detect interface names and IPs dynamically.
 # The router is connected to two Docker networks:
@@ -192,6 +205,42 @@ if [[ -n "$PORT_REMAP" ]]; then
     # Insert before MASQUERADE so these match first
     iptables -t nat -I POSTROUTING -o "$PUB_IFACE" -p tcp --sport "$REMAP_INT" -j SNAT --to-source "$ROUTER_PUBLIC_IP:$REMAP_EXT"
     iptables -t nat -I POSTROUTING -o "$PUB_IFACE" -p udp --sport "$REMAP_INT" -j SNAT --to-source "$ROUTER_PUBLIC_IP:$REMAP_EXT"
+fi
+
+# Static port forwarding: expose CLIENT_PRIVATE_IP:PORT through the router's public IP.
+# Inserts DNAT rules in PREROUTING so inbound traffic on the forwarded port reaches the
+# client, bypassing any conntrack filtering from the NAT type configuration above.
+# Also inserts FORWARD ACCEPT rules so forwarded packets are not dropped.
+if [[ -n "$PORT_FORWARD" && "$PORT_FORWARD" != "false" ]]; then
+    if [[ -z "${CLIENT_PRIVATE_IP:-}" ]]; then
+        echo "PORT_FORWARD: CLIENT_PRIVATE_IP not set, skipping port forward"
+    else
+        echo "Port forwarding: ${ROUTER_PUBLIC_IP}:${PORT_FORWARD_PORT} → ${CLIENT_PRIVATE_IP}:${PORT_FORWARD_PORT} (TCP+UDP)"
+        iptables -t nat -I PREROUTING -i "$PUB_IFACE" -p tcp --dport "$PORT_FORWARD_PORT" -j DNAT --to-destination "${CLIENT_PRIVATE_IP}:${PORT_FORWARD_PORT}"
+        iptables -t nat -I PREROUTING -i "$PUB_IFACE" -p udp --dport "$PORT_FORWARD_PORT" -j DNAT --to-destination "${CLIENT_PRIVATE_IP}:${PORT_FORWARD_PORT}"
+        # Allow forwarded packets through regardless of conntrack state.
+        iptables -I FORWARD -i "$PUB_IFACE" -o "$PRIV_IFACE" -p tcp -d "$CLIENT_PRIVATE_IP" --dport "$PORT_FORWARD_PORT" -j ACCEPT
+        iptables -I FORWARD -i "$PUB_IFACE" -o "$PRIV_IFACE" -p udp -d "$CLIENT_PRIVATE_IP" --dport "$PORT_FORWARD_PORT" -j ACCEPT
+    fi
+fi
+
+# UPnP/NAT-PMP via miniupnpd: lets the client dynamically request port mappings.
+# miniupnpd manages its own iptables chain (MINIUPNPD) and handles IGD discovery
+# via SSDP on the private-net interface. libp2p's NATPortMap() will find and use it.
+if [[ -n "$UPNP" && "$UPNP" != "false" ]]; then
+    echo "Starting miniupnpd (UPnP IGD + NAT-PMP)"
+    mkdir -p /etc/miniupnpd
+    cat > /etc/miniupnpd/miniupnpd.conf <<EOF
+ext_ifname=$PUB_IFACE
+listening_ip=$ROUTER_PRIVATE_IP/24
+port=2189
+system_uptime=yes
+secure_mode=no
+enable_natpmp=yes
+clean_ruleset_interval=600
+EOF
+    miniupnpd -f /etc/miniupnpd/miniupnpd.conf
+    echo "miniupnpd started"
 fi
 
 # Apply network degradation if configured.

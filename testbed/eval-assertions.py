@@ -98,6 +98,16 @@ def matches(event, event_type, filters):
         elif key == "reachability":
             if event.get("reachability") != val:
                 return False
+        elif key == "not_empty":
+            # val is a field name; passes only if that field is a non-empty list
+            field_val = event.get(val, [])
+            if not isinstance(field_val, list) or len(field_val) == 0:
+                return False
+        elif key == "is_empty":
+            # val is a field name; passes only if that field is an empty list
+            field_val = event.get(val, [])
+            if not isinstance(field_val, list) or len(field_val) > 0:
+                return False
         else:
             if str(event.get(key, "")) != str(val):
                 return False
