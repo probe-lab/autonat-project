@@ -337,6 +337,10 @@ services:
       --role=mock-server
       --behavior=${MOCK_BEHAVIOR_1:-force-unreachable}
       --delay=${MOCK_DELAY_1:-0}
+      --jitter=${MOCK_JITTER_1:-0}
+      --probability=${MOCK_PROBABILITY_1:-0.5}
+      --tcp-behavior=${MOCK_TCP_BEHAVIOR_1:-}
+      --quic-behavior=${MOCK_QUIC_BEHAVIOR_1:-}
       --transport=${TRANSPORT:-both}
       --port=4001
       --addr-file=/peer-addrs/mock-server-1
@@ -359,6 +363,10 @@ services:
       --role=mock-server
       --behavior=${MOCK_BEHAVIOR_2:-force-unreachable}
       --delay=${MOCK_DELAY_2:-0}
+      --jitter=${MOCK_JITTER_2:-0}
+      --probability=${MOCK_PROBABILITY_2:-0.5}
+      --tcp-behavior=${MOCK_TCP_BEHAVIOR_2:-}
+      --quic-behavior=${MOCK_QUIC_BEHAVIOR_2:-}
       --transport=${TRANSPORT:-both}
       --port=4001
       --addr-file=/peer-addrs/mock-server-2
@@ -381,6 +389,10 @@ services:
       --role=mock-server
       --behavior=${MOCK_BEHAVIOR_3:-force-unreachable}
       --delay=${MOCK_DELAY_3:-0}
+      --jitter=${MOCK_JITTER_3:-0}
+      --probability=${MOCK_PROBABILITY_3:-0.5}
+      --tcp-behavior=${MOCK_TCP_BEHAVIOR_3:-}
+      --quic-behavior=${MOCK_QUIC_BEHAVIOR_3:-}
       --transport=${TRANSPORT:-both}
       --port=4001
       --addr-file=/peer-addrs/mock-server-3

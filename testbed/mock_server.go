@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
@@ -39,6 +40,9 @@ const (
 	BehaviorForceReachable // dial back with correct nonce, respond OK + OK
 	BehaviorWrongNonce     // dial back with nonce-1
 	BehaviorNoDialbackMsg  // connect but don't send DialBack message
+
+	// Category C — probabilistic.
+	BehaviorProbabilistic // randomly force-reachable or force-unreachable per request
 )
 
 func parseBehavior(s string) (MockBehavior, error) {
@@ -59,8 +63,12 @@ func parseBehavior(s string) (MockBehavior, error) {
 		return BehaviorWrongNonce, nil
 	case "no-dialback-msg":
 		return BehaviorNoDialbackMsg, nil
+	case "probabilistic":
+		return BehaviorProbabilistic, nil
+	case "actual":
+		return BehaviorForceReachable, nil // alias: real dial-back, reports actual result
 	default:
-		return 0, fmt.Errorf("unknown mock behavior: %q (valid: reject, refuse, force-unreachable, internal-error, timeout, force-reachable, wrong-nonce, no-dialback-msg)", s)
+		return 0, fmt.Errorf("unknown mock behavior: %q (valid: reject, refuse, force-unreachable, internal-error, timeout, force-reachable, wrong-nonce, no-dialback-msg, probabilistic, actual)", s)
 	}
 }
 
@@ -82,29 +90,54 @@ func (b MockBehavior) String() string {
 		return "wrong-nonce"
 	case BehaviorNoDialbackMsg:
 		return "no-dialback-msg"
+	case BehaviorProbabilistic:
+		return "probabilistic"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(b))
 	}
 }
 
-// needsDialBack returns true for Category B behaviors that require a dialerHost.
+// needsDialBack returns true for behaviors that require a dialerHost.
 func (b MockBehavior) needsDialBack() bool {
-	return b == BehaviorForceReachable || b == BehaviorWrongNonce || b == BehaviorNoDialbackMsg
+	return b == BehaviorForceReachable || b == BehaviorWrongNonce || b == BehaviorNoDialbackMsg || b == BehaviorProbabilistic
+}
+
+// MockServerConfig holds all configuration for a MockServer.
+type MockServerConfig struct {
+	Behavior     MockBehavior
+	Delay        time.Duration
+	Jitter       time.Duration // random [0, Jitter) added to Delay per request
+	Probability  float64       // for BehaviorProbabilistic: P(force-reachable); default 0.5
+	TCPBehavior  *MockBehavior // behavior override for TCP addresses; nil = use Behavior
+	QUICBehavior *MockBehavior // behavior override for QUIC addresses; nil = use Behavior
+}
+
+// needsDialBack returns true if any configured behavior requires a dialerHost.
+func (cfg MockServerConfig) needsDialBack() bool {
+	if cfg.Behavior.needsDialBack() {
+		return true
+	}
+	if cfg.TCPBehavior != nil && cfg.TCPBehavior.needsDialBack() {
+		return true
+	}
+	if cfg.QUICBehavior != nil && cfg.QUICBehavior.needsDialBack() {
+		return true
+	}
+	return false
 }
 
 // MockServer is a controllable AutoNAT v2 server that generates specific
 // protobuf responses without using go-libp2p's built-in AutoNAT implementation.
 type MockServer struct {
 	host       host.Host
-	dialerHost host.Host // nil for Category A behaviors
-	behavior   MockBehavior
-	delay      time.Duration
+	dialerHost host.Host // nil when no behavior requires dial-back
+	cfg        MockServerConfig
 }
 
 // startMockServer creates and starts a mock AutoNAT v2 server.
 // It registers a stream handler for the dial-request protocol, making the
 // server visible to clients via Identify as a valid AutoNAT v2 server.
-func startMockServer(listenAddrs []string, behavior MockBehavior, delay time.Duration) (*MockServer, error) {
+func startMockServer(listenAddrs []string, cfg MockServerConfig) (*MockServer, error) {
 	// Create host WITHOUT EnableAutoNATv2() to avoid the built-in handler.
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(listenAddrs...),
@@ -115,15 +148,11 @@ func startMockServer(listenAddrs []string, behavior MockBehavior, delay time.Dur
 		return nil, fmt.Errorf("creating mock server host: %w", err)
 	}
 
-	ms := &MockServer{
-		host:     h,
-		behavior: behavior,
-		delay:    delay,
-	}
+	ms := &MockServer{host: h, cfg: cfg}
 
-	// For Category B behaviors, create a separate dialerHost with a different
-	// peer ID for performing dial-backs (same pattern as go-libp2p's server).
-	if behavior.needsDialBack() {
+	// For behaviors that require dial-back, create a separate dialerHost with
+	// a different peer ID (same pattern as go-libp2p's server).
+	if cfg.needsDialBack() {
 		dialerHost, err := libp2p.New(
 			libp2p.NoListenAddrs,
 			libp2p.UDPBlackHoleSuccessCounter(nil),
@@ -140,6 +169,43 @@ func startMockServer(listenAddrs []string, behavior MockBehavior, delay time.Dur
 	log.Printf("Mock server registered stream handler for %s", mockDialProtocol)
 
 	return ms, nil
+}
+
+// isTCPAddr reports whether addr uses TCP as the transport.
+func isTCPAddr(addr ma.Multiaddr) bool {
+	_, err := addr.ValueForProtocol(ma.P_TCP)
+	return err == nil
+}
+
+// isQUICAddr reports whether addr uses QUIC or QUICv1 as the transport.
+func isQUICAddr(addr ma.Multiaddr) bool {
+	_, err1 := addr.ValueForProtocol(ma.P_QUIC_V1)
+	_, err2 := addr.ValueForProtocol(ma.P_QUIC)
+	return err1 == nil || err2 == nil
+}
+
+// determineBehavior resolves the effective behavior for a given probed address,
+// applying per-transport overrides and probabilistic selection.
+func (ms *MockServer) determineBehavior(addr ma.Multiaddr) MockBehavior {
+	if addr != nil {
+		if ms.cfg.TCPBehavior != nil && isTCPAddr(addr) {
+			return *ms.cfg.TCPBehavior
+		}
+		if ms.cfg.QUICBehavior != nil && isQUICAddr(addr) {
+			return *ms.cfg.QUICBehavior
+		}
+	}
+	if ms.cfg.Behavior == BehaviorProbabilistic {
+		p := ms.cfg.Probability
+		if p <= 0 {
+			p = 0.5
+		}
+		if rand.Float64() < p {
+			return BehaviorForceReachable
+		}
+		return BehaviorForceUnreachable
+	}
+	return ms.cfg.Behavior
 }
 
 // Close shuts down the mock server and its dialer host.
@@ -159,7 +225,7 @@ func (ms *MockServer) handleDialRequest(s network.Stream) {
 	defer s.Close()
 
 	remotePeer := s.Conn().RemotePeer()
-	log.Printf("Mock server: received dial request from %s (behavior=%s)", remotePeer.ShortString(), ms.behavior)
+	log.Printf("Mock server: received dial request from %s (behavior=%s)", remotePeer.ShortString(), ms.cfg.Behavior)
 
 	r := pbio.NewDelimitedReader(s, mockMaxMsgSize)
 	w := pbio.NewDelimitedWriter(s)
@@ -192,13 +258,19 @@ func (ms *MockServer) handleDialRequest(s network.Stream) {
 		}
 	}
 
-	// Apply delay if configured.
-	if ms.delay > 0 {
-		log.Printf("Mock server: delaying %s before responding", ms.delay)
-		time.Sleep(ms.delay)
+	// Apply delay + jitter if configured.
+	actualDelay := ms.cfg.Delay
+	if ms.cfg.Jitter > 0 {
+		actualDelay += time.Duration(rand.Int63n(int64(ms.cfg.Jitter)))
+	}
+	if actualDelay > 0 {
+		log.Printf("Mock server: delaying %s before responding", actualDelay)
+		time.Sleep(actualDelay)
 	}
 
-	switch ms.behavior {
+	behavior := ms.determineBehavior(firstAddr)
+	log.Printf("Mock server: effective behavior=%s", behavior)
+	switch behavior {
 	case BehaviorReject:
 		ms.sendResponse(w, pb.DialResponse_E_REQUEST_REJECTED, 0, pb.DialStatus_UNUSED)
 

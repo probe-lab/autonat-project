@@ -97,3 +97,38 @@ scenarios:
         event: reachable_addrs_changed
         filter: { message_contains: "unreachable=" }
         message: "Client should not converge (all nonces wrong)"
+
+  # --- New features ---
+
+  - name: probabilistic-reachable
+    nat_type: none
+    transport: both
+    mock_behaviors: [probabilistic, probabilistic, probabilistic]
+    mock_probabilities: [0.9, 0.9, 0.9]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "Addresses should eventually converge (high P(reachable))"
+
+  - name: per-transport-tcp-reachable-quic-unreachable
+    nat_type: none
+    transport: both
+    mock_behaviors: [force-reachable, force-reachable, force-reachable]
+    mock_tcp_behaviors: [force-reachable, force-reachable, force-reachable]
+    mock_quic_behaviors: [force-unreachable, force-unreachable, force-unreachable]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "TCP reachable, QUIC unreachable"
+
+  - name: jitter-response
+    nat_type: none
+    transport: both
+    mock_behaviors: [force-reachable, force-reachable, force-reachable]
+    mock_delays: [0, 0, 0]
+    mock_jitters: [2000, 2000, 2000]
+    timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "Addresses should converge despite variable response times"
