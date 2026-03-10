@@ -19,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 	"github.com/libp2p/go-libp2p/p2p/host/observedaddrs"
 	ma "github.com/multiformats/go-multiaddr"
 	"go.opentelemetry.io/otel"
@@ -210,8 +211,11 @@ func main() {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Subscribe to all event bus events
-	go subscribeAllEvents(ctx, h, sessionSpan)
+	// Subscribe to events in two separate subscriptions to prevent high-frequency
+	// peer events (identification, connectedness) from filling the buffer and
+	// dropping important low-frequency events (reachability, NAT type).
+	go subscribeImportantEvents(ctx, h, sessionSpan)
+	go subscribePeerEvents(ctx, h, sessionSpan)
 
 	// Print periodic summary of high-frequency peer events
 	go func() {
@@ -341,22 +345,49 @@ func parseDHTMode(mode string) dht.ModeOpt {
 	}
 }
 
-// subscribeAllEvents subscribes to all relevant event bus events and dispatches them.
-func subscribeAllEvents(ctx context.Context, h host.Host, sessionSpan trace.Span) {
+// subscribeImportantEvents subscribes to low-frequency but critical events
+// (reachability, NAT type, local addresses) with a dedicated subscription so
+// that high-frequency peer events cannot overflow the buffer and drop them.
+func subscribeImportantEvents(ctx context.Context, h host.Host, sessionSpan trace.Span) {
 	sub, err := h.EventBus().Subscribe([]any{
 		new(event.EvtLocalReachabilityChanged),
 		new(event.EvtHostReachableAddrsChanged),
 		new(event.EvtNATDeviceTypeChanged),
 		new(event.EvtLocalAddressesUpdated),
+		new(event.EvtLocalProtocolsUpdated),
+		new(event.EvtAutoRelayAddrsUpdated),
+	}, eventbus.BufSize(64))
+	if err != nil {
+		log.Printf("Failed to subscribe to important events: %v", err)
+		return
+	}
+	defer sub.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-sub.Out():
+			if !ok {
+				return
+			}
+			handleEvent(evt, h, sessionSpan)
+		}
+	}
+}
+
+// subscribePeerEvents subscribes to high-frequency peer lifecycle events.
+// These are kept in a separate subscription to prevent flooding the important
+// events subscription buffer.
+func subscribePeerEvents(ctx context.Context, h host.Host, sessionSpan trace.Span) {
+	sub, err := h.EventBus().Subscribe([]any{
 		new(event.EvtPeerIdentificationCompleted),
 		new(event.EvtPeerIdentificationFailed),
 		new(event.EvtPeerConnectednessChanged),
 		new(event.EvtPeerProtocolsUpdated),
-		new(event.EvtLocalProtocolsUpdated),
-		new(event.EvtAutoRelayAddrsUpdated),
-	})
+	}, eventbus.BufSize(256))
 	if err != nil {
-		log.Printf("Failed to subscribe to events: %v", err)
+		log.Printf("Failed to subscribe to peer events: %v", err)
 		return
 	}
 	defer sub.Close()
