@@ -93,11 +93,9 @@ for ((run=1; run<=RUNS; run++)); do
     NODE_PID=""
 
     # Start the node
-    if [[ -n "$PEERS" ]]; then
-        "$BINARY" --role=client --peers="$PEERS" --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG" &
-    else
-        "$BINARY" --role=client --bootstrap --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG" &
-    fi
+    NODE_FLAGS=(--role=client --bootstrap --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG")
+    [[ -n "$PEERS" ]] && NODE_FLAGS+=(--peers="$PEERS")
+    "$BINARY" "${NODE_FLAGS[@]}" &
     NODE_PID=$!
 
     echo "Started node (PID $NODE_PID), tracing to $TRACE_LOG"
