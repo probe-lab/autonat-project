@@ -13,6 +13,7 @@ set -euo pipefail
 # Options:
 #   --transport=<tcp|quic|both>   Transport to listen on (default: both)
 #   --port=<number>               Listen port (default: 4001)
+#   --announce-ip=<ip>            Public IP to announce (auto-detected on AWS EC2)
 #   --addr-file=<path>            Write multiaddr to file for client discovery
 #   --otlp-endpoint=<url>         Also push traces to OTLP collector (e.g. Jaeger)
 #   --label=<string>              Label for output files (default: server)
@@ -21,6 +22,13 @@ set -euo pipefail
 #   ./testbed/run-server.sh
 #   ./testbed/run-server.sh --transport=quic --port=5001
 #   ./testbed/run-server.sh --otlp-endpoint=http://localhost:4318
+#   ./testbed/run-server.sh --announce-ip=54.123.45.67   # manual override
+#
+# AWS EC2:
+#   On AWS EC2, the public IP is not bound to the network interface.
+#   This script auto-detects the public IP via IMDS (169.254.169.254) and
+#   passes it as --announce-ip so clients receive the correct multiaddr.
+#   Ensure the security group allows TCP+UDP on the listen port (default 4001).
 #
 # Output:
 #   results/server/<label>-<timestamp>.trace.json  — OTEL trace
@@ -38,6 +46,7 @@ cd "$PROJECT_DIR"
 # Defaults
 TRANSPORT="both"
 PORT=4001
+ANNOUNCE_IP=""
 ADDR_FILE=""
 OTLP_ENDPOINT=""
 LABEL="server"
@@ -46,6 +55,7 @@ for arg in "$@"; do
     case "$arg" in
         --transport=*)   TRANSPORT="${arg#*=}" ;;
         --port=*)        PORT="${arg#*=}" ;;
+        --announce-ip=*) ANNOUNCE_IP="${arg#*=}" ;;
         --addr-file=*)   ADDR_FILE="${arg#*=}" ;;
         --otlp-endpoint=*) OTLP_ENDPOINT="${arg#*=}" ;;
         --label=*)       LABEL="${arg#*=}" ;;
@@ -65,6 +75,25 @@ for cmd in go jq; do
     fi
 done
 
+# Auto-detect public IP on AWS EC2 via IMDSv2 if --announce-ip not set
+if [[ -z "$ANNOUNCE_IP" ]]; then
+    if command -v curl &>/dev/null; then
+        # Try IMDSv2 (token-based, required on newer instances)
+        IMDS_TOKEN=$(curl -sf --connect-timeout 1 -X PUT \
+            "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
+        if [[ -n "$IMDS_TOKEN" ]]; then
+            AWS_PUBLIC_IP=$(curl -sf --connect-timeout 1 \
+                -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+                "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+            if [[ -n "$AWS_PUBLIC_IP" ]]; then
+                echo "AWS EC2 detected. Public IP via IMDS: $AWS_PUBLIC_IP"
+                ANNOUNCE_IP="$AWS_PUBLIC_IP"
+            fi
+        fi
+    fi
+fi
+
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RESULT_DIR="results/server"
 TRACE_FILE="${RESULT_DIR}/${LABEL}-${TIMESTAMP}.trace.json"
@@ -74,9 +103,10 @@ BINARY="./autonat-node-server"
 mkdir -p "$RESULT_DIR"
 
 echo "=== AutoNAT v2 Server ==="
-echo "Transport: $TRANSPORT"
-echo "Port:      $PORT"
-echo "Trace:     $TRACE_FILE"
+echo "Transport:   $TRANSPORT"
+echo "Port:        $PORT"
+[[ -n "$ANNOUNCE_IP" ]] && echo "Announce IP: $ANNOUNCE_IP"
+echo "Trace:       $TRACE_FILE"
 echo ""
 
 # Build
@@ -108,7 +138,8 @@ NODE_FLAGS=(
     "--trace-file=$TRACE_FILE"
     "--addr-file=$ADDR_OUT"
 )
-[[ -n "$OTLP_ENDPOINT" ]] && NODE_FLAGS+=("--otlp-endpoint=$OTLP_ENDPOINT")
+[[ -n "$ANNOUNCE_IP" ]]    && NODE_FLAGS+=("--announce-ip=$ANNOUNCE_IP")
+[[ -n "$OTLP_ENDPOINT" ]]  && NODE_FLAGS+=("--otlp-endpoint=$OTLP_ENDPOINT")
 
 # Start the server, tee logs to file and stdout
 LOG_FILE="${RESULT_DIR}/${LABEL}-${TIMESTAMP}.log"

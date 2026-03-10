@@ -57,6 +57,7 @@ func main() {
 	tcpBehaviorFlag := flag.String("tcp-behavior", "", "Behavior override for TCP addresses; overrides --behavior for TCP probes (mock-server role only)")
 	quicBehaviorFlag := flag.String("quic-behavior", "", "Behavior override for QUIC addresses; overrides --behavior for QUIC probes (mock-server role only)")
 	dhtMode := flag.String("dht-mode", "auto", "DHT mode: auto, client, or server")
+	announceIP := flag.String("announce-ip", "", "Public IP to announce in multiaddrs (use on AWS/cloud where the public IP is not bound to the interface)")
 	traceFile := flag.String("trace-file", "", "Output file for OTEL traces (JSON); empty = no tracing")
 	otlpEndpoint := flag.String("otlp-endpoint", "", "Optional OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318); can be used alongside --trace-file")
 	flag.Parse()
@@ -151,6 +152,26 @@ func main() {
 		libp2p.IPv6BlackHoleSuccessCounter(nil),
 	}
 
+	// On AWS and other cloud providers the public IP is not bound to the
+	// network interface — the OS only sees the private IP (e.g. 172.31.x.x).
+	// --announce-ip replaces private IPs in announced multiaddrs with the
+	// given public IP so that external peers can actually reach the node.
+	if *announceIP != "" {
+		pubIP := *announceIP
+		log.Printf("Announce IP override: %s (replacing private IPs in multiaddrs)", pubIP)
+		opts = append(opts, libp2p.AddrsFactory(func(addrs []ma.Multiaddr) []ma.Multiaddr {
+			var out []ma.Multiaddr
+			for _, addr := range addrs {
+				// Replace /ip4/<private> with /ip4/<pubIP>, keep the rest of the multiaddr.
+				rewritten, err := rewriteIP4(addr, pubIP)
+				if err == nil {
+					out = append(out, rewritten)
+				}
+			}
+			return out
+		}))
+	}
+
 	// Create the host
 	h, err := libp2p.New(opts...)
 	if err != nil {
@@ -236,6 +257,35 @@ func main() {
 func addEvent(span trace.Span, name string, attrs ...attribute.KeyValue) {
 	attrs = append(attrs, attribute.Int64("elapsed_ms", time.Since(startTime).Milliseconds()))
 	span.AddEvent(name, trace.WithAttributes(attrs...))
+}
+
+// rewriteIP4 replaces the /ip4/<any> component of addr with /ip4/<newIP>.
+// Returns the original addr unchanged if it has no /ip4 component.
+func rewriteIP4(addr ma.Multiaddr, newIP string) (ma.Multiaddr, error) {
+	newIPComp, err := ma.NewComponent("ip4", newIP)
+	if err != nil {
+		return nil, err
+	}
+	var components []*ma.Component
+	replaced := false
+	ma.ForEach(addr, func(c ma.Component) bool {
+		if c.Protocol().Code == ma.P_IP4 {
+			components = append(components, newIPComp)
+			replaced = true
+		} else {
+			cv := c
+			components = append(components, &cv)
+		}
+		return true
+	})
+	if !replaced {
+		return addr, nil
+	}
+	result := components[0].Multiaddr()
+	for _, c := range components[1:] {
+		result = result.Encapsulate(c)
+	}
+	return result, nil
 }
 
 func buildListenAddrs(ip string, port int, transport string) []string {
