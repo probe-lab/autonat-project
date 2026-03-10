@@ -90,52 +90,66 @@ for ((run=1; run<=RUNS; run++)); do
     echo "--- Run $run/$RUNS ---"
 
     TRACE_LOG="${RESULT_BASE}-run${run}.trace.json"
+    LOG_FILE="${RESULT_BASE}-run${run}.log"
     NODE_PID=""
 
-    # Start the node
+    # Start the node, redirecting output to log file.
+    # The OTEL trace file is only written on shutdown, so we watch the live log instead.
     NODE_FLAGS=(--role=client --bootstrap --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG")
     [[ -n "$PEERS" ]] && NODE_FLAGS+=(--peers="$PEERS")
-    "$BINARY" "${NODE_FLAGS[@]}" &
+    "$BINARY" "${NODE_FLAGS[@]}" >"$LOG_FILE" 2>&1 &
     NODE_PID=$!
+    # Show live log output (filtered to key events)
+    tail -f "$LOG_FILE" 2>/dev/null | grep --line-buffered -E \
+        "REACHABLE|REACHABILITY|NAT DEVICE|Connecting|Connected|connect_failed|Shutting" \
+        || true &
+    TAIL_PID=$!
 
     echo "Started node (PID $NODE_PID), tracing to $TRACE_LOG"
     echo "Waiting for reachability events (timeout: ${TIMEOUT}s, stable after: ${STABLE_WAIT}s)..."
 
-    # Monitor for convergence using stderr log output (grep docker logs style)
+    # Monitor for convergence using AutoNAT v2 log output.
+    # "REACHABLE ADDRS CHANGED: reachable=N" (N>0) is the v2 source of truth.
+    # v1 "REACHABILITY CHANGED" is intentionally ignored — it decays due to DHT
+    # peer churn and does not reflect v2 per-address reachability.
     START_EPOCH=$(date +%s)
-    LAST_EVENT_EPOCH=0
+    LAST_V2_REACHABLE_EPOCH=0
     CONVERGED=false
 
     while true; do
         NOW=$(date +%s)
         ELAPSED=$((NOW - START_EPOCH))
 
-        # Check timeout
         if [[ $ELAPSED -ge $TIMEOUT ]]; then
             echo ""
             echo "Timeout reached (${TIMEOUT}s)."
             break
         fi
 
-        # Check if process is still running
         if ! kill -0 "$NODE_PID" 2>/dev/null; then
             echo ""
             echo "Node exited unexpectedly."
             break
         fi
 
-        # Check for reachability events in trace file
-        if [[ -f "$TRACE_LOG" ]]; then
-            # Look for session span events with reachability_changed
-            LAST_REACH=$(jq -r 'select(.Name == "autonat.session") | .Events[]? | select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "elapsed_ms") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
-            LAST_REACH_STATUS=$(jq -r 'select(.Name == "autonat.session") | .Events[]? | select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "reachability") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
-
-            if [[ -n "$LAST_REACH" && "$LAST_REACH" != "null" ]]; then
-                LAST_EVENT_EPOCH=$((START_EPOCH + LAST_REACH / 1000))
-                SINCE_LAST=$((NOW - LAST_EVENT_EPOCH))
-                if [[ $SINCE_LAST -ge $STABLE_WAIT ]]; then
+        # Look for v2 confirmation: "REACHABLE ADDRS CHANGED: reachable=N" with N>0
+        if [[ -f "$LOG_FILE" ]]; then
+            LAST_V2_LINE=$(grep -E "REACHABLE ADDRS CHANGED: reachable=[1-9]" "$LOG_FILE" 2>/dev/null | tail -1 || true)
+            if [[ -n "$LAST_V2_LINE" ]]; then
+                # Parse timestamp from log line (Go log format: 2006/01/02 15:04:05)
+                LOG_TS=$(echo "$LAST_V2_LINE" | grep -oE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' || true)
+                if [[ -n "$LOG_TS" ]]; then
+                    # macOS: date -j -f; Linux: date -d
+                    EVENT_EPOCH=$(date -j -f "%Y/%m/%d %H:%M:%S" "$LOG_TS" +%s 2>/dev/null \
+                        || date -d "${LOG_TS//\// }" +%s 2>/dev/null \
+                        || echo "$NOW")
+                    LAST_V2_REACHABLE_EPOCH=$EVENT_EPOCH
+                fi
+                SINCE_LAST=$((NOW - LAST_V2_REACHABLE_EPOCH))
+                if [[ $LAST_V2_REACHABLE_EPOCH -gt 0 && $SINCE_LAST -ge $STABLE_WAIT ]]; then
+                    REACH_COUNT=$(echo "$LAST_V2_LINE" | grep -oE 'reachable=[0-9]+' | grep -oE '[0-9]+' || echo "?")
                     echo ""
-                    echo "Stable for ${STABLE_WAIT}s (reachability: $LAST_REACH_STATUS)"
+                    echo "Stable for ${STABLE_WAIT}s (v2 reachable addresses: $REACH_COUNT)"
                     CONVERGED=true
                     break
                 fi
@@ -146,11 +160,10 @@ for ((run=1; run<=RUNS; run++)); do
         printf "."
     done
 
-    # Stop the node
-    if kill -0 "$NODE_PID" 2>/dev/null; then
-        kill -TERM "$NODE_PID" 2>/dev/null || true
-        wait "$NODE_PID" 2>/dev/null || true
-    fi
+    # Stop the node and wait for it to flush the OTEL trace file
+    kill -TERM "$NODE_PID" 2>/dev/null || true
+    wait "$NODE_PID" 2>/dev/null || true
+    kill "$TAIL_PID" 2>/dev/null || true
 
     echo ""
 
@@ -170,22 +183,32 @@ for ((run=1; run<=RUNS; run++)); do
                 trace_log: $trace_log
             }')
     else
-        # Extract reachability events from OTEL trace
-        REACH_EVENTS=$(jq -r '
+        # Extract AutoNAT v2 address reachability events (source of truth).
+        # v1 "reachability_changed" is recorded for completeness but not used
+        # for final_reachability — it decays due to DHT churn independently of v2.
+        V2_EVENTS=$(jq -r '
             select(.Name == "autonat.session") | .Events[]? |
-            select(.Name == "reachability_changed") |
+            select(.Name == "reachable_addrs_changed") |
             { elapsed_ms: (.Attributes[] | select(.Key == "elapsed_ms") | .Value.Value),
-              reachability: (.Attributes[] | select(.Key == "reachability") | .Value.Value) }
+              reachable:   ((.Attributes[] | select(.Key == "reachable")   | .Value.Value) // []),
+              unreachable: ((.Attributes[] | select(.Key == "unreachable") | .Value.Value) // []),
+              unknown:     ((.Attributes[] | select(.Key == "unknown")     | .Value.Value) // []) }
         ' "$TRACE_LOG" 2>/dev/null || true)
 
         FIRST_MS="null"
         LAST_MS="null"
         FINAL_STATUS="none"
 
-        if [[ -n "$REACH_EVENTS" ]]; then
-            FIRST_MS=$(echo "$REACH_EVENTS" | jq -s '.[0].elapsed_ms' 2>/dev/null || echo "null")
-            LAST_MS=$(echo "$REACH_EVENTS" | jq -s '.[-1].elapsed_ms' 2>/dev/null || echo "null")
-            FINAL_STATUS=$(echo "$REACH_EVENTS" | jq -rs '.[-1].reachability' 2>/dev/null || echo "none")
+        if [[ -n "$V2_EVENTS" ]]; then
+            # First event where reachable list is non-empty = time to first confirmation
+            FIRST_MS=$(echo "$V2_EVENTS" | jq -s '
+                first(.[] | select(.reachable | length > 0)) | .elapsed_ms // null
+            ' 2>/dev/null || echo "null")
+            LAST_MS=$(echo "$V2_EVENTS" | jq -s '.[-1].elapsed_ms' 2>/dev/null || echo "null")
+            # Final status: public if last v2 event has any reachable addrs, else private
+            FINAL_STATUS=$(echo "$V2_EVENTS" | jq -rs '
+                if .[-1].reachable | length > 0 then "public" else "private" end
+            ' 2>/dev/null || echo "none")
         fi
 
         BOOTSTRAP_COUNT=$(jq -r '
@@ -193,14 +216,15 @@ for ((run=1; run<=RUNS; run++)); do
             select(.Name == "bootstrap_connected") | .Name
         ' "$TRACE_LOG" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 
-        # Extract reachability-related events
+        # Extract all v2 address reachability events for the events array
         EVENTS=$(jq -s '[
             .[] | select(.Name == "autonat.session") | .Events[]? |
-            select(.Name == "reachability_changed" or .Name == "reachable_addrs_changed") |
+            select(.Name == "reachable_addrs_changed") |
             { type: .Name,
-              elapsed_ms: (.Attributes[] | select(.Key == "elapsed_ms") | .Value.Value),
-              reachability: ((.Attributes[] | select(.Key == "reachability") | .Value.Value) // null),
-              addresses: ((.Attributes[] | select(.Key == "addresses") | .Value.Value) // null) }
+              elapsed_ms:  (.Attributes[] | select(.Key == "elapsed_ms")  | .Value.Value),
+              reachable:   ((.Attributes[] | select(.Key == "reachable")   | .Value.Value) // []),
+              unreachable: ((.Attributes[] | select(.Key == "unreachable") | .Value.Value) // []),
+              unknown:     ((.Attributes[] | select(.Key == "unknown")     | .Value.Value) // []) }
         ]' "$TRACE_LOG" 2>/dev/null || echo "[]")
 
         RUN_JSON=$(jq -n \
@@ -214,15 +238,15 @@ for ((run=1; run<=RUNS; run++)); do
             '{
                 run: $run,
                 final_reachability: $final,
-                time_to_first_event_ms: $first_ms,
+                time_to_first_reachable_ms: $first_ms,
                 time_to_stable_ms: $last_ms,
                 events: $events,
                 bootstrap_peers_connected: $bootstrap,
                 trace_log: $trace_log
             }')
 
-        echo "  Reachability: $FINAL_STATUS"
-        echo "  Time to first event: ${FIRST_MS}ms"
+        echo "  Reachability (v2): $FINAL_STATUS"
+        echo "  Time to first reachable: ${FIRST_MS}ms"
         echo "  Time to stable: ${LAST_MS}ms"
         echo "  Bootstrap peers: $BOOTSTRAP_COUNT"
     fi
