@@ -761,6 +761,17 @@ func initTracer(path string, otlpEndpoint string) (func(), error) {
 		opts = append(opts, sdktrace.WithBatcher(exporter))
 	}
 
+	// Raise span event limit well above the default 128 so that high-frequency
+	// peer events (identification, connectedness) don't fill the cap and cause
+	// important reachability events to be silently dropped from the trace.
+	opts = append(opts, sdktrace.WithSpanLimits(sdktrace.SpanLimits{
+		EventCountLimit:              10000,
+		AttributeCountLimit:          sdktrace.DefaultAttributeCountLimit,
+		AttributePerEventCountLimit:  sdktrace.DefaultAttributePerEventCountLimit,
+		LinkCountLimit:               sdktrace.DefaultLinkCountLimit,
+		AttributePerLinkCountLimit:   sdktrace.DefaultAttributePerLinkCountLimit,
+	}))
+
 	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
 

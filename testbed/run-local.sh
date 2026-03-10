@@ -147,7 +147,7 @@ for ((run=1; run<=RUNS; run++)); do
                 fi
                 SINCE_LAST=$((NOW - LAST_V2_REACHABLE_EPOCH))
                 if [[ $LAST_V2_REACHABLE_EPOCH -gt 0 && $SINCE_LAST -ge $STABLE_WAIT ]]; then
-                    REACH_COUNT=$(echo "$LAST_V2_LINE" | grep -oE 'reachable=[0-9]+' | grep -oE '[0-9]+' || echo "?")
+                    REACH_COUNT=$(echo "$LAST_V2_LINE" | grep -oE 'reachable=[0-9]+' | head -1 | grep -oE '[0-9]+' || echo "?")
                     echo ""
                     echo "Stable for ${STABLE_WAIT}s (v2 reachable addresses: $REACH_COUNT)"
                     CONVERGED=true
