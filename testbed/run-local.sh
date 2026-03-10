@@ -39,7 +39,7 @@ for arg in "$@"; do
         --runs=*)      RUNS="${arg#*=}" ;;
         --label=*)     LABEL="${arg#*=}" ;;
         --port=*)      PORT="${arg#*=}" ;;
-        --peers=*)     PEERS="${arg#*=}" ;;
+        --peers=*)     PEERS="${PEERS:+$PEERS,}${arg#*=}" ;;
         -h|--help)
             head -16 "$0" | tail -14
             exit 0
