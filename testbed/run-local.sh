@@ -164,6 +164,7 @@ for ((run=1; run<=RUNS; run++)); do
     kill -TERM "$NODE_PID" 2>/dev/null || true
     wait "$NODE_PID" 2>/dev/null || true
     kill "$TAIL_PID" 2>/dev/null || true
+    wait "$TAIL_PID" 2>/dev/null || true
 
     echo ""
 
