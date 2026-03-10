@@ -11,11 +11,13 @@ set -euo pipefail
 #   --runs=<count>               Number of runs (default: 1)
 #   --label=<string>             Label for result file (default: local)
 #   --port=<number>              Listen port (default: 4001)
+#   --peers=<multiaddr>          Connect to a specific server instead of bootstrapping IPFS
 #
 # Examples:
 #   ./testbed/run-local.sh
 #   ./testbed/run-local.sh --transport=quic --timeout=60
 #   ./testbed/run-local.sh --runs=3 --label=home-wifi
+#   ./testbed/run-local.sh --peers=/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo...
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -27,6 +29,7 @@ TIMEOUT=120
 RUNS=1
 LABEL="local"
 PORT=4001
+PEERS=""
 
 # Parse arguments
 for arg in "$@"; do
@@ -36,8 +39,9 @@ for arg in "$@"; do
         --runs=*)      RUNS="${arg#*=}" ;;
         --label=*)     LABEL="${arg#*=}" ;;
         --port=*)      PORT="${arg#*=}" ;;
+        --peers=*)     PEERS="${arg#*=}" ;;
         -h|--help)
-            head -15 "$0" | tail -13
+            head -16 "$0" | tail -14
             exit 0
             ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
@@ -89,7 +93,11 @@ for ((run=1; run<=RUNS; run++)); do
     NODE_PID=""
 
     # Start the node
-    "$BINARY" --role=client --bootstrap --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG" &
+    if [[ -n "$PEERS" ]]; then
+        "$BINARY" --role=client --peers="$PEERS" --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG" &
+    else
+        "$BINARY" --role=client --bootstrap --transport="$TRANSPORT" --port="$PORT" --trace-file="$TRACE_LOG" &
+    fi
     NODE_PID=$!
 
     echo "Started node (PID $NODE_PID), tracing to $TRACE_LOG"
