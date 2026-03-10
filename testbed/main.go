@@ -235,9 +235,11 @@ func main() {
 			go bootstrapDHT(ctx, h, *dhtMode, sessionSpan)
 		} else if *peerDir != "" {
 			go discoverFromDir(ctx, h, *peerDir, sessionSpan)
-		} else if *peers != "" {
+		}
+		if *peers != "" {
 			go connectToPeers(ctx, h, *peers, sessionSpan)
-		} else {
+		}
+		if !*bootstrap && *peerDir == "" && *peers == "" {
 			log.Println("Warning: client mode with no --peers, no --peer-dir, and no --bootstrap; waiting for inbound connections")
 		}
 	}
@@ -479,7 +481,9 @@ func handleEvent(evt interface{}, h host.Host, sessionSpan trace.Span) {
 }
 
 func connectToPeers(ctx context.Context, h host.Host, peersStr string, sessionSpan trace.Span) {
-	for _, addrStr := range strings.Split(peersStr, ",") {
+	addrs := strings.Split(peersStr, ",")
+	log.Printf("Connecting to %d explicit peer(s)...", len(addrs))
+	for _, addrStr := range addrs {
 		addrStr = strings.TrimSpace(addrStr)
 		if addrStr == "" {
 			continue
