@@ -79,7 +79,7 @@ echo ""
 
 # Build the binary
 echo "Building autonat-node..."
-go build -o "$BINARY" ./testbed
+go build -C testbed -o "../$BINARY" .
 echo "Build complete."
 echo ""
 
