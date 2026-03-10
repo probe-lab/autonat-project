@@ -101,6 +101,66 @@ correct external port, and AutoNAT v2 probes exactly that port.
 
 ---
 
+## Issue 3: AutoNAT v1 Does Not Recover After UPnP Port Remapping
+
+### Observed behaviour
+
+In a testbed run with UPnP enabled and port remapping (4001 → 57558):
+
+```
+15:12:55  Connected to AutoNAT v2 server
+15:13:00  v2: probing /tcp/4001 and /udp/4001 (unknown)
+15:13:11  v2: port 4001 UNREACHABLE (no inbound mapping)
+15:13:12  v1: REACHABILITY CHANGED: private
+15:13:14  v2: port 57558 REACHABLE (UPnP mapping active)
+           — v1 never fires "public" again
+```
+
+**v2 summary:**
+
+| elapsed | reachable | unreachable | unknown |
+|---------|-----------|-------------|---------|
+| 5015ms | — | — | tcp/4001, udp/4001 |
+| 16276ms | — | tcp/4001, udp/4001 | tcp/57558, udp/57558 |
+| 19155ms | tcp/57558, udp/57558 | tcp/4001, udp/4001 | — |
+
+`final_reachability: public`, `time_to_first_reachable: 19155ms`
+
+### Root cause
+
+AutoNAT v1 and v2 are independent subsystems that do not share state.
+
+When port 4001 failed to respond (at 16276ms), v1 fired `REACHABILITY CHANGED: private`. Once private, v1 must collect 3+ independent dial-back confirmations on the new port (57558) before transitioning back to `public`. In a short run that converges in ~20s, v1 never has time to gather those confirmations.
+
+More importantly, **v1 has no mechanism to consume v2 results**. Even if the run lasted hours, v1's confidence cycle operates on a different schedule and peers chosen by v1 may or may not attempt port 57558.
+
+### Consequences
+
+When v1 fires `private` after the initial port 4001 failure:
+
+- **NATService (v1 server)** removes itself from the protocol list — stops helping other peers test reachability
+- **AutoRelay** may activate and acquire circuit relay addresses, adding overhead
+- **DHT auto-server mode** may revert to client mode, reducing routing table participation
+
+All of this happens even though v2 has confirmed the node is fully reachable via port 57558.
+
+### Comparison with non-UPnP run
+
+| Scenario | v1 result | v2 result | v1 fires "public"? |
+|----------|-----------|-----------|-------------------|
+| EIM, no UPnP (port 4001 direct) | public → private (decay) | public | Yes, early (~3s) |
+| UPnP, port remapped (4001→57558) | private (never recovers) | public | No |
+
+In the EIM case, v1 fires `public` at ~3s because port 4001 is directly reachable and a connected peer can immediately confirm. With UPnP remapping, port 4001 is unreachable so v1 fires `private` and stays there.
+
+### Upstream gap
+
+This is a known design gap in go-libp2p: v2 results do not feed back into the v1 global reachability flag. See [GitHub issue #60](https://github.com/probe-lab/autonat-project/issues/60) for tracking.
+
+The correct long-term fix is for go-libp2p to derive `EvtLocalReachabilityChanged` from v2 per-address results, so that AutoRelay, NATService, and DHT use the more precise v2 signal.
+
+---
+
 ## When Detection Can Fail
 
 ### 1. Timing race
@@ -142,14 +202,14 @@ not probe them — correctly reporting the node as unreachable.
 
 ## Summary
 
-| Scenario | TCP | QUIC | Notes |
-|----------|-----|------|-------|
-| No UPnP, EIM router | ✗ | ✓ | QUIC works due to UDP EIM |
-| No UPnP, APDF router | ✗ | ✗ | Port-restricted, no inbound |
-| UPnP, same port | ✓ | ✓ | Full reachability |
-| UPnP, different port | ✓ | ✓ | NATPortMap announces correct port |
-| UPnP, router ignores | ✗ | ✗ | No mapping created |
-| CGNAT | ✗ | ✗ | Filtered by IsPublicAddr() |
+| Scenario | TCP (v2) | QUIC (v2) | v1 global flag | Notes |
+|----------|----------|-----------|---------------|-------|
+| No UPnP, EIM router | ✗ | ✓ | public → private (decay) | QUIC reachable; v1 decays from DHT churn |
+| No UPnP, APDF router | ✗ | ✗ | private | Port-restricted, no inbound |
+| UPnP, same port | ✓ | ✓ | public | Full reachability, v1 agrees |
+| UPnP, port remapped | ✓ | ✓ | **private (stuck)** | v2 correct; v1 never recovers (Issue #3) |
+| UPnP, router ignores | ✗ | ✗ | private | No mapping created |
+| CGNAT | ✗ | ✗ | private | Filtered by IsPublicAddr() |
 
 ## Testbed Reproduction
 
