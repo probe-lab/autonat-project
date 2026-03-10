@@ -16,7 +16,8 @@
 4. [Protocol Walkthrough](#protocol-walkthrough)
 5. [Issue 1: Address-Restricted NAT False Positive](#issue-1-address-restricted-nat-false-positive)
 6. [Issue 2: QUIC Dial-Back Failure on Fresh Servers](#issue-2-quic-dial-back-failure-on-fresh-servers)
-7. [Additional Confirmed Issues](#additional-confirmed-issues)
+7. [Issue 3: AutoNAT v1 Does Not Recover After UPnP Port Remapping](#issue-3-autonat-v1-does-not-recover-after-upnp-port-remapping)
+8. [Additional Confirmed Issues](#additional-confirmed-issues)
 8. [Appendix A: Testbed Architecture](#appendix-a-testbed-architecture)
 9. [Appendix B: Test Results](#appendix-b-test-results)
 
@@ -554,6 +555,77 @@ dialable=[] errs=[{/ip4/1.2.3.4/udp/4001/quic-v1 dial refused because of black h
 
 ---
 
+## Issue 3: AutoNAT v1 Does Not Recover After UPnP Port Remapping
+
+### Classification
+
+- **Category:** go-libp2p implementation gap (v1/v2 state independence)
+- **Severity:** Medium — causes unnecessary relay activation and NATService shutdown on nodes that are actually reachable
+- **Status:** CONFIRMED; upstream fix pending (tracked in [probe-lab/autonat-project#60](https://github.com/probe-lab/autonat-project/issues/60))
+
+### Summary
+
+AutoNAT v1 (`EvtLocalReachabilityChanged`) and AutoNAT v2 (`EvtHostReachableAddrsChanged`) run as independent subsystems and do not share state. When a node behind a NAT uses UPnP with port remapping, v1 fires `private` because the original listen port is unreachable — and **never recovers**, even after v2 confirms the UPnP-remapped port is fully reachable.
+
+go-libp2p subsystems (AutoRelay, NATService, DHT) rely on the v1 global flag. They incorrectly treat the node as private despite v2 confirmation.
+
+### Observed Evidence
+
+Live testbed run (port-restricted NAT, UPnP enabled, listen port 4001 remapped to external port 57558):
+
+```
+15:13:11  v2: tcp/4001 and udp/4001 → UNREACHABLE
+15:13:12  v1: REACHABILITY CHANGED: private        ← fires, never recovers
+15:13:14  v2: tcp/57558 and udp/57558 → REACHABLE  ← v1 unaware of this
+```
+
+v2 event timeline:
+
+| elapsed | reachable | unreachable | unknown |
+|---------|-----------|-------------|---------|
+| 5015ms | — | — | tcp/4001, udp/4001 |
+| 16276ms | — | tcp/4001, udp/4001 | tcp/57558, udp/57558 |
+| 19155ms | **tcp/57558, udp/57558** | tcp/4001, udp/4001 | — |
+
+`final_reachability (v2): public` — the node IS reachable.
+`REACHABILITY CHANGED (v1): private` — never corrected.
+
+### Why v1 Does Not Recover
+
+After going `private`, v1 needs 3+ independent dial-back confirmations on the new port (57558) to transition back to `public`. Two obstacles prevent this:
+
+1. **No v2 feedback loop**: v1 has no mechanism to consume v2 per-address results. Even with a long-running node, v1's confidence cycle operates independently.
+2. **Peers do not probe the UPnP port**: DHT peers dial addresses they discover via identify. If the UPnP-remapped address is announced late or not propagated, peers never attempt port 57558.
+
+### Consequences
+
+When v1 remains `private` while v2 says reachable:
+
+| Subsystem | Incorrect behaviour |
+|-----------|-------------------|
+| **NATService (v1 server)** | Removes itself from protocol list — stops helping other peers test reachability |
+| **AutoRelay** | Activates and acquires circuit relay addresses — unnecessary overhead |
+| **DHT auto-server** | May revert to client mode — reduces routing table participation |
+
+### Comparison: EIM (no UPnP) vs UPnP Port Remapping
+
+| Scenario | v2 result | v1 result | v1 fires "public"? |
+|----------|-----------|-----------|-------------------|
+| EIM, no UPnP (port 4001 direct) | public | public → private (decay) | Yes, ~3s after connect |
+| UPnP, port remapped (4001→57558) | public | private (stuck) | **No** |
+
+In the EIM case, v1 fires `public` early because port 4001 is directly reachable and a connected peer immediately confirms it. With UPnP remapping, port 4001 is unreachable so v1 fires `private` and has no path to recovery.
+
+### Recommendations
+
+1. **Upstream go-libp2p fix**: Derive `EvtLocalReachabilityChanged` from v2 per-address results. If any address is in the `reachable` set, emit `public`; if all are `unreachable`, emit `private`. This makes AutoRelay, NATService, and DHT consume the accurate v2 signal.
+
+2. **Workaround**: In the testbed, `reachable_addrs_changed` (v2) is used as the sole source of truth for measurements. The v1 `reachability_changed` event is recorded for completeness but not used for `final_reachability`.
+
+For the full analysis including UPnP timing behaviour, see [UPnP and AutoNAT v2 Reachability Detection](upnp-nat-detection.md).
+
+---
+
 ## Additional Confirmed Issues
 
 ### Issue #17: Symmetric NAT Bypasses v2 Entirely
@@ -751,6 +823,7 @@ client directly on `public-net` bypassing the router. Must re-run with
 |-------|-------|--------|----------|--------|
 | #1 Addr-restricted false positive | 3 (Probing) | **CONFIRMED** | Protocol design | Wrong "public" result |
 | #2 QUIC dial-back black hole | 3 (Probing) | **WORKED AROUND** | Testbed limitation | Fresh servers can't dial QUIC |
+| #3 v1 stuck private after UPnP remap | 4 (Confidence) | **CONFIRMED** | Implementation gap | False relay activation, NATService removed |
 | #17 Symmetric blocks v2 | 2 (Activation) | **CONFIRMED** | Protocol design | v2 completely bypassed |
 | #8 v1 oscillation | 4 (Confidence) | **CONFIRMED** | Implementation | Unreliable result (~33%) |
 | #18 TCP port blocking | 1 (Bootstrap) | **CONFIRMED** | Infrastructure | QUIC-only discovery |
