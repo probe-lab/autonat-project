@@ -1,0 +1,180 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/probe-lab/autonat-project/testbed/schema/scenario-schema.json",
+  "title": "AutoNAT v2 Testbed Scenario",
+  "description": "Schema for YAML scenario files consumed by testbed/run.sh",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable scenario set name (used in output directory naming)"
+    },
+    "description": {
+      "type": "string",
+      "description": "What this scenario set measures"
+    },
+    "defaults": {
+      "type": "object",
+      "description": "Default values applied to all scenarios/matrix expansions",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds to wait for convergence before declaring timeout"
+        },
+        "runs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of repeated runs per scenario"
+        }
+      }
+    },
+    "matrix": {
+      "type": "object",
+      "description": "Cartesian product expansion. Each key maps to an array of values; all combinations are run. Mutually exclusive with 'scenarios'.",
+      "additionalProperties": {
+        "type": "array"
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "description": "Explicit list of scenarios to run. Mutually exclusive with 'matrix'.",
+      "items": { "$ref": "#/definitions/scenario" }
+    }
+  },
+  "oneOf": [
+    { "required": ["matrix"], "not": { "required": ["scenarios"] } },
+    { "required": ["scenarios"], "not": { "required": ["matrix"] } }
+  ],
+  "definitions": {
+    "mock_behavior": {
+      "type": "string",
+      "enum": [
+        "reject", "refuse", "force-unreachable", "internal-error",
+        "timeout", "force-reachable", "wrong-nonce", "no-dialback-msg"
+      ]
+    },
+    "mock_behavior_extended": {
+      "oneOf": [
+        { "$ref": "#/definitions/mock_behavior" },
+        { "type": "string", "enum": ["probabilistic", "actual"] },
+        { "type": "null" }
+      ]
+    },
+    "assertion": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["has_event", "no_event", "info"],
+          "description": "has_event: FAIL if absent; no_event: FAIL if present; info: extract value (never fails)"
+        },
+        "event": { "type": "string" },
+        "filter": { "type": "object", "additionalProperties": true },
+        "message": { "type": "string" },
+        "extract": { "type": "string", "description": "Attribute to extract (info only)" },
+        "select": { "type": "string", "enum": ["first", "last"], "description": "Which match to use (info only)" },
+        "label": { "type": "string", "description": "Display label (info only)" }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "nat_type": {
+          "type": "string",
+          "enum": ["none", "full-cone", "address-restricted", "port-restricted", "symmetric"]
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["tcp", "quic", "both"]
+        },
+        "server_count": {
+          "oneOf": [
+            { "type": "integer", "minimum": 3, "maximum": 7 },
+            { "type": "string", "const": "ipfs-network" }
+          ]
+        },
+        "timeout_s": { "type": "integer", "minimum": 1 },
+        "runs": { "type": "integer", "minimum": 1 },
+        "packet_loss": { "type": "integer", "minimum": 0, "maximum": 100, "default": 0 },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "One-way added latency in ms via tc netem on router (RTT = 2x)"
+        },
+        "tcp_block_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "port_remap": {
+          "type": "string",
+          "pattern": "^[0-9]+:[0-9]+$",
+          "description": "Remap source port INT:INT (e.g. 4001:29538)"
+        },
+        "port_forward": {
+          "oneOf": [{ "type": "boolean" }, { "type": "string" }]
+        },
+        "upnp": {
+          "oneOf": [{ "type": "boolean" }, { "type": "string" }]
+        },
+        "obs_addr_thresh": { "type": "integer", "minimum": 1 },
+        "mock_behaviors": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/mock_behavior" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "mock_delays": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "mock_jitters": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "mock_probabilities": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 1 },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "mock_tcp_behaviors": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/mock_behavior_extended" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "mock_quic_behaviors": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/mock_behavior_extended" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "measurements": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "false_negative_rate", "false_positive_rate",
+              "time_to_confidence", "time_to_update", "protocol_overhead"
+            ]
+          },
+          "description": "Metrics to compute via testbed/analyze.py after collecting traces"
+        },
+        "assertions": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/assertion" }
+        }
+      }
+    }
+  }
+}
