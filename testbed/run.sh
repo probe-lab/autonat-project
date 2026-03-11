@@ -99,6 +99,7 @@ SCENARIOS=$(echo "$SCENARIOS" | jq --argjson dt "$DEFAULT_TIMEOUT" --argjson dr 
         mock_quic_behaviors: (.mock_quic_behaviors // null),
         port_forward: (.port_forward // null),
         upnp: (.upnp // null),
+        measurements: (.measurements // null),
         assertions: (.assertions // null)
     }]
 ')
@@ -300,6 +301,18 @@ validate_scenario() {
         exit 1
     fi
 
+    # measurements: must be array of valid metric names
+    local has_measurements
+    has_measurements=$(echo "$s" | jq '.measurements != null')
+    if [[ "$has_measurements" == "true" ]]; then
+        local invalid_metrics
+        invalid_metrics=$(echo "$s" | jq -r '.measurements[] | select(. as $m | ["false_negative_rate","false_positive_rate","time_to_confidence","time_to_update","protocol_overhead"] | index($m) | not)')
+        if [[ -n "$invalid_metrics" ]]; then
+            echo "$prefix: invalid measurements value(s): $invalid_metrics (expected: false_negative_rate, false_positive_rate, time_to_confidence, time_to_update, protocol_overhead)"
+            exit 1
+        fi
+    fi
+
     # assertions: validate types if present
     local has_assertions
     has_assertions=$(echo "$s" | jq '.assertions != null')
@@ -407,6 +420,7 @@ for ((i=0; i<TOTAL; i++)); do
     UPNP=$(echo "$S" | jq -r '.upnp // empty')
     OBS_THRESH=$(echo "$S" | jq -r '.obs_addr_thresh // empty')
     HAS_ASSERTIONS=$(echo "$S" | jq '.assertions != null')
+    MEASUREMENTS=$(echo "$S" | jq -r '.measurements // [] | join(",")')
     HAS_MOCK=$(echo "$S" | jq '.mock_behaviors != null')
 
     # Extract mock behaviors and per-server options (arrays → per-server env vars)
@@ -507,6 +521,7 @@ for ((i=0; i<TOTAL; i++)); do
         else
             echo "  NAT=$NAT_TYPE transport=$TRANSPORT servers=$SERVER_COUNT loss=${PACKET_LOSS}% latency=${LATENCY_MS}ms timeout=${TIMEOUT}s"
         fi
+        [[ -n "$MEASUREMENTS" ]] && echo "  measurements: $MEASUREMENTS"
 
         # Export environment for docker compose
         export NAT_TYPE TRANSPORT PACKET_LOSS LATENCY_MS TCP_BLOCK_PORT PORT_REMAP PORT_FORWARD UPNP
