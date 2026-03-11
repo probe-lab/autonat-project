@@ -17,8 +17,9 @@
 5. [Issue 1: Address-Restricted NAT False Positive](#issue-1-address-restricted-nat-false-positive)
 6. [Issue 2: QUIC Dial-Back Failure on Fresh Servers](#issue-2-quic-dial-back-failure-on-fresh-servers)
 7. [Additional Confirmed Issues](#additional-confirmed-issues)
-8. [Appendix A: Testbed Architecture](#appendix-a-testbed-architecture)
-9. [Appendix B: Test Results](#appendix-b-test-results)
+8. [v1/v2 Reachability Gap](#v1v2-reachability-gap)
+9. [Appendix A: Testbed Architecture](#appendix-a-testbed-architecture)
+10. [Appendix B: Test Results](#appendix-b-test-results)
 
 ---
 
@@ -76,13 +77,22 @@ testbed validation (5 NAT types, native Linux VM):
    Long-running nodes (Kubo) are unaffected. Testbed workaround: disable
    the detector on the main host so the `dialerHost` inherits no counter.
 
-Additionally, two previously known issues were confirmed in both field and
-testbed environments:
+Additionally, a critical architectural gap was identified:
 
-3. **Symmetric NAT bypasses v2 entirely (CONFIRMED):** No public address is
+3. **v1/v2 reachability gap (CONFIRMED):** AutoNAT v1 and v2 produce
+   independent signals. All go-libp2p subsystems (AutoRelay, Kademlia DHT,
+   Address Manager) consume v1 only. v2 per-address results are ignored,
+   causing unnecessary relay activation and DHT client mode even when v2
+   confirms reachable addresses. js-libp2p avoids this by design (no global
+   flag). See [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md).
+
+And two previously known issues were confirmed in both field and testbed
+environments:
+
+4. **Symmetric NAT bypasses v2 entirely (CONFIRMED):** No public address is
    ever activated, so v2 never runs.
 
-4. **v1 confidence oscillation (CONFIRMED):** AutoNAT v1's sliding window
+5. **v1 confidence oscillation (CONFIRMED):** AutoNAT v1's sliding window
    oscillates ~33% of the time, independent of network latency.
 
 ---
@@ -640,6 +650,8 @@ Each stage of the AutoNAT v2 reachability flow has specific failure modes:
 │  STAGE 5: Result                                                    │
 │  v2 emits EvtHostReachableAddrsChanged (per-address)               │
 │  v1 emits EvtLocalReachabilityChanged (host-level)                 │
+│  Issues: #60 v1/v2 gap (CONFIRMED) — v2 results ignored by         │
+│          AutoRelay, DHT, Address Manager (all consume v1 only)     │
 │  WORST CASE (symmetric NAT): v2 never runs → v1 oscillates →       │
 │  node has NO reliable reachability information                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -751,6 +763,7 @@ client directly on `public-net` bypassing the router. Must re-run with
 |-------|-------|--------|----------|--------|
 | #1 Addr-restricted false positive | 3 (Probing) | **CONFIRMED** | Protocol design | Wrong "public" result |
 | #2 QUIC dial-back black hole | 3 (Probing) | **WORKED AROUND** | Testbed limitation | Fresh servers can't dial QUIC |
+| #60 v1/v2 reachability gap | 5 (Result) | **CONFIRMED** | Architecture | v2 results ignored by AutoRelay/DHT/AddrMgr |
 | #17 Symmetric blocks v2 | 2 (Activation) | **CONFIRMED** | Protocol design | v2 completely bypassed |
 | #8 v1 oscillation | 4 (Confidence) | **CONFIRMED** | Implementation | Unreliable result (~33%) |
 | #18 TCP port blocking | 1 (Bootstrap) | **CONFIRMED** | Infrastructure | QUIC-only discovery |
@@ -760,6 +773,47 @@ client directly on `public-net` bypassing the router. Must re-run with
 | #5 Insufficient servers | 3 (Probing) | Untested | Infrastructure | Delayed convergence |
 | #9 Mapping timeout | 4 (Confidence) | Untested | Protocol design | Intermittent results |
 | #10 Server selection | 4 (Confidence) | Untested | Implementation | Mixed signals |
+
+---
+
+## v1/v2 Reachability Gap
+
+AutoNAT v1 and v2 coexist in go-libp2p but produce independent, incompatible
+reachability signals. v1 emits a global Public/Private/Unknown flag consumed by
+AutoRelay, Kademlia DHT, Address Manager, and NAT Service. v2 emits per-address
+reachability. **No bridge exists between them** — v2 results do not feed into
+the v1 global flag.
+
+This means a node can have v2-confirmed reachable addresses while v1
+simultaneously reports Private, triggering unnecessary relay usage and DHT
+client mode demotion.
+
+- **Classification:** Implementation / architecture gap
+- **Severity:** High — affects all go-libp2p nodes running both v1 and v2
+- **Status:** CONFIRMED (live IPFS network testing, 2026-03-10)
+- **GitHub Issue:** [#60](https://github.com/probe-lab/autonat-project/issues/60)
+
+### Cross-Implementation Status
+
+| Implementation | v1/v2 gap? | Reason |
+|---------------|-----------|--------|
+| **go-libp2p** | **Yes** — all 4 consumers use v1 only | v2 event (`EvtHostReachableAddrsChanged`) is independent from v1 (`EvtLocalReachabilityChanged`) |
+| **rust-libp2p** | **Partial** — Kademlia works, no autorelay | Kademlia reads the external address list (fed by v2), not a global flag |
+| **js-libp2p** | **No** — resolved by design | No global flag; both v1 and v2 feed `confirmObservedAddr()`, consumers check address list |
+
+### Impact on External Projects
+
+| Project | Stack | Impact | Detail |
+|---------|-------|--------|--------|
+| **Obol/Charon** | go-libp2p v0.47.0 | **High** | Exports `p2p_reachability_status` Prometheus gauge from v1; oscillates ~33% despite stable v2. AutoRelay activates unnecessarily. |
+| **Avail** | rust-libp2p v0.55.0 | **Medium** | Disabled AutoNAT entirely (v1.13.2) due to reliability issues. v2 address-based Kademlia could help, but Issue #1 blocks adoption. |
+| **Celestia** | go-libp2p | **Low** | No direct reachability subscription. Affected indirectly via DHT mode flapping. |
+| **Prysm** | go-libp2p | None | No AutoNAT/AutoRelay. Manual config. |
+| **Lighthouse** | rust-libp2p | None | No AutoNAT. Uses UPnP + discv5. |
+
+For the full analysis — consumer details, code paths, cross-implementation
+comparison, and recommended fixes — see
+[v1/v2 Reachability Gap](v1-v2-reachability-gap.md).
 
 ---
 
