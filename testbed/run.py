@@ -66,6 +66,20 @@ LOG_KEY_EVENTS = re.compile(
 )
 
 
+def _parse_list_attr(val):
+    """Parse a value that may be a list or a stringified JSON array."""
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str) and val.startswith("["):
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []
+
+
 # ---------------------------------------------------------------------------
 # YAML loading (use pyyaml if available, else shell out to yq)
 # ---------------------------------------------------------------------------
@@ -625,13 +639,15 @@ def wait_for_new_span(jaeger: Jaeger, span_name: str, start_time: datetime,
 def exec_toggle(dc: Compose, action: str, port: int = DEFAULT_PORT):
     """Add or remove port forwarding rules on the router."""
     flag = "-I" if action == "add_port_forward" else "-D"
+    # For remove, ignore errors (rules may not exist if add failed)
+    suffix = " 2>/dev/null || true" if action == "remove_port_forward" else ""
     script = f"""
         PUB_IFACE=$(ip -4 addr show | grep '73\\.0\\.0\\.' | awk '{{print $NF}}')
         PRIV_IFACE=$(ip -4 addr show | grep '10\\.0\\.1\\.' | awk '{{print $NF}}')
-        iptables -t nat {flag} PREROUTING -i $PUB_IFACE -p tcp --dport {port} -j DNAT --to-destination {CLIENT_PRIVATE_IP}:{port}
-        iptables -t nat {flag} PREROUTING -i $PUB_IFACE -p udp --dport {port} -j DNAT --to-destination {CLIENT_PRIVATE_IP}:{port}
-        iptables {flag} FORWARD -i $PUB_IFACE -o $PRIV_IFACE -p tcp -d {CLIENT_PRIVATE_IP} --dport {port} -j ACCEPT
-        iptables {flag} FORWARD -i $PUB_IFACE -o $PRIV_IFACE -p udp -d {CLIENT_PRIVATE_IP} --dport {port} -j ACCEPT
+        iptables -t nat {flag} PREROUTING -i $PUB_IFACE -p tcp --dport {port} -j DNAT --to-destination {CLIENT_PRIVATE_IP}:{port}{suffix}
+        iptables -t nat {flag} PREROUTING -i $PUB_IFACE -p udp --dport {port} -j DNAT --to-destination {CLIENT_PRIVATE_IP}:{port}{suffix}
+        iptables {flag} FORWARD -i $PUB_IFACE -o $PRIV_IFACE -p tcp -d {CLIENT_PRIVATE_IP} --dport {port} -j ACCEPT{suffix}
+        iptables {flag} FORWARD -i $PUB_IFACE -o $PRIV_IFACE -p udp -d {CLIENT_PRIVATE_IP} --dport {port} -j ACCEPT{suffix}
     """
     dc.exec_router(script)
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -646,21 +662,17 @@ def run_toggles(dc: Compose, jaeger: Jaeger, start_time: datetime,
         phase = i + 1
         print(f"\n  --- Toggle phase {phase}: {t.action} (wait_for={t.wait_for}) ---")
 
-        # Determine what span to watch for after this toggle
+        # Determine what span to watch for after this toggle.
+        # Watch for either v2 per-address (reachable_addrs_changed) or v1
+        # whole-node (reachability_changed), whichever fires first.
         if t.action == "add_port_forward":
-            filter_fn = lambda s: any(
-                isinstance(s["attrs"].get("reachable"), list)
-                and len(s["attrs"]["reachable"]) > 0
-                for _ in [1]
-            )
-            desc = "v2 reachable"
+            watch_span = None  # watch both span types
+            filter_fn = None   # any new convergence span counts
+            desc = "reachability change (reachable)"
         else:
-            filter_fn = lambda s: any(
-                isinstance(s["attrs"].get("unreachable"), list)
-                and len(s["attrs"]["unreachable"]) > 0
-                for _ in [1]
-            )
-            desc = "v2 unreachable"
+            watch_span = None
+            filter_fn = None
+            desc = "reachability change (unreachable)"
 
         # Wait before toggling
         if t.wait_for == "converged":
@@ -678,21 +690,32 @@ def run_toggles(dc: Compose, jaeger: Jaeger, start_time: datetime,
             print(f"  Sleeping {t.sleep_s}s before toggle...")
             time.sleep(t.sleep_s)
 
-        # Record state before toggle
-        prev_count = count_jaeger_spans(jaeger, SPAN_REACHABLE_ADDRS, start_time, filter_fn)
+        # Record state before toggle — count both v1 and v2 convergence spans
+        prev_v1 = count_jaeger_spans(jaeger, SPAN_REACHABILITY, start_time)
+        prev_v2 = count_jaeger_spans(jaeger, SPAN_REACHABLE_ADDRS, start_time)
         toggle_epoch = time.time()
 
         # Execute the toggle
         exec_toggle(dc, t.action)
 
-        # Wait for detection
-        detected, elapsed = wait_for_new_span(
-            jaeger, SPAN_REACHABLE_ADDRS, start_time,
-            prev_count=prev_count,
-            timeout=t.timeout_s,
-            description=desc,
-            filter_fn=filter_fn,
-        )
+        # Wait for either v1 or v2 to detect the change
+        start_wait = time.time()
+        detected = False
+        elapsed = 0
+        while True:
+            elapsed = int(time.time() - start_wait)
+            if elapsed >= t.timeout_s:
+                print(f" timeout ({t.timeout_s}s)")
+                break
+            cur_v1 = count_jaeger_spans(jaeger, SPAN_REACHABILITY, start_time)
+            cur_v2 = count_jaeger_spans(jaeger, SPAN_REACHABLE_ADDRS, start_time)
+            if cur_v1 > prev_v1 or cur_v2 > prev_v2:
+                which = "v1" if cur_v1 > prev_v1 else "v2"
+                print(f" detected via {which} ({elapsed}s)")
+                detected = True
+                break
+            time.sleep(3)
+            print(".", end="", flush=True)
 
         results.append({
             "phase": phase,

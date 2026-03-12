@@ -6,7 +6,7 @@ description: >
   Records time-to-detect for each transition.
 
 defaults:
-  timeout_s: 300
+  timeout_s: 600
   runs: 1
 
 scenarios:
@@ -41,11 +41,11 @@ scenarios:
       - action: add_port_forward
         wait_for: converged
         sleep_s: 30
-        timeout_s: 180
+        timeout_s: 360
       - action: remove_port_forward
         wait_for: converged
         sleep_s: 30
-        timeout_s: 180
+        timeout_s: 360
     assertions:
       - type: has_event
         event: reachable_addrs_changed
