@@ -65,13 +65,32 @@ def parse_trace(path):
         "probes": [{attrs, events}],
         "server_selections": [{attrs}],
       }
+
+    Supports two formats:
+    - Old format: testbed events are Events[] on the autonat.session span
+    - New format (span-per-event): testbed events are individual top-level spans
+      (e.g. "reachable_addrs_changed", "reachability_changed", "connected", etc.)
+      These are converted to session events for backward compatibility.
     """
+    # Known span-per-event names from main.go emitSpan() calls
+    TESTBED_SPAN_NAMES = {
+        "started", "shutdown", "reachability_changed", "reachable_addrs_changed",
+        "nat_device_type_changed", "addresses_updated", "local_protocols_updated",
+        "auto_relay_addrs_updated", "connected", "connect_failed",
+        "bootstrap_start", "bootstrap_done", "bootstrap_error",
+        "bootstrap_connected", "peer_discovery_start", "peer_discovery_done",
+        "peer_discovery_timeout",
+    }
+
     result = {
         "session": None,
         "refresh_cycles": [],
         "probes": [],
         "server_selections": [],
     }
+    # Collect span-per-event spans to merge into session events
+    extra_events = []
+
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -84,7 +103,7 @@ def parse_trace(path):
 
             name = span.get("Name", "")
             attrs = _flatten_attrs(span.get("Attributes", []))
-            raw_events = span.get("Events", [])
+            raw_events = span.get("Events") or []
             events = [
                 {
                     "name": e.get("Name", ""),
@@ -102,6 +121,19 @@ def parse_trace(path):
                 result["probes"].append({"attrs": attrs, "events": events})
             elif name == "autonatv2.server_selection":
                 result["server_selections"].append({"attrs": attrs})
+            elif name in TESTBED_SPAN_NAMES:
+                # New span-per-event format: convert to session event
+                extra_events.append({
+                    "name": name,
+                    "time": span.get("StartTime", ""),
+                    "attrs": attrs,
+                })
+
+    # If we found span-per-event spans, merge them into the session
+    if extra_events:
+        if result["session"] is None:
+            result["session"] = {"attrs": {}, "events": []}
+        result["session"]["events"].extend(extra_events)
 
     return result
 
