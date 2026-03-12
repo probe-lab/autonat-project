@@ -99,6 +99,20 @@ def load_events(path):
     return events
 
 
+def _as_list(val):
+    """Coerce a value to a list, parsing stringified JSON arrays if needed."""
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str) and val.startswith("["):
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []
+
+
 def matches(event, event_type, filters):
     # Check event type
     etype = event.get("type", "")
@@ -119,13 +133,13 @@ def matches(event, event_type, filters):
                 return False
         elif key == "not_empty":
             # val is a field name; passes only if that field is a non-empty list
-            field_val = event.get(val, [])
-            if not isinstance(field_val, list) or len(field_val) == 0:
+            field_val = _as_list(event.get(val, []))
+            if len(field_val) == 0:
                 return False
         elif key == "is_empty":
             # val is a field name; passes only if that field is an empty list
-            field_val = event.get(val, [])
-            if not isinstance(field_val, list) or len(field_val) > 0:
+            field_val = _as_list(event.get(val, []))
+            if len(field_val) > 0:
                 return False
         else:
             if str(event.get(key, "")) != str(val):
