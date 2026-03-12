@@ -1,0 +1,70 @@
+name: time-to-update
+description: >
+  Measure how quickly AutoNAT v2 detects network reachability changes.
+  Starts with port-restricted NAT (unreachable), then dynamically adds
+  port forwarding (becomes reachable), then removes it (becomes unreachable).
+  Records time-to-detect for each transition.
+
+defaults:
+  timeout_s: 300
+  runs: 1
+
+scenarios:
+  # Phase sequence:
+  #   1. Initial convergence: port-restricted NAT → v2 detects "unreachable"
+  #   2. Toggle: add port forwarding → measure time until v2 detects "reachable"
+  #   3. Toggle: remove port forwarding → measure time until v2 detects "unreachable"
+
+  - name: ttu-port-restricted-both
+    nat_type: port-restricted
+    transport: both
+    server_count: 7
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"
+
+  - name: ttu-port-restricted-tcp
+    nat_type: port-restricted
+    transport: tcp
+    server_count: 7
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"
+
+  - name: ttu-port-restricted-quic
+    nat_type: port-restricted
+    transport: quic
+    server_count: 7
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"
