@@ -30,7 +30,7 @@ import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -163,9 +163,17 @@ class Jaeger:
         """
         params = f"query.service_name={self.service}&query.search_depth=1000"
         if start_time:
-            # Jaeger v3 uses RFC-3339 for start_time_min
+            # Jaeger v3 requires both start_time_min and start_time_max
             ts = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
             params += f"&query.start_time_min={ts}"
+            end = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            params += f"&query.start_time_max={end}"
+        else:
+            # Default: last hour
+            now = datetime.now(timezone.utc)
+            start = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            params += f"&query.start_time_min={start}&query.start_time_max={end}"
 
         data = self._get(f"/api/v3/traces?{params}")
         if not data:

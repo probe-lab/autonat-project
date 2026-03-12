@@ -154,9 +154,17 @@ def _elapsed_ms(event):
 
 def _list_attr(event, key):
     val = event["attrs"].get(key, [])
-    if not isinstance(val, list):
-        return []
-    return val
+    if isinstance(val, list):
+        return val
+    # Jaeger v3 API serializes StringSlice as a string like '["a","b"]'
+    if isinstance(val, str) and val.startswith("["):
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []
 
 
 # ---------------------------------------------------------------------------
