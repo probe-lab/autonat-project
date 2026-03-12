@@ -27,6 +27,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,7 +40,8 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 COMPOSE_FILE = "testbed/docker/compose.yml"
-TRACE_STAGING = "results/testbed/trace.json"
+JAEGER_URL = "http://localhost:16686"
+JAEGER_SERVICE = "autonat-testbed"
 CLIENT_PRIVATE_IP = "10.0.1.10"
 DEFAULT_PORT = 4001
 
@@ -53,13 +56,11 @@ VALID_ASSERTION_TYPES = {"no_event", "has_event", "info"}
 VALID_TOGGLE_ACTIONS = {"add_port_forward", "remove_port_forward"}
 VALID_TOGGLE_WAITS = {"converged", "sleep"}
 
-# Log patterns for convergence detection
-V2_REACHABLE_PATTERN = r"REACHABLE ADDRS CHANGED: reachable=[1-9]"
-V2_UNREACHABLE_PATTERN = r"REACHABLE ADDRS CHANGED:.*unreachable=[1-9]"
-V1_CHANGED_PATTERN = r"REACHABILITY CHANGED"
-ANY_CONVERGENCE = re.compile(
-    rf"{V1_CHANGED_PATTERN}|{V2_REACHABLE_PATTERN}|{V2_UNREACHABLE_PATTERN}"
-)
+# Span names emitted by the Go testbed node (via emitSpan)
+SPAN_REACHABLE_ADDRS = "reachable_addrs_changed"
+SPAN_REACHABILITY = "reachability_changed"
+
+# Log pattern for human-readable output (still shown from docker logs)
 LOG_KEY_EVENTS = re.compile(
     r"REACHABLE|UNREACHABLE|REACHABILITY|Connected|connect_failed|peer_discovery"
 )
@@ -132,6 +133,128 @@ class Compose:
     def exec_router(self, script: str):
         """Execute a bash script inside the router container."""
         self.run("exec", "-T", "router", "bash", "-c", script, check=True)
+
+
+# ---------------------------------------------------------------------------
+# Jaeger API client
+# ---------------------------------------------------------------------------
+
+class Jaeger:
+    """Query Jaeger HTTP API for spans."""
+
+    def __init__(self, base_url: str = JAEGER_URL, service: str = JAEGER_SERVICE):
+        self.base_url = base_url.rstrip("/")
+        self.service = service
+
+    def _get(self, path: str) -> dict | None:
+        url = f"{self.base_url}{path}"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read())
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+            return None
+
+    def find_spans(self, start_time: datetime | None = None) -> list[dict]:
+        """Find all spans for our service since start_time.
+
+        Returns a flat list of span dicts with keys:
+            name, start_us, duration_us, attrs (dict of key->value)
+        """
+        params = f"query.service_name={self.service}&query.search_depth=1000"
+        if start_time:
+            # Jaeger v3 uses RFC-3339 for start_time_min
+            ts = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            params += f"&query.start_time_min={ts}"
+
+        data = self._get(f"/api/v3/traces?{params}")
+        if not data:
+            return []
+
+        spans = []
+        # v3 returns {"result": {"resourceSpans": [...]}}
+        resource_spans = (data.get("result", {}).get("resourceSpans", [])
+                          or data.get("resourceSpans", []))
+        for rs in resource_spans:
+            for scope_span in rs.get("scopeSpans", []):
+                for s in scope_span.get("spans", []):
+                    attrs = {}
+                    for a in s.get("attributes", []):
+                        key = a.get("key", "")
+                        val = a.get("value", {})
+                        # OTel proto uses typed values
+                        for vtype in ("stringValue", "intValue", "boolValue"):
+                            if vtype in val:
+                                attrs[key] = val[vtype]
+                                break
+                        if "arrayValue" in val:
+                            attrs[key] = [
+                                v.get("stringValue", str(v))
+                                for v in val["arrayValue"].get("values", [])
+                            ]
+                    spans.append({
+                        "name": s.get("name", ""),
+                        "trace_id": s.get("traceId", ""),
+                        "start_ns": s.get("startTimeUnixNano", "0"),
+                        "attrs": attrs,
+                    })
+        return spans
+
+    def count_spans(self, span_name: str, start_time: datetime | None = None,
+                    filter_fn=None) -> int:
+        """Count spans matching name and optional filter."""
+        spans = self.find_spans(start_time)
+        count = 0
+        for s in spans:
+            if s["name"] == span_name:
+                if filter_fn is None or filter_fn(s):
+                    count += 1
+        return count
+
+    def has_convergence_span(self, start_time: datetime | None = None) -> bool:
+        """Check if any reachability convergence span exists."""
+        spans = self.find_spans(start_time)
+        for s in spans:
+            if s["name"] in (SPAN_REACHABLE_ADDRS, SPAN_REACHABILITY):
+                return True
+        return False
+
+    def export_trace_jsonl(self, start_time: datetime | None = None) -> list[dict]:
+        """Export all spans as a list of dicts compatible with analyze.py's parse_trace().
+
+        Converts Jaeger v3 OTLP format to the JSONL format that stdouttrace produced,
+        so existing analysis tools work unchanged.
+        """
+        spans = self.find_spans(start_time)
+        jsonl_spans = []
+        for s in spans:
+            # Convert attrs dict back to OTEL SDK format for analyze.py compatibility
+            otel_attrs = []
+            for k, v in s["attrs"].items():
+                if isinstance(v, list):
+                    otel_attrs.append({"Key": k, "Value": {"Type": "STRINGSLICE", "Value": v}})
+                elif isinstance(v, int) or (isinstance(v, str) and v.isdigit()):
+                    otel_attrs.append({"Key": k, "Value": {"Type": "INT64", "Value": int(v)}})
+                else:
+                    otel_attrs.append({"Key": k, "Value": {"Type": "STRING", "Value": str(v)}})
+
+            jsonl_spans.append({
+                "Name": s["name"],
+                "SpanContext": {"TraceID": s.get("trace_id", "")},
+                "Attributes": otel_attrs,
+                # New span-per-event model: no Events array, data is in Attributes
+                "Events": None,
+            })
+        return jsonl_spans
+
+    def wait_ready(self, timeout: int = 30):
+        """Wait for Jaeger to be responsive."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._get("/api/v3/services") is not None:
+                return
+            time.sleep(1)
+        print("  Warning: Jaeger not responding, traces may be incomplete")
 
 
 # ---------------------------------------------------------------------------
@@ -437,11 +560,12 @@ def build_env(s: Scenario) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Log monitoring
+# Convergence detection (via Jaeger spans)
 # ---------------------------------------------------------------------------
 
-def wait_for_convergence(dc: Compose, container: str, timeout: int) -> tuple[bool, int]:
-    """Wait for any reachability event. Returns (converged, elapsed_s)."""
+def wait_for_convergence(jaeger: Jaeger, start_time: datetime,
+                         timeout: int) -> tuple[bool, int]:
+    """Wait for any reachability convergence span in Jaeger. Returns (converged, elapsed_s)."""
     start = time.time()
     while True:
         elapsed = int(time.time() - start)
@@ -449,26 +573,25 @@ def wait_for_convergence(dc: Compose, container: str, timeout: int) -> tuple[boo
             print(f"  Timeout ({timeout}s)")
             return False, elapsed
 
-        logs = dc.logs(container)
-        if ANY_CONVERGENCE.search(logs):
+        if jaeger.has_convergence_span(start_time):
             print(f"  Converged ({elapsed}s), stabilizing...")
             time.sleep(30)
             return True, elapsed
 
-        time.sleep(2)
+        time.sleep(3)
         print(".", end="", flush=True)
 
 
-def count_pattern(dc: Compose, container: str, pattern: str) -> int:
-    """Count lines matching pattern in container logs."""
-    logs = dc.logs(container)
-    return len(re.findall(pattern, logs))
+def count_jaeger_spans(jaeger: Jaeger, span_name: str,
+                       start_time: datetime, filter_fn=None) -> int:
+    """Count spans matching name in Jaeger since start_time."""
+    return jaeger.count_spans(span_name, start_time, filter_fn)
 
 
-def wait_for_new_event(dc: Compose, container: str, pattern: str,
-                       prev_count: int, timeout: int,
-                       description: str) -> tuple[bool, int]:
-    """Wait for new events matching pattern (by count increase)."""
+def wait_for_new_span(jaeger: Jaeger, span_name: str, start_time: datetime,
+                      prev_count: int, timeout: int,
+                      description: str, filter_fn=None) -> tuple[bool, int]:
+    """Wait for new spans matching name (by count increase). Returns (detected, elapsed_s)."""
     start = time.time()
     print(f"  Waiting for {description}", end="", flush=True)
     while True:
@@ -477,13 +600,13 @@ def wait_for_new_event(dc: Compose, container: str, pattern: str,
             print(f" timeout ({timeout}s)")
             return False, elapsed
 
-        current = count_pattern(dc, container, pattern)
+        current = count_jaeger_spans(jaeger, span_name, start_time, filter_fn)
         if current > prev_count:
             elapsed = int(time.time() - start)
             print(f" detected ({elapsed}s)")
             return True, elapsed
 
-        time.sleep(2)
+        time.sleep(3)
         print(".", end="", flush=True)
 
 
@@ -507,28 +630,36 @@ def exec_toggle(dc: Compose, action: str, port: int = DEFAULT_PORT):
     print(f"  [{ts}] toggle: {action} (port {port})")
 
 
-def run_toggles(dc: Compose, container: str, toggles: list[Toggle]) -> list[dict]:
+def run_toggles(dc: Compose, jaeger: Jaeger, start_time: datetime,
+                toggles: list[Toggle]) -> list[dict]:
     """Execute dynamic toggles and return timing results."""
     results = []
     for i, t in enumerate(toggles):
         phase = i + 1
         print(f"\n  --- Toggle phase {phase}: {t.action} (wait_for={t.wait_for}) ---")
 
-        # Determine what pattern to watch for after this toggle
+        # Determine what span to watch for after this toggle
         if t.action == "add_port_forward":
-            watch_pattern = V2_REACHABLE_PATTERN
+            filter_fn = lambda s: any(
+                isinstance(s["attrs"].get("reachable"), list)
+                and len(s["attrs"]["reachable"]) > 0
+                for _ in [1]
+            )
             desc = "v2 reachable"
         else:
-            watch_pattern = V2_UNREACHABLE_PATTERN
+            filter_fn = lambda s: any(
+                isinstance(s["attrs"].get("unreachable"), list)
+                and len(s["attrs"]["unreachable"]) > 0
+                for _ in [1]
+            )
             desc = "v2 unreachable"
 
         # Wait before toggling
         if t.wait_for == "converged":
-            # Wait for current state to stabilize
-            prev_count = count_pattern(dc, container, "REACHABLE ADDRS CHANGED")
-            ok, wait_elapsed = wait_for_new_event(
-                dc, container, "REACHABLE ADDRS CHANGED",
-                prev_count=0,  # any existing event counts as converged
+            prev_count = count_jaeger_spans(jaeger, SPAN_REACHABLE_ADDRS, start_time)
+            ok, wait_elapsed = wait_for_new_span(
+                jaeger, SPAN_REACHABLE_ADDRS, start_time,
+                prev_count=0,  # any existing span counts as converged
                 timeout=t.timeout_s,
                 description="initial convergence",
             )
@@ -540,18 +671,19 @@ def run_toggles(dc: Compose, container: str, toggles: list[Toggle]) -> list[dict
             time.sleep(t.sleep_s)
 
         # Record state before toggle
-        prev_count = count_pattern(dc, container, watch_pattern)
+        prev_count = count_jaeger_spans(jaeger, SPAN_REACHABLE_ADDRS, start_time, filter_fn)
         toggle_epoch = time.time()
 
         # Execute the toggle
         exec_toggle(dc, t.action)
 
         # Wait for detection
-        detected, elapsed = wait_for_new_event(
-            dc, container, watch_pattern,
+        detected, elapsed = wait_for_new_span(
+            jaeger, SPAN_REACHABLE_ADDRS, start_time,
             prev_count=prev_count,
             timeout=t.timeout_s,
             description=desc,
+            filter_fn=filter_fn,
         )
 
         results.append({
@@ -655,8 +787,8 @@ def wait_for_healthy(dc: Compose, profiles: list[str], timeout: int = 60):
 # Main run loop
 # ---------------------------------------------------------------------------
 
-def run_scenario(dc: Compose, s: Scenario, run_num: int, result_file: str,
-                 script_dir: str) -> bool:
+def run_scenario(dc: Compose, jaeger: Jaeger, s: Scenario, run_num: int,
+                 result_file: str, script_dir: str) -> bool:
     """Execute a single scenario run. Returns True if passed."""
     profiles = get_profiles(s)
     container = get_client_container(s)
@@ -668,34 +800,41 @@ def run_scenario(dc: Compose, s: Scenario, run_num: int, result_file: str,
     # Clean up previous run
     dc.down(profiles)
 
+    # Record start time for Jaeger queries
+    run_start = datetime.now(timezone.utc)
+
     # Start containers
     dc.up(profiles)
 
-    # Wait for servers to be healthy
+    # Wait for Jaeger and servers to be ready
+    jaeger.wait_ready()
     wait_for_healthy(dc, profiles)
 
-    # Monitor for convergence
-    converged, elapsed = wait_for_convergence(dc, container, s.timeout_s)
+    # Monitor for convergence via Jaeger spans
+    converged, elapsed = wait_for_convergence(jaeger, run_start, s.timeout_s)
     print()
 
     # Execute dynamic toggles if present
     toggle_results = []
     if s.dynamic_toggles:
-        toggle_results = run_toggles(dc, container, s.dynamic_toggles)
+        toggle_results = run_toggles(dc, jaeger, run_start, s.dynamic_toggles)
         print()
 
-    # Show relevant log lines
+    # Show relevant log lines from docker (human-readable output)
     logs = dc.logs(container)
     for line in logs.splitlines():
         if LOG_KEY_EVENTS.search(line):
             print(f"  {line.rstrip()}")
 
-    # Copy trace results
-    if os.path.exists(TRACE_STAGING):
-        shutil.copy2(TRACE_STAGING, result_file)
-        os.remove(TRACE_STAGING)
+    # Export traces from Jaeger and save as JSONL (compatible with analyze.py)
+    trace_spans = jaeger.export_trace_jsonl(run_start)
+    if trace_spans:
+        with open(result_file, "w") as f:
+            for span in trace_spans:
+                f.write(json.dumps(span) + "\n")
+        print(f"  Exported {len(trace_spans)} spans from Jaeger to {result_file}")
     else:
-        print("  Warning: no trace.json found")
+        print("  Warning: no spans found in Jaeger")
 
     # Save toggle results if present
     if toggle_results:
@@ -708,7 +847,7 @@ def run_scenario(dc: Compose, s: Scenario, run_num: int, result_file: str,
             print(f"    Phase {tr['phase']} ({tr['action']}): "
                   f"{status} in {tr['time_to_detect_s']}s")
 
-    # Run assertions
+    # Run assertions against exported trace file
     run_pass = True
     if s.assertions and os.path.exists(result_file):
         results, fail_count = run_assertions(s.assertions, result_file, script_dir)
@@ -796,6 +935,7 @@ def main():
     os.makedirs(result_dir, exist_ok=True)
 
     dc = Compose(COMPOSE_FILE)
+    jaeger = Jaeger()
     total_pass = 0
     total_fail = 0
     scenario_num = 0
@@ -824,7 +964,7 @@ def main():
                       f"servers={s.server_count} loss={s.packet_loss}% "
                       f"latency={s.latency_ms}ms timeout={s.timeout_s}s{toggles_info}")
 
-            passed = run_scenario(dc, s, run_num, result_file, script_dir)
+            passed = run_scenario(dc, jaeger, s, run_num, result_file, script_dir)
 
             if passed:
                 total_pass += 1

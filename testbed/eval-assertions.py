@@ -44,8 +44,12 @@ def flatten_attributes(attrs):
 def load_events(path):
     """Load events from OTEL trace JSONL file.
 
-    Extracts events from all spans and flattens them into dicts
-    compatible with the assertion matching format:
+    Supports two formats:
+    - Old format: events are in span.Events[] arrays
+    - New format (span-per-event): each testbed event is a top-level span
+      with data in Attributes (no Events array)
+
+    Returns list of flat dicts:
       {"type": <event_name>, "elapsed_ms": ..., <attr_key>: <attr_value>, ...}
     """
     events = []
@@ -59,23 +63,38 @@ def load_events(path):
             except json.JSONDecodeError:
                 continue
 
-            # Extract events from the span
-            span_events = span.get("Events", [])
-            if not span_events:
-                continue
+            span_name = span.get("Name", "")
 
+            # Old format: extract events from the span's Events array
+            span_events = span.get("Events") or []
             for evt in span_events:
                 flat = flatten_attributes(evt.get("Attributes", []))
                 flat["type"] = evt.get("Name", "")
-                flat["_span_name"] = span.get("Name", "")
+                flat["_span_name"] = span_name
                 flat["_time"] = evt.get("Time", "")
-                # Convert stringified numbers
                 if "elapsed_ms" in flat:
                     try:
                         flat["elapsed_ms"] = int(flat["elapsed_ms"])
                     except (ValueError, TypeError):
                         pass
                 events.append(flat)
+
+            # New format (span-per-event): span itself is the event
+            # Skip known library spans that have their own Events
+            if span_name not in ("autonat.session", "autonatv2.refresh_cycle",
+                                 "autonatv2.probe", "autonatv2.server_selection"):
+                span_attrs = flatten_attributes(span.get("Attributes", []))
+                if span_attrs:  # only if span has attributes (skip empty)
+                    flat = dict(span_attrs)
+                    flat["type"] = span_name
+                    flat["_span_name"] = span_name
+                    flat["_time"] = span.get("StartTime", "")
+                    if "elapsed_ms" in flat:
+                        try:
+                            flat["elapsed_ms"] = int(flat["elapsed_ms"])
+                        except (ValueError, TypeError):
+                            pass
+                    events.append(flat)
 
     return events
 

@@ -24,7 +24,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -38,6 +37,15 @@ var peerStats struct {
 	connected      atomic.Int64
 	disconnected   atomic.Int64
 	protoUpdated   atomic.Int64
+}
+
+// emitSpan creates a short-lived span that exports immediately via the batcher.
+// Each call produces a separate span in Jaeger, avoiding the 128-event-per-span limit.
+func emitSpan(name string, attrs ...attribute.KeyValue) {
+	tracer := otel.Tracer("autonat-testbed")
+	attrs = append(attrs, attribute.Int64("elapsed_ms", time.Since(startTime).Milliseconds()))
+	_, span := tracer.Start(context.Background(), name, trace.WithAttributes(attrs...))
+	span.End()
 }
 
 func main() {
@@ -57,18 +65,17 @@ func main() {
 	tcpBehaviorFlag := flag.String("tcp-behavior", "", "Behavior override for TCP addresses; overrides --behavior for TCP probes (mock-server role only)")
 	quicBehaviorFlag := flag.String("quic-behavior", "", "Behavior override for QUIC addresses; overrides --behavior for QUIC probes (mock-server role only)")
 	dhtMode := flag.String("dht-mode", "auto", "DHT mode: auto, client, or server")
-	traceFile := flag.String("trace-file", "", "Output file for OTEL traces (JSON); empty = no tracing")
-	otlpEndpoint := flag.String("otlp-endpoint", "", "Optional OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318); can be used alongside --trace-file")
+	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318)")
 	flag.Parse()
 
 	// Initialize OTEL tracing if requested
-	if *traceFile != "" || *otlpEndpoint != "" {
-		shutdown, err := initTracer(*traceFile, *otlpEndpoint)
+	if *otlpEndpoint != "" {
+		shutdown, err := initTracer(*otlpEndpoint)
 		if err != nil {
 			log.Fatalf("Failed to initialize tracer: %v", err)
 		}
 		defer shutdown()
-		log.Printf("OTEL tracing enabled, writing to %s", *traceFile)
+		log.Printf("OTEL tracing enabled, exporting to %s", *otlpEndpoint)
 	}
 
 	if *obsAddrThresh > 0 {
@@ -159,9 +166,9 @@ func main() {
 	defer h.Close()
 
 	// Create the session span — covers the entire node lifetime.
-	// All testbed lifecycle events are recorded as events on this span.
+	// Only carries session-level attributes; individual events are separate spans.
 	tracer := otel.Tracer("autonat-testbed")
-	ctx, sessionSpan := tracer.Start(context.Background(), "autonat.session",
+	_, sessionSpan := tracer.Start(context.Background(), "autonat.session",
 		trace.WithAttributes(
 			attribute.String("role", *role),
 			attribute.String("transport", *transport),
@@ -170,7 +177,7 @@ func main() {
 		))
 	defer sessionSpan.End()
 
-	addEvent(sessionSpan, "started",
+	emitSpan("started",
 		attribute.String("peer_id", h.ID().String()),
 		attribute.StringSlice("addresses", multiaddrsToStrings(h.Addrs())),
 		attribute.String("message", fmt.Sprintf("role=%s transport=%s", *role, *transport)),
@@ -186,11 +193,11 @@ func main() {
 		writeAddrFile(h, *addrFile)
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Subscribe to all event bus events
-	go subscribeAllEvents(ctx, h, sessionSpan)
+	go subscribeAllEvents(ctx, h)
 
 	// Print periodic summary of high-frequency peer events
 	go func() {
@@ -211,11 +218,11 @@ func main() {
 
 	if *role == "client" {
 		if *bootstrap {
-			go bootstrapDHT(ctx, h, *dhtMode, sessionSpan)
+			go bootstrapDHT(ctx, h, *dhtMode)
 		} else if *peerDir != "" {
-			go discoverFromDir(ctx, h, *peerDir, sessionSpan)
+			go discoverFromDir(ctx, h, *peerDir)
 		} else if *peers != "" {
-			go connectToPeers(ctx, h, *peers, sessionSpan)
+			go connectToPeers(ctx, h, *peers)
 		} else {
 			log.Println("Warning: client mode with no --peers, no --peer-dir, and no --bootstrap; waiting for inbound connections")
 		}
@@ -226,16 +233,10 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	addEvent(sessionSpan, "shutdown",
+	emitSpan("shutdown",
 		attribute.String("message", "received signal, shutting down"),
 	)
 	log.Println("Shutting down...")
-}
-
-// addEvent adds a named event to the session span with elapsed_ms computed from startTime.
-func addEvent(span trace.Span, name string, attrs ...attribute.KeyValue) {
-	attrs = append(attrs, attribute.Int64("elapsed_ms", time.Since(startTime).Milliseconds()))
-	span.AddEvent(name, trace.WithAttributes(attrs...))
 }
 
 func buildListenAddrs(ip string, port int, transport string) []string {
@@ -290,7 +291,7 @@ func parseDHTMode(mode string) dht.ModeOpt {
 }
 
 // subscribeAllEvents subscribes to all relevant event bus events and dispatches them.
-func subscribeAllEvents(ctx context.Context, h host.Host, sessionSpan trace.Span) {
+func subscribeAllEvents(ctx context.Context, h host.Host) {
 	sub, err := h.EventBus().Subscribe([]any{
 		new(event.EvtLocalReachabilityChanged),
 		new(event.EvtHostReachableAddrsChanged),
@@ -317,17 +318,19 @@ func subscribeAllEvents(ctx context.Context, h host.Host, sessionSpan trace.Span
 			if !ok {
 				return
 			}
-			handleEvent(evt, h, sessionSpan)
+			handleEvent(evt, h)
 		}
 	}
 }
 
-func handleEvent(evt interface{}, h host.Host, sessionSpan trace.Span) {
+func handleEvent(evt interface{}, h host.Host) {
 	switch tevt := evt.(type) {
+	// --- Important events: emit individual short-lived spans ---
+
 	case event.EvtLocalReachabilityChanged:
 		reachStr := reachabilityString(tevt.Reachability)
 		log.Printf("REACHABILITY CHANGED: %s", reachStr)
-		addEvent(sessionSpan, "reachability_changed",
+		emitSpan("reachability_changed",
 			attribute.String("reachability", reachStr),
 			attribute.StringSlice("addresses", multiaddrsToStrings(h.Addrs())),
 		)
@@ -344,7 +347,7 @@ func handleEvent(evt interface{}, h host.Host, sessionSpan trace.Span) {
 		for _, a := range tevt.Unknown {
 			log.Printf("  UNKNOWN:     %s", a)
 		}
-		addEvent(sessionSpan, "reachable_addrs_changed",
+		emitSpan("reachable_addrs_changed",
 			attribute.StringSlice("reachable", multiaddrsToStrings(tevt.Reachable)),
 			attribute.StringSlice("unreachable", multiaddrsToStrings(tevt.Unreachable)),
 			attribute.StringSlice("unknown", multiaddrsToStrings(tevt.Unknown)),
@@ -352,7 +355,7 @@ func handleEvent(evt interface{}, h host.Host, sessionSpan trace.Span) {
 
 	case event.EvtNATDeviceTypeChanged:
 		log.Printf("NAT DEVICE TYPE (%s): %s", tevt.TransportProtocol, tevt.NatDeviceType)
-		addEvent(sessionSpan, "nat_device_type_changed",
+		emitSpan("nat_device_type_changed",
 			attribute.String("transport_protocol", string(tevt.TransportProtocol)),
 			attribute.String("nat_device_type", tevt.NatDeviceType.String()),
 		)
@@ -366,50 +369,14 @@ func handleEvent(evt interface{}, h host.Host, sessionSpan trace.Span) {
 		for _, a := range tevt.Removed {
 			removed = append(removed, a.Address.String())
 		}
-		addEvent(sessionSpan, "addresses_updated",
+		emitSpan("addresses_updated",
 			attribute.StringSlice("current", current),
 			attribute.StringSlice("removed", removed),
 		)
 
-	case event.EvtPeerIdentificationCompleted:
-		peerStats.identified.Add(1)
-		addEvent(sessionSpan, "peer_identification_completed",
-			attribute.String("peer_id", tevt.Peer.String()),
-			attribute.String("observed_addr", tevt.ObservedAddr.String()),
-			attribute.StringSlice("protocols", protocolIDsToStrings(tevt.Protocols)),
-			attribute.String("agent_version", tevt.AgentVersion),
-		)
-
-	case event.EvtPeerIdentificationFailed:
-		peerStats.identifyFailed.Add(1)
-		addEvent(sessionSpan, "peer_identification_failed",
-			attribute.String("peer_id", tevt.Peer.String()),
-			attribute.String("reason", tevt.Reason.Error()),
-		)
-
-	case event.EvtPeerConnectednessChanged:
-		connStr := connectednessString(tevt.Connectedness)
-		if tevt.Connectedness == network.Connected {
-			peerStats.connected.Add(1)
-		} else {
-			peerStats.disconnected.Add(1)
-		}
-		addEvent(sessionSpan, "peer_connectedness_changed",
-			attribute.String("peer_id", tevt.Peer.String()),
-			attribute.String("connectedness", connStr),
-		)
-
-	case event.EvtPeerProtocolsUpdated:
-		peerStats.protoUpdated.Add(1)
-		addEvent(sessionSpan, "peer_protocols_updated",
-			attribute.String("peer_id", tevt.Peer.String()),
-			attribute.StringSlice("added", protocolIDsToStrings(tevt.Added)),
-			attribute.StringSlice("removed", protocolIDsToStrings(tevt.Removed)),
-		)
-
 	case event.EvtLocalProtocolsUpdated:
 		log.Printf("LOCAL PROTOCOLS UPDATED: added=%d removed=%d", len(tevt.Added), len(tevt.Removed))
-		addEvent(sessionSpan, "local_protocols_updated",
+		emitSpan("local_protocols_updated",
 			attribute.StringSlice("added", protocolIDsToStrings(tevt.Added)),
 			attribute.StringSlice("removed", protocolIDsToStrings(tevt.Removed)),
 		)
@@ -419,16 +386,34 @@ func handleEvent(evt interface{}, h host.Host, sessionSpan trace.Span) {
 		for _, addr := range tevt.RelayAddrs {
 			log.Printf("  RELAY: %s", addr)
 		}
-		addEvent(sessionSpan, "auto_relay_addrs_updated",
+		emitSpan("auto_relay_addrs_updated",
 			attribute.StringSlice("relay_addrs", multiaddrsToStrings(tevt.RelayAddrs)),
 		)
+
+	// --- High-frequency peer events: counter-only, no spans ---
+
+	case event.EvtPeerIdentificationCompleted:
+		peerStats.identified.Add(1)
+
+	case event.EvtPeerIdentificationFailed:
+		peerStats.identifyFailed.Add(1)
+
+	case event.EvtPeerConnectednessChanged:
+		if tevt.Connectedness == network.Connected {
+			peerStats.connected.Add(1)
+		} else {
+			peerStats.disconnected.Add(1)
+		}
+
+	case event.EvtPeerProtocolsUpdated:
+		peerStats.protoUpdated.Add(1)
 
 	default:
 		log.Printf("Unknown event: %T", evt)
 	}
 }
 
-func connectToPeers(ctx context.Context, h host.Host, peersStr string, sessionSpan trace.Span) {
+func connectToPeers(ctx context.Context, h host.Host, peersStr string) {
 	for _, addrStr := range strings.Split(peersStr, ",") {
 		addrStr = strings.TrimSpace(addrStr)
 		if addrStr == "" {
@@ -446,22 +431,22 @@ func connectToPeers(ctx context.Context, h host.Host, peersStr string, sessionSp
 		}
 		if err := h.Connect(ctx, *pi); err != nil {
 			log.Printf("Failed to connect to %s: %v", pi.ID, err)
-			addEvent(sessionSpan, "connect_failed",
+			emitSpan("connect_failed",
 				attribute.String("peer_id", pi.ID.String()),
 				attribute.String("message", err.Error()),
 			)
 		} else {
 			log.Printf("Connected to %s", pi.ID)
-			addEvent(sessionSpan, "connected",
+			emitSpan("connected",
 				attribute.String("peer_id", pi.ID.String()),
 			)
 		}
 	}
 }
 
-func bootstrapDHT(ctx context.Context, h host.Host, dhtMode string, sessionSpan trace.Span) {
+func bootstrapDHT(ctx context.Context, h host.Host, dhtMode string) {
 	mode := parseDHTMode(dhtMode)
-	addEvent(sessionSpan, "bootstrap_start",
+	emitSpan("bootstrap_start",
 		attribute.String("message", "connecting to IPFS DHT bootstrap peers"),
 		attribute.String("dht_mode", dhtMode),
 	)
@@ -469,7 +454,7 @@ func bootstrapDHT(ctx context.Context, h host.Host, dhtMode string, sessionSpan 
 	d, err := dht.New(ctx, h, dht.Mode(mode))
 	if err != nil {
 		log.Printf("Failed to create DHT: %v", err)
-		addEvent(sessionSpan, "bootstrap_error",
+		emitSpan("bootstrap_error",
 			attribute.String("message", err.Error()),
 		)
 		return
@@ -478,7 +463,7 @@ func bootstrapDHT(ctx context.Context, h host.Host, dhtMode string, sessionSpan 
 
 	if err := d.Bootstrap(ctx); err != nil {
 		log.Printf("DHT bootstrap failed: %v", err)
-		addEvent(sessionSpan, "bootstrap_error",
+		emitSpan("bootstrap_error",
 			attribute.String("message", err.Error()),
 		)
 		return
@@ -494,13 +479,13 @@ func bootstrapDHT(ctx context.Context, h host.Host, dhtMode string, sessionSpan 
 			log.Printf("Bootstrap peer %s: failed (%v)", pi.ID.ShortString(), err)
 		} else {
 			log.Printf("Bootstrap peer %s: connected", pi.ID.ShortString())
-			addEvent(sessionSpan, "bootstrap_connected",
+			emitSpan("bootstrap_connected",
 				attribute.String("peer_id", pi.ID.String()),
 			)
 		}
 	}
 
-	addEvent(sessionSpan, "bootstrap_done",
+	emitSpan("bootstrap_done",
 		attribute.String("message", "DHT bootstrap complete, discovering peers..."),
 	)
 
@@ -521,8 +506,8 @@ func writeAddrFile(h host.Host, path string) {
 	}
 }
 
-func discoverFromDir(ctx context.Context, h host.Host, dir string, sessionSpan trace.Span) {
-	addEvent(sessionSpan, "peer_discovery_start",
+func discoverFromDir(ctx context.Context, h host.Host, dir string) {
+	emitSpan("peer_discovery_start",
 		attribute.String("message", fmt.Sprintf("reading server addresses from %s", dir)),
 	)
 
@@ -536,7 +521,7 @@ func discoverFromDir(ctx context.Context, h host.Host, dir string, sessionSpan t
 		}
 		if time.Since(start) > maxWait {
 			log.Printf("Timeout waiting for peer addr files in %s", dir)
-			addEvent(sessionSpan, "peer_discovery_timeout",
+			emitSpan("peer_discovery_timeout",
 				attribute.String("message", fmt.Sprintf("no addr files found in %s after %s", dir, maxWait)),
 			)
 			return
@@ -588,19 +573,19 @@ func discoverFromDir(ctx context.Context, h host.Host, dir string, sessionSpan t
 		pi := peer.AddrInfo{ID: id, Addrs: addrs}
 		if err := h.Connect(ctx, pi); err != nil {
 			log.Printf("Failed to connect to %s: %v", id.ShortString(), err)
-			addEvent(sessionSpan, "connect_failed",
+			emitSpan("connect_failed",
 				attribute.String("peer_id", id.String()),
 				attribute.String("message", err.Error()),
 			)
 		} else {
 			log.Printf("Connected to server %s", id.ShortString())
-			addEvent(sessionSpan, "connected",
+			emitSpan("connected",
 				attribute.String("peer_id", id.String()),
 			)
 		}
 	}
 
-	addEvent(sessionSpan, "peer_discovery_done",
+	emitSpan("peer_discovery_done",
 		attribute.String("message", fmt.Sprintf("connected to servers from %s", dir)),
 	)
 }
@@ -613,17 +598,6 @@ func reachabilityString(r network.Reachability) string {
 		return "private"
 	default:
 		return "unknown"
-	}
-}
-
-func connectednessString(c network.Connectedness) string {
-	switch c {
-	case network.Connected:
-		return "connected"
-	case network.NotConnected:
-		return "not_connected"
-	default:
-		return fmt.Sprintf("connectedness(%d)", c)
 	}
 }
 
@@ -643,48 +617,23 @@ func multiaddrsToStrings(addrs []ma.Multiaddr) []string {
 	return strs
 }
 
-// initTracer sets up an OTEL TracerProvider with one or both exporters:
-//   - path: write spans as JSONL to a file (empty = skip)
-//   - otlpEndpoint: export via OTLP HTTP to a collector/Jaeger (empty = skip)
-func initTracer(path string, otlpEndpoint string) (func(), error) {
-	var opts []sdktrace.TracerProviderOption
-	var closers []func()
-
-	if path != "" {
-		f, err := os.Create(path)
-		if err != nil {
-			return nil, fmt.Errorf("create trace file: %w", err)
-		}
-		exporter, err := stdouttrace.New(stdouttrace.WithWriter(f))
-		if err != nil {
-			f.Close()
-			return nil, fmt.Errorf("create file exporter: %w", err)
-		}
-		opts = append(opts, sdktrace.WithBatcher(exporter))
-		closers = append(closers, func() { f.Close() })
+// initTracer sets up an OTEL TracerProvider that exports via OTLP HTTP to a collector/Jaeger.
+func initTracer(otlpEndpoint string) (func(), error) {
+	ctx := context.Background()
+	exporter, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithEndpointURL(otlpEndpoint+"/v1/traces"),
+		otlptracehttp.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create OTLP exporter: %w", err)
 	}
 
-	if otlpEndpoint != "" {
-		ctx := context.Background()
-		exporter, err := otlptracehttp.New(ctx,
-			otlptracehttp.WithEndpointURL(otlpEndpoint+"/v1/traces"),
-			otlptracehttp.WithInsecure(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("create OTLP exporter: %w", err)
-		}
-		opts = append(opts, sdktrace.WithBatcher(exporter))
-	}
-
-	tp := sdktrace.NewTracerProvider(opts...)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter))
 	otel.SetTracerProvider(tp)
 
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		tp.Shutdown(ctx)
-		for _, c := range closers {
-			c()
-		}
 	}, nil
 }
