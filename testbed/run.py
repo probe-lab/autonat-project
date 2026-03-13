@@ -855,12 +855,23 @@ def run_scenario(dc: Compose, jaeger: Jaeger, s: Scenario, run_num: int,
     converged, elapsed = wait_for_convergence(jaeger, run_start, s.timeout_s)
     print()
 
-    # Optional: continue observing after convergence to capture oscillation
+    # Optional: continue observing after convergence to capture oscillation.
+    # Poll Jaeger periodically to accumulate spans (avoids in-memory expiry).
+    accumulated_spans = []
     if converged and s.observe_after_convergence_s:
         obs = s.observe_after_convergence_s
-        print(f"  Observing for {obs}s after convergence...")
-        time.sleep(obs)
-        print(f"  Observation complete (total {elapsed + obs + 30}s)")
+        poll_interval = 60
+        print(f"  Observing for {obs}s after convergence (polling every {poll_interval}s)...")
+        obs_start = time.time()
+        while time.time() - obs_start < obs:
+            time.sleep(min(poll_interval, obs - (time.time() - obs_start)))
+            new_spans = jaeger.export_trace_jsonl(run_start)
+            if new_spans:
+                accumulated_spans = new_spans  # latest query has all spans
+            remaining = obs - int(time.time() - obs_start)
+            if remaining > 0:
+                print(f"  ... {len(accumulated_spans)} spans collected, {remaining}s remaining")
+        print(f"  Observation complete ({len(accumulated_spans)} spans, total {elapsed + obs + 30}s)")
 
     # Execute dynamic toggles if present
     toggle_results = []
@@ -875,7 +886,8 @@ def run_scenario(dc: Compose, jaeger: Jaeger, s: Scenario, run_num: int,
             print(f"  {line.rstrip()}")
 
     # Export traces from Jaeger and save as JSONL (compatible with analyze.py)
-    trace_spans = jaeger.export_trace_jsonl(run_start)
+    # Use accumulated spans from observation polling if available, else query now.
+    trace_spans = accumulated_spans or jaeger.export_trace_jsonl(run_start)
     if trace_spans:
         with open(result_file, "w") as f:
             for span in trace_spans:
