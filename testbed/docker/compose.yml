@@ -5,6 +5,7 @@
 #   nonat      - AutoNAT experiment with local servers, client on public network (no NAT)
 #   5servers   - Add servers 4-5 (use with local or nonat)
 #   7servers   - Add servers 6-7 (use with local/nonat + 5servers)
+#   unreliable - Add 3 unreliable servers (dial-back blocked, for v1/v2 gap reproduction)
 #   mock       - Mock AutoNAT v2 servers with controllable behaviors
 #   public     - AutoNAT experiment with real IPFS/libp2p servers
 #   test       - Lightweight NAT verification (socat, no Go binary)
@@ -260,6 +261,7 @@ services:
       --peer-dir=/peer-addrs
       --otlp-endpoint=http://jaeger:4318
       --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
+      --autonat-refresh=${AUTONAT_REFRESH:-0}
     volumes:
       - peer-addrs:/peer-addrs:ro
     networks:
@@ -321,6 +323,108 @@ services:
     networks:
       private-net:
         ipv4_address: 10.0.1.11
+
+  # === Unreliable servers (for v1/v2 gap reproduction) ===
+  # Real libp2p servers that serve both v1 and v2 protocols, but with iptables
+  # rules blocking NEW outbound connections to the client's public IP.
+  # This simulates DHT peers behind restrictive NAT that can accept connections
+  # but whose dial-back attempts fail — causing v1 to oscillate while v2 stays
+  # stable (v2 reaches targetConfidence from the reliable servers).
+
+  unreliable-server-1:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["unreliable"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+      - BLOCK_DIALBACK_TO=${ROUTER_PUBLIC_IP:-73.0.0.2}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/unreliable-server-1"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/unreliable-server-1"]
+
+  unreliable-server-2:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["unreliable"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+      - BLOCK_DIALBACK_TO=${ROUTER_PUBLIC_IP:-73.0.0.2}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/unreliable-server-2"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/unreliable-server-2"]
+
+  unreliable-server-3:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["unreliable"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+      - BLOCK_DIALBACK_TO=${ROUTER_PUBLIC_IP:-73.0.0.2}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/unreliable-server-3"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/unreliable-server-3"]
+
+  unreliable-server-4:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["unreliable"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+      - BLOCK_DIALBACK_TO=${ROUTER_PUBLIC_IP:-73.0.0.2}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/unreliable-server-4"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/unreliable-server-4"]
+
+  unreliable-server-5:
+    <<: *node-build
+    depends_on:
+      - router
+    cap_add:
+      - NET_ADMIN
+    profiles: ["unreliable"]
+    environment:
+      - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
+      - BLOCK_DIALBACK_TO=${ROUTER_PUBLIC_IP:-73.0.0.2}
+    command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/unreliable-server-5"]
+    volumes:
+      - peer-addrs:/peer-addrs
+    networks:
+      - public-net
+    healthcheck:
+      <<: *server-healthcheck
+      test: ["CMD", "test", "-f", "/peer-addrs/unreliable-server-5"]
 
   # === Mock AutoNAT v2 servers ===
   # Controllable servers that generate specific protocol responses.

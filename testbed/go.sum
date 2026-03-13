@@ -204,8 +204,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/polydawn/refmt v0.89.0 h1:ADJTApkvkeBZsN0tBTx8QjpD9JkmxbKp0cxfr9qszm4=
 github.com/polydawn/refmt v0.89.0/go.mod h1:/zvteZs/GwLtCgZ4BL6CBsk9IKIlexP43ObX9AxTqTw=
-github.com/probe-lab/go-libp2p v0.38.2-0.20260303105539-54b6cec9f206 h1:7uN5DOJ6OwEnBE6cPIXNSg1HHQcem/AXcXqRYEQR09I=
-github.com/probe-lab/go-libp2p v0.38.2-0.20260303105539-54b6cec9f206/go.mod h1:6XLyivpL1aHSNRQiZp+25ClPBYHd0EE5jwvgBdymLqk=
+github.com/probe-lab/go-libp2p v0.38.2-0.20260313121921-83e6dd1c75c4 h1:gJkg3J73jtNmLYQf0q9Iw7kUo1Lhk8C0nBQ0I3+SjFY=
+github.com/probe-lab/go-libp2p v0.38.2-0.20260313121921-83e6dd1c75c4/go.mod h1:6XLyivpL1aHSNRQiZp+25ClPBYHd0EE5jwvgBdymLqk=
 github.com/prometheus/client_golang v1.23.2 h1:Je96obch5RDVy3FDMndoUsjAhG5Edi49h0RJWRi/o0o=
 github.com/prometheus/client_golang v1.23.2/go.mod h1:Tb1a6LWHB3/SPIzCoaDXI4I8UHKeFTEQ1YCr+0Gyqmg=
 github.com/prometheus/client_model v0.6.2 h1:oBsgwpGs7iVziMvrGhE53c/GrLUsZdHnqNwqPLxwZyk=

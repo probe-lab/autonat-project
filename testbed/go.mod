@@ -13,7 +13,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.41.0
 )
 
-replace github.com/libp2p/go-libp2p v0.47.0 => github.com/probe-lab/go-libp2p v0.38.2-0.20260303105539-54b6cec9f206
+replace github.com/libp2p/go-libp2p v0.47.0 => github.com/probe-lab/go-libp2p v0.38.2-0.20260313121921-83e6dd1c75c4
 
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect

@@ -67,6 +67,7 @@ func main() {
 	quicBehaviorFlag := flag.String("quic-behavior", "", "Behavior override for QUIC addresses; overrides --behavior for QUIC probes (mock-server role only)")
 	dhtMode := flag.String("dht-mode", "auto", "DHT mode: auto, client, or server")
 	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318)")
+	autonatRefresh := flag.Int("autonat-refresh", 0, "AutoNAT v1 refresh interval in seconds (0 = default 15min)")
 	flag.Parse()
 
 	// Initialize OTEL tracing if requested
@@ -157,6 +158,14 @@ func main() {
 		// See: https://github.com/libp2p/go-libp2p/issues/3467
 		libp2p.UDPBlackHoleSuccessCounter(nil),
 		libp2p.IPv6BlackHoleSuccessCounter(nil),
+	}
+
+	// Override v1 AutoNAT probe schedule if requested.
+	// This forces more frequent re-probing so v1 oscillation is visible in short runs.
+	if *autonatRefresh > 0 {
+		refresh := time.Duration(*autonatRefresh) * time.Second
+		log.Printf("AutoNAT v1 schedule override: refreshInterval=%s", refresh)
+		opts = append(opts, libp2p.AutoNATSchedule(90*time.Second, refresh))
 	}
 
 	// Create the host

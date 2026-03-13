@@ -1,0 +1,47 @@
+name: v1-v2-gap
+description: >
+  Reproduce the v1/v2 reachability gap (Issue #60). Client behind full-cone NAT
+  (truly reachable). Mix of 2 reliable servers + 5 unreliable servers whose
+  dial-back is blocked by iptables. v1 randomly selects from all 7 connected
+  peers — sometimes picks unreliable ones, causing oscillation between public
+  and private. v2 reaches targetConfidence=3 from the reliable servers and
+  stays stable at reachable.
+
+  Expected outcome: v2 reports stable reachable, v1 oscillates. The traces
+  should show reachability_changed events flipping between public/private
+  while reachable_addrs_changed stays consistent.
+
+  Timing: v1 bootDelay=15s, retryInterval=90s, refreshInterval=30s (overridden
+  from default 15min via --autonat-refresh=30). We observe for 300s after
+  initial convergence to capture ~10 v1 probe cycles. With 5 unreliable out
+  of 7 total servers (71%), each v1 probe has high chance of hitting an
+  unreliable peer, making oscillation very likely.
+
+defaults:
+  timeout_s: 120
+  runs: 1
+
+scenarios:
+  - name: v1v2-gap-fullcone-tcp
+    nat_type: full-cone
+    transport: tcp
+    server_count: 7
+    unreliable_servers: 5
+    autonat_refresh: 30
+    observe_after_convergence_s: 300
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "v2 should detect reachable addresses"
+
+  - name: v1v2-gap-fullcone-both
+    nat_type: full-cone
+    transport: both
+    server_count: 7
+    unreliable_servers: 5
+    autonat_refresh: 30
+    observe_after_convergence_s: 300
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "v2 should detect reachable addresses"

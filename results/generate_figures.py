@@ -1,0 +1,708 @@
+#!/usr/bin/env python3
+"""Generate report figures from AutoNAT v2 testbed results."""
+
+import json
+import os
+import sys
+from collections import defaultdict
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+TESTBED = os.path.join(BASE, "testbed")
+OUTDIR = os.path.join(BASE, "figures")
+os.makedirs(OUTDIR, exist_ok=True)
+
+# ---------- colour palette ----------
+NAT_COLORS = {
+    "none":               "#4CAF50",
+    "full-cone":          "#2196F3",
+    "address-restricted": "#FF9800",
+    "port-restricted":    "#F44336",
+    "symmetric":          "#9C27B0",
+}
+TRANSPORT_HATCHES = {"tcp": "", "quic": "//"}
+
+# Human-readable labels with real-world hints (multi-line, for tick labels)
+NAT_LABELS = {
+    "none":               "none",
+    "full-cone":          "full-cone\n(DMZ / port-forward)",
+    "address-restricted": "address-\nrestricted",
+    "port-restricted":    "port-\nrestricted",
+    "symmetric":          "symmetric\n(CGNAT / mobile)",
+}
+# Single-line labels for legends
+NAT_LEGEND = {
+    "none":               "none",
+    "full-cone":          "full-cone (DMZ)",
+    "address-restricted": "address-restricted",
+    "port-restricted":    "port-restricted",
+    "symmetric":          "symmetric (CGNAT/mobile)",
+}
+
+# ---------- helpers ----------
+
+def _parse_list(val):
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str) and val.startswith("["):
+        try:
+            p = json.loads(val)
+            if isinstance(p, list):
+                return p
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return []
+
+
+def parse_spans(filepath):
+    """Parse JSONL span file, return list of dicts."""
+    spans = []
+    with open(filepath) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            span = json.loads(line)
+            attrs = {}
+            for a in span.get("Attributes", []) or []:
+                v = a["Value"]
+                if v["Type"] == "INT64":
+                    attrs[a["Key"]] = int(v["Value"])
+                elif v["Type"] == "FLOAT64":
+                    attrs[a["Key"]] = float(v["Value"])
+                else:
+                    attrs[a["Key"]] = v["Value"]
+            spans.append({"name": span["Name"], "attrs": attrs})
+    return spans
+
+
+def get_convergence(spans):
+    """Return (v1_events, v2_events) from parsed spans."""
+    v1, v2 = [], []
+    for s in spans:
+        elapsed = s["attrs"].get("elapsed_ms", 0)
+        if s["name"] == "reachability_changed":
+            v1.append({
+                "elapsed_ms": elapsed,
+                "reachability": s["attrs"].get("reachability", "?"),
+            })
+        elif s["name"] == "reachable_addrs_changed":
+            r = _parse_list(s["attrs"].get("reachable", "[]"))
+            u = _parse_list(s["attrs"].get("unreachable", "[]"))
+            v2.append({
+                "elapsed_ms": elapsed,
+                "reachable": len(r),
+                "unreachable": len(u),
+            })
+    return v1, v2
+
+
+def first_convergence_ms(spans):
+    """Return milliseconds to first v1 or v2 convergence event."""
+    v1, v2 = get_convergence(spans)
+    times = []
+    if v1:
+        times.append(v1[0]["elapsed_ms"])
+    if v2:
+        # skip R0U0 "unknown" intermediate events
+        for e in v2:
+            if e["reachable"] > 0 or e["unreachable"] > 0:
+                times.append(e["elapsed_ms"])
+                break
+    return min(times) if times else None
+
+
+def parse_scenario_name(fname):
+    """Parse NAT type and transport from filename like full-cone-tcp-7.json."""
+    name = fname.replace(".json", "")
+    parts = name.split("-")
+    # Handle two-word NAT types
+    if parts[0] == "none":
+        nat = "none"
+        rest = parts[1:]
+    elif parts[0] == "full":
+        nat = "full-cone"
+        rest = parts[2:]
+    elif parts[0] == "address":
+        nat = "address-restricted"
+        rest = parts[2:]
+    elif parts[0] == "port":
+        nat = "port-restricted"
+        rest = parts[2:]
+    elif parts[0] == "symmetric":
+        nat = "symmetric"
+        rest = parts[1:]
+    else:
+        return None, None, {}
+    transport = rest[0] if rest else "?"
+    # Parse extra params from remaining parts
+    extra = {}
+    remaining = "-".join(rest[1:])
+    if "lat" in remaining:
+        for p in rest[1:]:
+            if p.startswith("lat"):
+                extra["latency_ms"] = int(p.replace("lat", ""))
+    if "loss" in remaining:
+        for p in rest[1:]:
+            if p.startswith("loss"):
+                extra["loss_pct"] = int(p.replace("loss", ""))
+    return nat, transport, extra
+
+
+# ---------- Figure 1: Baseline convergence by NAT type ----------
+
+def fig_baseline_convergence():
+    result_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    if not os.path.exists(result_dir):
+        print("  Skipping: no baseline data")
+        return
+
+    data = {}  # (nat, transport) -> convergence_ms
+    for f in sorted(os.listdir(result_dir)):
+        if not f.endswith(".json"):
+            continue
+        nat, transport, _ = parse_scenario_name(f)
+        if nat is None:
+            continue
+        spans = parse_spans(os.path.join(result_dir, f))
+        ms = first_convergence_ms(spans)
+        if ms is not None:
+            data[(nat, transport)] = ms
+
+    nat_order = ["none", "full-cone", "address-restricted", "port-restricted", "symmetric"]
+    transports = ["tcp", "quic"]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(nat_order))
+    width = 0.35
+
+    for i, t in enumerate(transports):
+        vals = [data.get((n, t), 0) / 1000 for n in nat_order]
+        bars = ax.bar(
+            x + i * width - width / 2, vals, width,
+            label=t.upper(),
+            color=[NAT_COLORS[n] for n in nat_order],
+            hatch=TRANSPORT_HATCHES[t],
+            edgecolor="black", linewidth=0.5,
+        )
+        for bar, val in zip(bars, vals):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
+                        f"{val:.1f}s", ha="center", va="bottom", fontsize=8)
+
+    ax.set_ylabel("Time to Convergence (seconds)")
+    ax.set_title("AutoNAT v2 Convergence Time by NAT Type (Local Testbed, 7 Servers)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([NAT_LABELS.get(n, n) for n in nat_order], fontsize=9)
+    ax.legend()
+    ax.set_ylim(0, max(data.values()) / 1000 * 1.3)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "01_baseline_convergence.png"), dpi=150)
+    plt.close(fig)
+    print("  01_baseline_convergence.png")
+
+
+# ---------- Figure 2: v1 vs v2 convergence comparison ----------
+
+def fig_v1_v2_comparison():
+    result_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    if not os.path.exists(result_dir):
+        return
+
+    nat_order = ["none", "full-cone", "address-restricted", "port-restricted", "symmetric"]
+    v1_data = {}
+    v2_data = {}
+
+    for f in sorted(os.listdir(result_dir)):
+        if not f.endswith(".json"):
+            continue
+        nat, transport, _ = parse_scenario_name(f)
+        if nat is None or transport != "tcp":
+            continue
+        spans = parse_spans(os.path.join(result_dir, f))
+        v1_evts, v2_evts = get_convergence(spans)
+        if v1_evts:
+            v1_data[nat] = v1_evts[0]["elapsed_ms"] / 1000
+        # For v2, skip R0U0 events
+        for e in v2_evts:
+            if e["reachable"] > 0 or e["unreachable"] > 0:
+                v2_data[nat] = e["elapsed_ms"] / 1000
+                break
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(nat_order))
+    width = 0.35
+
+    v1_vals = [v1_data.get(n, 0) for n in nat_order]
+    v2_vals = [v2_data.get(n, 0) for n in nat_order]
+
+    bars1 = ax.bar(x - width / 2, v1_vals, width, label="v1 (reachability_changed)",
+                   color="#1976D2", edgecolor="black", linewidth=0.5)
+    bars2 = ax.bar(x + width / 2, v2_vals, width, label="v2 (reachable_addrs_changed)",
+                   color="#FF7043", edgecolor="black", linewidth=0.5)
+
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.3,
+                        f"{h:.1f}s", ha="center", va="bottom", fontsize=8)
+
+    # Mark missing v2 for symmetric
+    if "symmetric" not in v2_data:
+        ax.text(x[nat_order.index("symmetric")] + width / 2, 0.5,
+                "no event", ha="center", va="bottom", fontsize=7, color="red", style="italic")
+
+    ax.set_ylabel("Time to First Event (seconds)")
+    ax.set_title("AutoNAT v1 vs v2: Time to First Convergence Event (TCP, Local Testbed)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([NAT_LABELS.get(n, n) for n in nat_order], fontsize=9)
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "02_v1_v2_convergence.png"), dpi=150)
+    plt.close(fig)
+    print("  02_v1_v2_convergence.png")
+
+
+# ---------- Figure 3: Latency impact on convergence ----------
+
+def fig_latency_impact():
+    result_dir = os.path.join(TESTBED, "high-latency-20260313T085635Z")
+    baseline_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    if not os.path.exists(result_dir):
+        print("  Skipping: no latency data")
+        return
+
+    nat_order = ["full-cone", "address-restricted", "port-restricted", "symmetric"]
+    latencies = [0, 200, 500]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+    for ti, transport in enumerate(["tcp", "quic"]):
+        ax = axes[ti]
+        for nat in nat_order:
+            vals = []
+            for lat in latencies:
+                if lat == 0:
+                    # baseline
+                    fname = f"{nat}-{transport}-7.json"
+                    path = os.path.join(baseline_dir, fname)
+                else:
+                    fname = f"{nat}-{transport}-7-lat{lat}.json"
+                    path = os.path.join(result_dir, fname)
+
+                if os.path.exists(path):
+                    spans = parse_spans(path)
+                    ms = first_convergence_ms(spans)
+                    vals.append(ms / 1000 if ms else None)
+                else:
+                    vals.append(None)
+
+            # Plot line
+            plot_lats = [l for l, v in zip(latencies, vals) if v is not None]
+            plot_vals = [v for v in vals if v is not None]
+            ax.plot(plot_lats, plot_vals, "o-", color=NAT_COLORS[nat],
+                    label=NAT_LEGEND.get(nat, nat), linewidth=2, markersize=6)
+
+        ax.set_xlabel("Added Latency (ms)")
+        ax.set_ylabel("Time to Convergence (seconds)" if ti == 0 else "")
+        ax.set_title(f"{transport.upper()}")
+        ax.set_xticks(latencies)
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+
+    fig.suptitle("Impact of Network Latency on AutoNAT v2 Convergence Time", fontsize=13, y=1.02)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "03_latency_impact.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  03_latency_impact.png")
+
+
+# ---------- Figure 4: Packet loss impact on convergence ----------
+
+def fig_packet_loss_impact():
+    result_dir = os.path.join(TESTBED, "packet-loss-20260313T093822Z")
+    baseline_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    if not os.path.exists(result_dir):
+        print("  Skipping: no packet-loss data")
+        return
+
+    nat_order = ["full-cone", "address-restricted", "port-restricted", "symmetric"]
+    losses = [0, 1, 5, 10]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+    for ti, transport in enumerate(["tcp", "quic"]):
+        ax = axes[ti]
+        for nat in nat_order:
+            vals = []
+            for loss in losses:
+                if loss == 0:
+                    fname = f"{nat}-{transport}-7.json"
+                    path = os.path.join(baseline_dir, fname)
+                else:
+                    fname = f"{nat}-{transport}-7-loss{loss}.json"
+                    path = os.path.join(result_dir, fname)
+
+                if os.path.exists(path):
+                    spans = parse_spans(path)
+                    ms = first_convergence_ms(spans)
+                    vals.append(ms / 1000 if ms else None)
+                else:
+                    vals.append(None)
+
+            plot_losses = [l for l, v in zip(losses, vals) if v is not None]
+            plot_vals = [v for v in vals if v is not None]
+            ax.plot(plot_losses, plot_vals, "o-", color=NAT_COLORS[nat],
+                    label=NAT_LEGEND.get(nat, nat), linewidth=2, markersize=6)
+
+        ax.set_xlabel("Packet Loss (%)")
+        ax.set_ylabel("Time to Convergence (seconds)" if ti == 0 else "")
+        ax.set_title(f"{transport.upper()}")
+        ax.set_xticks(losses)
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+
+    fig.suptitle("Impact of Packet Loss on AutoNAT v2 Convergence Time", fontsize=13, y=1.02)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "04_packet_loss_impact.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  04_packet_loss_impact.png")
+
+
+# ---------- Figure 5: Detection correctness heatmap ----------
+
+def fig_detection_correctness():
+    """Heatmap: expected vs actual reachability across all scenarios."""
+    result_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    if not os.path.exists(result_dir):
+        return
+
+    # Ground truth: which NATs are reachable?
+    reachable_nats = {"none", "full-cone"}  # address-restricted is NOT truly reachable by strangers
+    unreachable_nats = {"address-restricted", "port-restricted", "symmetric"}
+
+    nat_order = ["none", "full-cone", "address-restricted", "port-restricted", "symmetric"]
+    transports = ["tcp", "quic"]
+
+    # Build matrix: rows=NAT, cols=transport, value=detected reachability
+    matrix = []
+    labels = []
+
+    for nat in nat_order:
+        row = []
+        for t in transports:
+            fname = f"{nat}-{t}-7.json"
+            path = os.path.join(result_dir, fname)
+            if not os.path.exists(path):
+                row.append(None)
+                continue
+            spans = parse_spans(path)
+            v1_evts, v2_evts = get_convergence(spans)
+
+            # Determine detected state from v1
+            detected = None
+            if v1_evts:
+                detected = v1_evts[0]["reachability"]
+
+            expected = "public" if nat in reachable_nats else "private"
+            if detected is None:
+                row.append(0.5)  # unknown
+            elif detected == expected:
+                row.append(1.0)  # correct
+            else:
+                row.append(0.0)  # wrong
+        matrix.append(row)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    mat = np.array(matrix)
+    cmap = plt.cm.RdYlGn
+    im = ax.imshow(mat, cmap=cmap, vmin=0, vmax=1, aspect="auto")
+
+    ax.set_xticks(range(len(transports)))
+    ax.set_xticklabels([t.upper() for t in transports])
+    ax.set_yticks(range(len(nat_order)))
+    ax.set_yticklabels([NAT_LABELS.get(n, n) for n in nat_order])
+
+    # Annotate cells
+    for i, nat in enumerate(nat_order):
+        expected_reachable = nat in reachable_nats
+        expected = "reachable" if expected_reachable else "unreachable"
+        for j, t in enumerate(transports):
+            val = mat[i, j]
+            if val == 1.0:
+                txt = f"CORRECT\n({expected})"
+            elif val == 0.0:
+                if not expected_reachable:
+                    txt = f"FALSE POSITIVE\n(detected reachable)"
+                else:
+                    txt = f"FALSE NEGATIVE\n(detected unreachable)"
+            else:
+                txt = "NO EVENT"
+            color = "black" if val > 0.3 else "white"
+            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+
+    ax.set_title("Detection Correctness: v1 Reachability (Local Testbed)")
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "05_detection_correctness.png"), dpi=150)
+    plt.close(fig)
+    print("  05_detection_correctness.png")
+
+
+# ---------- Figure 6: Time-to-Update timeline ----------
+
+def fig_time_to_update():
+    ttu_dir = os.path.join(TESTBED, "time-to-update-20260312T214716Z")
+    toggles_file = os.path.join(ttu_dir, "ttu-port-restricted-tcp.toggles.json")
+    if not os.path.exists(toggles_file):
+        print("  Skipping: no TTU data")
+        return
+
+    with open(toggles_file) as f:
+        toggles = json.load(f)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    # Timeline:
+    # 0s: initial state (unreachable, port-restricted)
+    # converge time: v2 detects unreachable
+    # toggle 1: add port forward -> wait time_to_detect_s
+    # toggle 2: remove port forward -> wait time_to_detect_s
+
+    events = [
+        {"t": 0, "label": "Start\n(port-restricted NAT)", "color": "#F44336", "state": "unreachable"},
+    ]
+
+    t = 0
+    for tg in toggles:
+        # toggle happens at some point
+        t += 30  # sleep_s before toggle
+        action_label = "Add Port Forward" if tg["action"] == "add_port_forward" else "Remove Port Forward"
+        new_state = "reachable" if tg["action"] == "add_port_forward" else "unreachable"
+        events.append({"t": t, "label": f"Toggle:\n{action_label}", "color": "#FFC107", "state": None})
+        t += tg["time_to_detect_s"]
+        events.append({"t": t, "label": f"Detected:\n{new_state}\n({tg['time_to_detect_s']}s)",
+                       "color": "#4CAF50" if new_state == "reachable" else "#F44336",
+                       "state": new_state})
+
+    # Draw timeline
+    times = [e["t"] for e in events]
+    ax.plot(times, [0] * len(times), "k-", linewidth=2, zorder=1)
+
+    for i, e in enumerate(events):
+        yoff = 0.3 if i % 2 == 0 else -0.3
+        ax.plot(e["t"], 0, "o", color=e["color"], markersize=12, zorder=2)
+        ax.annotate(e["label"], (e["t"], 0), (e["t"], yoff),
+                    ha="center", va="center" if yoff > 0 else "center",
+                    fontsize=8, fontweight="bold",
+                    arrowprops=dict(arrowstyle="-", color="gray", lw=0.5))
+
+    # Draw detection delay arrows
+    for tg in toggles:
+        detect_s = tg["time_to_detect_s"]
+        # find toggle and detect events
+        for i in range(len(events) - 1):
+            if events[i].get("state") is None and events[i + 1].get("state") is not None:
+                t0, t1 = events[i]["t"], events[i + 1]["t"]
+                mid = (t0 + t1) / 2
+                ax.annotate("", xy=(t1, -0.05), xytext=(t0, -0.05),
+                            arrowprops=dict(arrowstyle="<->", color="#1976D2", lw=1.5))
+                ax.text(mid, -0.12, f"{detect_s}s", ha="center", fontsize=9, color="#1976D2")
+
+    ax.set_xlim(-5, max(times) + 10)
+    ax.set_ylim(-0.6, 0.6)
+    ax.set_xlabel("Time (seconds)")
+    ax.set_yticks([])
+    ax.set_title("Time-to-Update: Dynamic Port Forwarding Toggle Detection")
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "06_time_to_update.png"), dpi=150)
+    plt.close(fig)
+    print("  06_time_to_update.png")
+
+
+# ---------- Figure 7: FNR/FPR summary ----------
+
+def fig_fnr_fpr_summary():
+    """Bar chart showing FNR and FPR per experiment type."""
+    # Ground truth
+    reachable_nats = {"none", "full-cone"}  # address-restricted is NOT truly reachable by strangers
+
+    experiments = {
+        "Baseline\n(local)": os.path.join(TESTBED, "full-matrix-20260312T223319Z"),
+        "High Latency\n200ms": os.path.join(TESTBED, "high-latency-20260313T085635Z"),
+        "High Latency\n500ms": os.path.join(TESTBED, "high-latency-20260313T085635Z"),
+        "Packet Loss\n1%": os.path.join(TESTBED, "packet-loss-20260313T093822Z"),
+        "Packet Loss\n5%": os.path.join(TESTBED, "packet-loss-20260313T093822Z"),
+        "Packet Loss\n10%": os.path.join(TESTBED, "packet-loss-20260313T093822Z"),
+    }
+
+    fnr_vals = []
+    fpr_vals = []
+
+    for label, result_dir in experiments.items():
+        if not os.path.exists(result_dir):
+            fnr_vals.append(0)
+            fpr_vals.append(0)
+            continue
+
+        fn = fp = tp = tn = 0
+        for f in sorted(os.listdir(result_dir)):
+            if not f.endswith(".json"):
+                continue
+            nat, transport, extra = parse_scenario_name(f)
+            if nat is None:
+                continue
+
+            # Filter by condition
+            if "200ms" in label and extra.get("latency_ms") != 200:
+                continue
+            if "500ms" in label and extra.get("latency_ms") != 500:
+                continue
+            if "1%" in label and extra.get("loss_pct") != 1:
+                continue
+            if "5%" in label and extra.get("loss_pct") != 5:
+                continue
+            if "10%" in label and extra.get("loss_pct") != 10:
+                continue
+            if "local" in label and (extra.get("latency_ms") or extra.get("loss_pct")):
+                continue
+
+            spans = parse_spans(os.path.join(result_dir, f))
+            v1_evts, _ = get_convergence(spans)
+            expected_reachable = nat in reachable_nats
+
+            if v1_evts:
+                detected_reachable = v1_evts[0]["reachability"] == "public"
+            else:
+                detected_reachable = False  # no event = assume unreachable
+
+            if expected_reachable and not detected_reachable:
+                fn += 1
+            elif expected_reachable and detected_reachable:
+                tp += 1
+            elif not expected_reachable and detected_reachable:
+                fp += 1
+            else:
+                tn += 1
+
+        fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+        fnr_vals.append(fnr * 100)
+        fpr_vals.append(fpr * 100)
+
+    labels = list(experiments.keys())
+    x = np.arange(len(labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.bar(x - width / 2, fnr_vals, width, label="False Negative Rate (%)",
+           color="#F44336", edgecolor="black", linewidth=0.5)
+    ax.bar(x + width / 2, fpr_vals, width, label="False Positive Rate (%)",
+           color="#4CAF50", edgecolor="black", linewidth=0.5)
+
+    for i, (fnr, fpr) in enumerate(zip(fnr_vals, fpr_vals)):
+        ax.text(i - width / 2, fnr + 0.5, f"{fnr:.0f}%", ha="center", fontsize=8)
+        ax.text(i + width / 2, fpr + 0.5, f"{fpr:.0f}%", ha="center", fontsize=8)
+
+    ax.set_ylabel("Rate (%)")
+    ax.set_title("False Negative / False Positive Rates Across Conditions (Local Testbed)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.legend()
+    ax.set_ylim(0, max(max(fnr_vals), max(fpr_vals), 5) * 1.3)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "07_fnr_fpr_summary.png"), dpi=150)
+    plt.close(fig)
+    print("  07_fnr_fpr_summary.png")
+
+
+# ---------- Figure 8: Convergence time distribution (all conditions) ----------
+
+def fig_convergence_heatmap():
+    """Heatmap of convergence times: NAT type × condition."""
+    baseline_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    latency_dir = os.path.join(TESTBED, "high-latency-20260313T085635Z")
+    loss_dir = os.path.join(TESTBED, "packet-loss-20260313T093822Z")
+
+    nat_order = ["full-cone", "address-restricted", "port-restricted", "symmetric"]
+    conditions = [
+        ("Baseline", baseline_dir, {}),
+        ("Loss 1%", loss_dir, {"loss_pct": 1}),
+        ("Loss 5%", loss_dir, {"loss_pct": 5}),
+        ("Loss 10%", loss_dir, {"loss_pct": 10}),
+        ("Lat 200ms", latency_dir, {"latency_ms": 200}),
+        ("Lat 500ms", latency_dir, {"latency_ms": 500}),
+    ]
+
+    # Build matrix per transport
+    for transport in ["tcp", "quic"]:
+        matrix = []
+        for nat in nat_order:
+            row = []
+            for cond_name, cond_dir, cond_filter in conditions:
+                if not cond_filter:
+                    # baseline
+                    fname = f"{nat}-{transport}-7.json"
+                    path = os.path.join(cond_dir, fname)
+                elif "loss_pct" in cond_filter:
+                    fname = f"{nat}-{transport}-7-loss{cond_filter['loss_pct']}.json"
+                    path = os.path.join(cond_dir, fname)
+                else:
+                    fname = f"{nat}-{transport}-7-lat{cond_filter['latency_ms']}.json"
+                    path = os.path.join(cond_dir, fname)
+
+                if os.path.exists(path):
+                    spans = parse_spans(path)
+                    ms = first_convergence_ms(spans)
+                    row.append(ms / 1000 if ms else 0)
+                else:
+                    row.append(0)
+            matrix.append(row)
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        mat = np.array(matrix)
+        im = ax.imshow(mat, cmap="YlOrRd", aspect="auto")
+
+        ax.set_xticks(range(len(conditions)))
+        ax.set_xticklabels([c[0] for c in conditions], fontsize=9)
+        ax.set_yticks(range(len(nat_order)))
+        ax.set_yticklabels([NAT_LABELS.get(n, n) for n in nat_order], fontsize=9)
+
+        # Annotate
+        for i in range(len(nat_order)):
+            for j in range(len(conditions)):
+                val = mat[i, j]
+                color = "white" if val > mat.max() * 0.6 else "black"
+                ax.text(j, i, f"{val:.1f}s", ha="center", va="center",
+                        fontsize=9, fontweight="bold", color=color)
+
+        cbar = fig.colorbar(im, ax=ax, label="Seconds")
+        ax.set_title(f"Convergence Time Heatmap — {transport.upper()}")
+        fig.tight_layout()
+        fig.savefig(os.path.join(OUTDIR, f"08_convergence_heatmap_{transport}.png"), dpi=150)
+        plt.close(fig)
+        print(f"  08_convergence_heatmap_{transport}.png")
+
+
+# ---------- main ----------
+
+if __name__ == "__main__":
+    print("Generating figures...")
+    fig_baseline_convergence()
+    fig_v1_v2_comparison()
+    fig_latency_impact()
+    fig_packet_loss_impact()
+    fig_detection_correctness()
+    fig_time_to_update()
+    fig_fnr_fpr_summary()
+    fig_convergence_heatmap()
+    print(f"\nAll figures saved to {OUTDIR}/")

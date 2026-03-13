@@ -1,15 +1,16 @@
 name: high-latency
 description: >
   Network degradation: high latency sweep (experiment 10). Tests whether
-  high RTT triggers the 15s stream timeout or 10s dial timeout in AutoNAT v2.
-  Uses full-cone NAT because tc netem rules are applied on the router.
+  high RTT triggers the 15s stream timeout or 10s dial timeout in AutoNAT v2
+  across all NAT types. Excludes nat_type=none because tc netem rules are
+  applied on the router and none bypasses the router entirely.
 
 defaults:
   timeout_s: 180
   runs: 1
 
 matrix:
-  nat_type: [full-cone]
+  nat_type: [full-cone, address-restricted, port-restricted, symmetric]
   transport: [tcp, quic]
   server_count: [7]
   latency_ms: [200, 500]
