@@ -318,6 +318,9 @@ class Scenario:
     port_forward: Optional[bool] = None
     upnp: Optional[bool] = None
     obs_addr_thresh: Optional[int] = None
+    unreliable_servers: Optional[int] = None
+    observe_after_convergence_s: Optional[int] = None
+    autonat_refresh: Optional[int] = None
     mock_behaviors: Optional[list[str]] = None
     mock_delays: Optional[list[int]] = None
     mock_jitters: Optional[list[int]] = None
@@ -362,6 +365,9 @@ def parse_scenario(raw: dict, defaults: dict) -> Scenario:
         port_forward=d.get("port_forward"),
         upnp=d.get("upnp"),
         obs_addr_thresh=d.get("obs_addr_thresh"),
+        unreliable_servers=d.get("unreliable_servers"),
+        observe_after_convergence_s=d.get("observe_after_convergence_s"),
+        autonat_refresh=d.get("autonat_refresh"),
         mock_behaviors=d.get("mock_behaviors"),
         mock_delays=d.get("mock_delays"),
         mock_jitters=d.get("mock_jitters"),
@@ -526,6 +532,9 @@ def get_profiles(s: Scenario) -> list[str]:
         if sc >= 7:
             profiles.append("7servers")
 
+    if s.unreliable_servers and s.unreliable_servers > 0:
+        profiles.append("unreliable")
+
     return profiles
 
 
@@ -566,6 +575,7 @@ def build_env(s: Scenario) -> dict[str, str]:
         "PORT_FORWARD": "true" if s.port_forward else "",
         "UPNP": "true" if s.upnp else "",
         "OBS_ADDR_THRESH": str(get_obs_thresh(s)),
+        "AUTONAT_REFRESH": str(s.autonat_refresh or 0),
     }
 
     # Mock server env vars
@@ -844,6 +854,13 @@ def run_scenario(dc: Compose, jaeger: Jaeger, s: Scenario, run_num: int,
     # Monitor for convergence via Jaeger spans
     converged, elapsed = wait_for_convergence(jaeger, run_start, s.timeout_s)
     print()
+
+    # Optional: continue observing after convergence to capture oscillation
+    if converged and s.observe_after_convergence_s:
+        obs = s.observe_after_convergence_s
+        print(f"  Observing for {obs}s after convergence...")
+        time.sleep(obs)
+        print(f"  Observation complete (total {elapsed + obs + 30}s)")
 
     # Execute dynamic toggles if present
     toggle_results = []

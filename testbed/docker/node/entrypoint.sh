@@ -44,5 +44,17 @@ echo "Route table:"
 ip route
 echo ""
 
+# Optional: block dial-back to a specific IP (for unreliable server simulation).
+# The server can still RECEIVE connections from the client, but cannot initiate
+# NEW outbound connections to the client's public IP — causing v1 and v2 dial-back
+# failures. This simulates a DHT peer behind its own restrictive NAT.
+BLOCK_DIALBACK_TO="${BLOCK_DIALBACK_TO:-}"
+if [[ -n "$BLOCK_DIALBACK_TO" ]]; then
+    echo "Unreliable server: blocking dial-back to $BLOCK_DIALBACK_TO (port 4001 TCP+UDP)"
+    iptables -A OUTPUT -d "$BLOCK_DIALBACK_TO" -p tcp --dport 4001 -m conntrack --ctstate NEW -j DROP
+    iptables -A OUTPUT -d "$BLOCK_DIALBACK_TO" -p udp --dport 4001 -m conntrack --ctstate NEW -j DROP
+    echo "  iptables rules added — dial-back will fail"
+fi
+
 echo "Starting autonat-node (role=${ROLE})..."
 exec autonat-node "$@"
