@@ -145,6 +145,42 @@ Measures how quickly AutoNAT detects a reachability change when port forwarding 
 
 ---
 
+## 7. v1/v2 Reachability Gap: Oscillation Under Unreliable Peers
+
+![v1/v2 gap comparison](../results/figures/10_v1_v2_gap_comparison.png)
+
+This experiment reproduces the v1/v2 reachability gap under controlled conditions. A client behind full-cone NAT (truly reachable) connects to a mix of reliable and unreliable AutoNAT servers. Unreliable servers accept connections but their dial-back is blocked by iptables — simulating DHT peers behind restrictive NAT that cannot complete the verification.
+
+**Setup:**
+- Full-cone NAT, TCP transport, 7 total servers
+- v1 `refreshInterval` overridden to 30s (default is 15min) to capture oscillation within the observation window
+- v2 `targetConfidence=3`, `backoffStartInterval=5s`
+- Three scenarios: 71%, 29%, and 0% unreliable servers
+
+**Results:**
+
+| Unreliable Ratio | v1 Flips | v1 GAP Duration | v2 Status |
+|------------------|----------|-----------------|-----------|
+| 5/7 (71%) | 6 (3 private episodes) | 75s, 95s, 85s | Stable reachable |
+| 2/7 (29%) | 3 (2 private episodes) | 95s, 65s | Stable reachable |
+| 0/7 (0%) | 0 | — | Stable reachable |
+
+**Why v1 oscillates:**
+- v1 uses **whole-node reachability** with a sliding confidence window of 3. Each probe picks one random peer from all connected peers.
+- When v1 picks an unreliable server, the dial-back fails, confidence decreases, and with enough failed probes the node flips to "private".
+- On the next cycle, if v1 picks a reliable server, it flips back to "public". This creates oscillation proportional to the unreliable server ratio.
+- With 71% unreliable servers, v1 spends ~40% of the observation window incorrectly reporting "private".
+
+**Why v2 is unaffected:**
+- v2 tests **each address independently** and accumulates per-address confidence. Once 3 different reliable servers confirm an address is reachable, it stays confirmed.
+- Failed dial-backs from unreliable servers simply don't count — they don't subtract from existing confidence.
+- Even with 71% unreliable servers, the 2 reliable servers are sufficient to reach `targetConfidence=3`.
+
+**Implication:** In real-world deployments where DHT peers have mixed reachability (common on the IPFS network), v1's whole-node approach causes persistent oscillation while v2 provides stable, correct results. Applications consuming `EvtLocalReachabilityChanged` (v1) may see frequent state changes that trigger unnecessary relay setup/teardown, while `EvtHostReachableAddrsChanged` (v2) remains stable.
+
+---
+
+
 ## Summary of Findings
 
 | Finding | Severity | Root Cause |

@@ -28,7 +28,7 @@ scenarios:
     server_count: 7
     unreliable_servers: 5
     autonat_refresh: 30
-    observe_after_convergence_s: 300
+    observe_after_convergence_s: 600
     assertions:
       - type: has_event
         event: reachable_addrs_changed
@@ -40,7 +40,7 @@ scenarios:
     server_count: 7
     unreliable_servers: 5
     autonat_refresh: 30
-    observe_after_convergence_s: 300
+    observe_after_convergence_s: 600
     assertions:
       - type: has_event
         event: reachable_addrs_changed

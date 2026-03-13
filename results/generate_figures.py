@@ -924,17 +924,6 @@ def fig_v1_v2_gap_timeline():
 
     max_t = 530
 
-    # --- Single figure (main) ---
-    fig, ax = plt.subplots(figsize=(16, 5))
-    _draw_gap_timeline(ax, v1_events, v2_events,
-                       "v1/v2 Reachability Gap — Full-Cone NAT, 5 of 7 Servers Unreliable\n"
-                       "Client is reachable. v1 oscillates; v2 stays stable.",
-                       max_t=max_t)
-    fig.tight_layout()
-    fig.savefig(os.path.join(OUTDIR, "09_v1_v2_gap_timeline.png"), dpi=150)
-    plt.close(fig)
-    print("  09_v1_v2_gap_timeline.png")
-
     # --- Comparison: varying unreliable server ratio ---
     # Panel A: 5/7 unreliable (71%) — heavy oscillation
     v1_high = v1_events  # reuse above
