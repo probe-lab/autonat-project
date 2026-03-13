@@ -1,0 +1,309 @@
+name: reachable-forwarded
+description: >
+  Nodes behind restrictive NAT made reachable via port forwarding or UPnP.
+  Tests the most common real-world configuration for self-hosted nodes:
+  restrictive NAT with explicit port forwarding or UPnP-negotiated mappings.
+
+  Three sections:
+    1. Static port forwarding — router DNAT rule active from the start
+    2. Static UPnP — miniupnpd running, client requests mapping via IGD
+    3. Dynamic toggles — port forwarding added/removed mid-session to
+       measure time-to-update (how fast AutoNAT detects the change)
+
+  Post-process:
+    python3 testbed/analyze.py --metric fnr,time_to_confidence results/reachable-forwarded-*/*.json
+
+defaults:
+  timeout_s: 120
+  runs: 20
+  server_count: 7
+
+scenarios:
+  # =======================================================================
+  # Section 1: Static port forwarding
+  # Router has DNAT rules from the start. Node should be detected as
+  # reachable despite restrictive NAT. Measures FNR + TTC.
+  # =======================================================================
+
+  - name: port-forward-port-restricted-tcp
+    nat_type: port-restricted
+    transport: tcp
+    port_forward: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "TCP should be reachable with port forwarding through port-restricted NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: port-forward-port-restricted-quic
+    nat_type: port-restricted
+    transport: quic
+    port_forward: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "QUIC should be reachable with port forwarding through port-restricted NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: port-forward-port-restricted-both
+    nat_type: port-restricted
+    transport: both
+    port_forward: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "Should be reachable with port forwarding through port-restricted NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: port-forward-symmetric-tcp
+    nat_type: symmetric
+    transport: tcp
+    port_forward: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "TCP should be reachable with port forwarding through symmetric NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: port-forward-symmetric-quic
+    nat_type: symmetric
+    transport: quic
+    port_forward: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "QUIC should be reachable with port forwarding through symmetric NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: port-forward-symmetric-both
+    nat_type: symmetric
+    transport: both
+    port_forward: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "Should be reachable with port forwarding through symmetric NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: port-forward-address-restricted-both
+    nat_type: address-restricted
+    transport: both
+    port_forward: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "Should be reachable with port forwarding through address-restricted NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  # =======================================================================
+  # Section 2: UPnP (miniupnpd)
+  # Router runs miniupnpd; client requests port mapping via IGD/NAT-PMP.
+  # Tests whether go-libp2p's UPnP discovery + AutoNAT v2 correctly
+  # detects reachability when the mapping is obtained dynamically.
+  # =======================================================================
+
+  - name: upnp-port-restricted-both
+    nat_type: port-restricted
+    transport: both
+    upnp: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "Should be reachable via UPnP through port-restricted NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: upnp-symmetric-both
+    nat_type: symmetric
+    transport: both
+    upnp: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "Should be reachable via UPnP through symmetric NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: upnp-address-restricted-both
+    nat_type: address-restricted
+    transport: both
+    upnp: true
+    measurements: [false_negative_rate, time_to_confidence]
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "Should be reachable via UPnP through address-restricted NAT"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  # =======================================================================
+  # Section 3: Dynamic toggles — port forwarding added/removed mid-session
+  # Starts unreachable, adds forwarding, then removes it. Measures how
+  # quickly AutoNAT v2 detects each transition.
+  # =======================================================================
+
+  - name: toggle-port-restricted-both
+    nat_type: port-restricted
+    transport: both
+    runs: 1
+    timeout_s: 600
+    measurements: [time_to_update]
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"
+
+  - name: toggle-port-restricted-tcp
+    nat_type: port-restricted
+    transport: tcp
+    runs: 1
+    timeout_s: 600
+    measurements: [time_to_update]
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 360
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 360
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"
+
+  - name: toggle-port-restricted-quic
+    nat_type: port-restricted
+    transport: quic
+    runs: 1
+    timeout_s: 600
+    measurements: [time_to_update]
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"
+
+  - name: toggle-symmetric-both
+    nat_type: symmetric
+    transport: both
+    runs: 1
+    timeout_s: 600
+    measurements: [time_to_update]
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"
+
+  - name: toggle-address-restricted-both
+    nat_type: address-restricted
+    transport: both
+    runs: 1
+    timeout_s: 600
+    measurements: [time_to_update]
+    dynamic_toggles:
+      - action: add_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+      - action: remove_port_forward
+        wait_for: converged
+        sleep_s: 30
+        timeout_s: 180
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "At least one v2 reachability event should fire"

@@ -1,0 +1,113 @@
+name: reachable
+description: >
+  Nodes that should be publicly reachable: no NAT (direct public IP) or
+  full-cone NAT (EIM + EIF, any external host can reach the mapped port).
+
+  Measures both False Negative Rate and Time-to-Confidence from the same
+  trace data:
+    FNR = runs where no reachable address appeared / total runs
+    TTC = elapsed time from session start to first reachable_addrs_changed
+
+  Post-process:
+    python3 testbed/analyze.py --metric fnr,time_to_confidence results/reachable-*/*.json
+
+defaults:
+  timeout_s: 120
+  runs: 20
+  server_count: 7
+  measurements: [false_negative_rate, time_to_confidence]
+
+scenarios:
+  # --- No NAT: client has a public IP, fully reachable ---
+
+  - name: no-nat-tcp
+    nat_type: none
+    transport: tcp
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "At least one TCP address should be reachable (false negative if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: no-nat-quic
+    nat_type: none
+    transport: quic
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "At least one QUIC address should be reachable (false negative if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: no-nat-both
+    nat_type: none
+    transport: both
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "At least one address should be reachable (false negative if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  # --- Full-cone NAT: EIM + EIF, dial-back always succeeds ---
+
+  - name: full-cone-tcp
+    nat_type: full-cone
+    transport: tcp
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "At least one TCP address should be reachable through full-cone NAT (false negative if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: full-cone-quic
+    nat_type: full-cone
+    transport: quic
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "At least one QUIC address should be reachable through full-cone NAT (false negative if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: full-cone-both
+    nat_type: full-cone
+    transport: both
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "At least one address should be reachable through full-cone NAT (false negative if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms

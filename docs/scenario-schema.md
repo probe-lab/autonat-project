@@ -147,6 +147,54 @@ Each assertion object:
 
 ---
 
+## Scenario Files
+
+Each YAML file groups scenarios by **what is being tested** (the network
+condition), not by what is being measured. Multiple metrics (FNR, FPR, TTC,
+TTU) are extracted from the same trace data.
+
+### Reachability
+
+| File | Scenarios | Description |
+|------|-----------|-------------|
+| `reachable.yaml` | 6 | Nodes with no NAT or full-cone NAT that **should** be publicly reachable. Measures FNR + TTC. 20 runs each for statistical confidence. |
+| `unreachable.yaml` | 6 | Nodes behind symmetric or port-restricted NAT that should **not** be reachable. Measures FPR + TTC. 20 runs each. |
+| `reachable-forwarded.yaml` | 15 | Nodes behind restrictive NAT made reachable via static port forwarding, UPnP, or dynamic mid-session toggles. Static scenarios measure FNR + TTC (20 runs); dynamic toggle scenarios measure TTU (1 run, 600s timeout). |
+
+### Network degradation
+
+| File | Scenarios | Description |
+|------|-----------|-------------|
+| `packet-loss.yaml` | 24 | Packet loss sweep: 4 NAT types x 2 transports x 3 loss rates (1%, 5%, 10%). Tests detection reliability under lossy conditions. |
+| `high-latency.yaml` | 16 | Latency sweep: 4 NAT types x 2 transports x 2 RTT levels (200ms, 500ms). Tests whether high RTT triggers AutoNAT v2 timeouts. |
+
+### Controlled server behavior
+
+| File | Scenarios | Description |
+|------|-----------|-------------|
+| `mock-server.yaml` | 11 | Mock AutoNAT servers with controlled responses: rejections, forced verdicts, wrong nonces, delays, jitter, probabilistic behavior, and per-transport splits. |
+
+### Real-world reproductions
+
+| File | Scenarios | Description |
+|------|-----------|-------------|
+| `hotel-wifi.yaml` | 1 | Port-restricted NAT with TCP blocked on port 4001 and port remapped. Reproduces field data from 2026-02-19. |
+| `flight-wifi.yaml` | 1 | Symmetric NAT with 350ms one-way latency (~700ms RTT). AutoNAT v2 never fires. Reproduces field data from 2026-02-16. |
+
+### Protocol issues
+
+| File | Scenarios | Description |
+|------|-----------|-------------|
+| `v1-v2-gap.yaml` | 2 | Reproduces v1/v2 reachability gap: mix of reliable + unreliable servers causes v1 oscillation while v2 stays stable. 240s observation window. |
+
+### Broad coverage
+
+| File | Scenarios | Description |
+|------|-----------|-------------|
+| `matrix.yaml` | 40 | Full Cartesian product: 5 NAT types x 2 transports x (3 local server counts + ipfs-network). Quick smoke test for all combinations. |
+
+---
+
 ## Latency Simulation (P2.3)
 
 Network latency and jitter are implemented via `tc netem` on the router's
@@ -189,11 +237,11 @@ tc qdisc add dev eth1 root netem delay 50ms
 ./testbed/run.sh testbed/scenarios/matrix.yaml
 
 # Override runs and filter to one NAT type
-./testbed/run.sh testbed/scenarios/fnr.yaml --runs=50 --filter=nat_type=none
+./testbed/run.sh testbed/scenarios/reachable.yaml --runs=50 --filter=nat_type=none
 
 # Dry-run to see expanded scenario table
 ./testbed/run.sh testbed/scenarios/matrix.yaml --dry-run
 
 # Custom output directory
-./testbed/run.sh testbed/scenarios/fnr.yaml --output=results/my-run/
+./testbed/run.sh testbed/scenarios/unreachable.yaml --output=results/my-run/
 ```
