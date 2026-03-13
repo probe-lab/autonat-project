@@ -180,6 +180,7 @@ This experiment reproduces the v1/v2 reachability gap under controlled condition
 
 ---
 
+
 ## Summary of Findings
 
 | Finding | Severity | Root Cause |
