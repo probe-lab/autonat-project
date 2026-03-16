@@ -47,7 +47,7 @@ DEFAULT_PORT = 4001
 
 VALID_NAT_TYPES = {"none", "full-cone", "address-restricted", "port-restricted", "symmetric"}
 VALID_TRANSPORTS = {"tcp", "quic", "both"}
-VALID_SERVER_COUNTS = {"3", "4", "5", "6", "7", "ipfs-network"}
+VALID_SERVER_COUNTS = {"3", "4", "5", "6", "7"}
 VALID_MOCK_BEHAVIORS = {
     "reject", "refuse", "force-unreachable", "internal-error", "timeout",
     "force-reachable", "wrong-nonce", "no-dialback-msg", "probabilistic", "actual",
@@ -518,14 +518,12 @@ def get_profiles(s: Scenario) -> list[str]:
 
     if has_mock:
         profiles.append("mock")
-    elif s.server_count == "ipfs-network":
-        profiles.append("public")
     elif s.nat_type == "none":
         profiles.append("nonat")
     else:
         profiles.append("local")
 
-    if not has_mock and s.server_count not in ("ipfs-network",):
+    if not has_mock:
         sc = int(s.server_count) if s.server_count.isdigit() else 0
         if sc >= 5:
             profiles.append("5servers")
@@ -541,8 +539,6 @@ def get_profiles(s: Scenario) -> list[str]:
 def get_client_container(s: Scenario) -> str:
     if s.mock_behaviors is not None:
         return "client-mock"
-    if s.server_count == "ipfs-network":
-        return "client-public"
     if s.nat_type == "none":
         return "client-nonat"
     return "client"

@@ -7,7 +7,6 @@
 #   7servers   - Add servers 6-7 (use with local/nonat + 5servers)
 #   unreliable - Add 3 unreliable servers (dial-back blocked, for v1/v2 gap reproduction)
 #   mock       - Mock AutoNAT v2 servers with controllable behaviors
-#   public     - AutoNAT experiment with real IPFS/libp2p servers
 #   test       - Lightweight NAT verification (socat, no Go binary)
 #
 # Jaeger (OTLP trace collector) starts automatically with every experiment.
@@ -298,31 +297,6 @@ services:
     networks:
       public-net:
         ipv4_address: 73.0.0.100
-
-  # === Client for public server mode ===
-  # Bootstraps to IPFS DHT instead of using local servers.
-  client-public:
-    <<: *node-build
-    cap_add:
-      - NET_ADMIN
-    depends_on:
-      router:
-        condition: service_started
-      jaeger:
-        condition: service_started
-    profiles: ["public"]
-    environment:
-      - GATEWAY=auto
-    command: >-
-      --role=client
-      --transport=${TRANSPORT:-both}
-      --port=4001
-      --bootstrap
-      --otlp-endpoint=http://jaeger:4318
-      --obs-addr-thresh=${OBS_ADDR_THRESH:-0}
-    networks:
-      private-net:
-        ipv4_address: 10.0.1.11
 
   # === Unreliable servers (for v1/v2 gap reproduction) ===
   # Real libp2p servers that serve both v1 and v2 protocols, but with iptables

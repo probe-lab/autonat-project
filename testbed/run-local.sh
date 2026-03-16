@@ -120,9 +120,9 @@ for ((run=1; run<=RUNS; run++)); do
 
         # Check for reachability events in trace file
         if [[ -f "$TRACE_LOG" ]]; then
-            # Look for session span events with reachability_changed
-            LAST_REACH=$(jq -r 'select(.Name == "autonat.session") | .Events[]? | select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "elapsed_ms") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
-            LAST_REACH_STATUS=$(jq -r 'select(.Name == "autonat.session") | .Events[]? | select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "reachability") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
+            # Look for reachability_changed spans (span-per-event model)
+            LAST_REACH=$(jq -r 'select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "elapsed_ms") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
+            LAST_REACH_STATUS=$(jq -r 'select(.Name == "reachability_changed") | .Attributes[] | select(.Key == "reachability") | .Value.Value' "$TRACE_LOG" 2>/dev/null | tail -1 || true)
 
             if [[ -n "$LAST_REACH" && "$LAST_REACH" != "null" ]]; then
                 LAST_EVENT_EPOCH=$((START_EPOCH + LAST_REACH / 1000))
@@ -164,9 +164,8 @@ for ((run=1; run<=RUNS; run++)); do
                 trace_log: $trace_log
             }')
     else
-        # Extract reachability events from OTEL trace
+        # Extract reachability events from OTEL trace (span-per-event model)
         REACH_EVENTS=$(jq -r '
-            select(.Name == "autonat.session") | .Events[]? |
             select(.Name == "reachability_changed") |
             { elapsed_ms: (.Attributes[] | select(.Key == "elapsed_ms") | .Value.Value),
               reachability: (.Attributes[] | select(.Key == "reachability") | .Value.Value) }
@@ -183,14 +182,12 @@ for ((run=1; run<=RUNS; run++)); do
         fi
 
         BOOTSTRAP_COUNT=$(jq -r '
-            select(.Name == "autonat.session") | .Events[]? |
             select(.Name == "bootstrap_connected") | .Name
         ' "$TRACE_LOG" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 
-        # Extract reachability-related events
+        # Extract reachability-related events (span-per-event model)
         EVENTS=$(jq -s '[
-            .[] | select(.Name == "autonat.session") | .Events[]? |
-            select(.Name == "reachability_changed" or .Name == "reachable_addrs_changed") |
+            .[] | select(.Name == "reachability_changed" or .Name == "reachable_addrs_changed") |
             { type: .Name,
               elapsed_ms: (.Attributes[] | select(.Key == "elapsed_ms") | .Value.Value),
               reachability: ((.Attributes[] | select(.Key == "reachability") | .Value.Value) // null),

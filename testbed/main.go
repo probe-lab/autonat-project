@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -67,17 +68,23 @@ func main() {
 	quicBehaviorFlag := flag.String("quic-behavior", "", "Behavior override for QUIC addresses; overrides --behavior for QUIC probes (mock-server role only)")
 	dhtMode := flag.String("dht-mode", "auto", "DHT mode: auto, client, or server")
 	otlpEndpoint := flag.String("otlp-endpoint", "", "OTLP HTTP endpoint for trace export (e.g. http://jaeger:4318)")
+	traceFile := flag.String("trace-file", "", "Write OTEL spans as JSONL to file")
 	autonatRefresh := flag.Int("autonat-refresh", 0, "AutoNAT v1 refresh interval in seconds (0 = default 15min)")
 	flag.Parse()
 
 	// Initialize OTEL tracing if requested
-	if *otlpEndpoint != "" {
-		shutdown, err := initTracer(*otlpEndpoint)
+	if *otlpEndpoint != "" || *traceFile != "" {
+		shutdown, err := initTracer(*otlpEndpoint, *traceFile)
 		if err != nil {
 			log.Fatalf("Failed to initialize tracer: %v", err)
 		}
 		defer shutdown()
-		log.Printf("OTEL tracing enabled, exporting to %s", *otlpEndpoint)
+		if *otlpEndpoint != "" {
+			log.Printf("OTEL tracing enabled, exporting to %s", *otlpEndpoint)
+		}
+		if *traceFile != "" {
+			log.Printf("OTEL tracing enabled, writing to %s", *traceFile)
+		}
 	}
 
 	if *obsAddrThresh > 0 {
@@ -627,30 +634,57 @@ func multiaddrsToStrings(addrs []ma.Multiaddr) []string {
 	return strs
 }
 
-// initTracer sets up an OTEL TracerProvider that exports via OTLP HTTP to a collector/Jaeger.
-func initTracer(otlpEndpoint string) (func(), error) {
+// initTracer sets up an OTEL TracerProvider with optional OTLP HTTP and/or file exporters.
+// Both can run simultaneously.
+func initTracer(otlpEndpoint, traceFilePath string) (func(), error) {
 	ctx := context.Background()
-	exporter, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithEndpointURL(otlpEndpoint+"/v1/traces"),
-		otlptracehttp.WithInsecure(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create OTLP exporter: %w", err)
-	}
 
 	res := resource.NewWithAttributes("",
 		attribute.String("service.name", "autonat-testbed"),
 	)
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-	)
+	var opts []sdktrace.TracerProviderOption
+	opts = append(opts, sdktrace.WithResource(res))
+
+	var cleanups []func()
+
+	// OTLP HTTP exporter (batched)
+	if otlpEndpoint != "" {
+		exporter, err := otlptracehttp.New(ctx,
+			otlptracehttp.WithEndpointURL(otlpEndpoint+"/v1/traces"),
+			otlptracehttp.WithInsecure(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create OTLP exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithBatcher(exporter))
+	}
+
+	// File exporter (simple span processor for immediate flush)
+	if traceFilePath != "" {
+		f, err := os.Create(traceFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("create trace file: %w", err)
+		}
+		cleanups = append(cleanups, func() { f.Close() })
+
+		fileExporter, err := stdouttrace.New(stdouttrace.WithWriter(f))
+		if err != nil {
+			f.Close()
+			return nil, fmt.Errorf("create file exporter: %w", err)
+		}
+		opts = append(opts, sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(fileExporter)))
+	}
+
+	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
 
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		tp.Shutdown(ctx)
+		for _, fn := range cleanups {
+			fn()
+		}
 	}, nil
 }
