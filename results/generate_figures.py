@@ -972,6 +972,156 @@ def fig_v1_v2_gap_timeline():
     print("  10_v1_v2_gap_comparison.png")
 
 
+# ---------- Figure 11: Protocol overhead by NAT type ----------
+
+def _probe_byte_estimate(attrs, events):
+    """Estimate bytes for a single probe (mirrors analyze.py logic)."""
+    addrs_raw = attrs.get("autonat.addrs", "[]")
+    if isinstance(addrs_raw, str):
+        try:
+            addrs = json.loads(addrs_raw)
+        except (json.JSONDecodeError, ValueError):
+            addrs = []
+    elif isinstance(addrs_raw, list):
+        addrs = addrs_raw
+    else:
+        addrs = []
+
+    addr_bytes = sum(len(a) if isinstance(a, str) else len(str(a)) for a in addrs)
+    dial_request = 12 + addr_bytes
+
+    event_names = {e.get("Name", e.get("name", "")) for e in events} if events else set()
+
+    dial_data_response = 0
+    if "dial_data_requested" in event_names:
+        for e in events:
+            ename = e.get("Name", e.get("name", ""))
+            if ename == "dial_data_requested":
+                ea = {}
+                for a in e.get("Attributes", e.get("attrs", [])):
+                    if isinstance(a, dict) and "Key" in a:
+                        ea[a["Key"]] = a["Value"].get("Value", a["Value"]) if isinstance(a["Value"], dict) else a["Value"]
+                    elif isinstance(a, dict):
+                        ea.update(a)
+                try:
+                    dial_data_response = int(ea.get("num_bytes", 0))
+                except (TypeError, ValueError):
+                    pass
+                break
+
+    dial_response = 12
+    dial_back = 0
+    if "dial_back_received" in event_names:
+        dial_back = 12
+    elif not events:
+        if attrs.get("autonat.reachability") == "public":
+            dial_back = 12
+
+    total = dial_request + (16 if dial_data_response > 0 else 0) + dial_data_response + dial_response + dial_back
+    return total, dial_data_response
+
+
+def fig_protocol_overhead():
+    """Two-panel figure: byte overhead per session (left) and probe count (right)."""
+    result_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    if not os.path.exists(result_dir):
+        print("  Skipping: no baseline data")
+        return
+
+    nat_order = ["none", "full-cone", "address-restricted", "port-restricted", "symmetric"]
+    transports = ["tcp", "quic"]
+
+    # Collect data: (nat, transport) -> {protocol_bytes, amplification_bytes, probe_count}
+    data = {}
+    for f in sorted(os.listdir(result_dir)):
+        if not f.endswith(".json"):
+            continue
+        nat, transport, _ = parse_scenario_name(f)
+        if nat is None or nat not in nat_order:
+            continue
+
+        spans = parse_spans(os.path.join(result_dir, f))
+        protocol_total = 0
+        amp_total = 0
+        probe_count = 0
+        for s in spans:
+            if s["name"] == "autonatv2.probe":
+                total, amp = _probe_byte_estimate(s["attrs"], None)
+                protocol_total += total - amp
+                amp_total += amp
+                probe_count += 1
+
+        data[(nat, transport)] = {
+            "protocol_bytes": protocol_total,
+            "amplification_bytes": amp_total,
+            "probe_count": probe_count,
+        }
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    x = np.arange(len(nat_order))
+    width = 0.35
+
+    # Left panel: stacked bar — protocol vs amplification bytes per session
+    ax = axes[0]
+    for ti, transport in enumerate(transports):
+        offset = -width / 2 + ti * width
+        proto_vals = [data.get((n, transport), {}).get("protocol_bytes", 0) for n in nat_order]
+        amp_vals = [data.get((n, transport), {}).get("amplification_bytes", 0) for n in nat_order]
+
+        bars_proto = ax.bar(x + offset, proto_vals, width, label=f"{transport.upper()} protocol",
+                            color=NAT_COLORS.get(transport, "#888"),
+                            alpha=0.8 if ti == 0 else 0.6,
+                            edgecolor="black", linewidth=0.5,
+                            hatch=TRANSPORT_HATCHES.get(transport, ""))
+        if any(a > 0 for a in amp_vals):
+            ax.bar(x + offset, amp_vals, width, bottom=proto_vals,
+                   label=f"{transport.upper()} amplification",
+                   color="#FF5252", alpha=0.7,
+                   edgecolor="black", linewidth=0.5,
+                   hatch=TRANSPORT_HATCHES.get(transport, ""))
+
+        for i, bar in enumerate(bars_proto):
+            total = proto_vals[i] + amp_vals[i]
+            if total > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, total + 5,
+                        f"{total}B", ha="center", va="bottom", fontsize=7)
+
+    ax.set_ylabel("Bytes per Session")
+    ax.set_title("Estimated Byte Overhead per Session")
+    ax.set_xticks(x)
+    ax.set_xticklabels([NAT_LABELS.get(n, n) for n in nat_order], fontsize=9)
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
+
+    # Right panel: probe count per session
+    ax = axes[1]
+    for ti, transport in enumerate(transports):
+        offset = -width / 2 + ti * width
+        counts = [data.get((n, transport), {}).get("probe_count", 0) for n in nat_order]
+        bars = ax.bar(x + offset, counts, width, label=f"{transport.upper()}",
+                      color="#1976D2" if ti == 0 else "#FF7043",
+                      edgecolor="black", linewidth=0.5,
+                      hatch=TRANSPORT_HATCHES.get(transport, ""))
+        for bar, c in zip(bars, counts):
+            if c > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, c + 0.1,
+                        str(c), ha="center", va="bottom", fontsize=8)
+
+    ax.set_ylabel("Number of Probes")
+    ax.set_title("Probes per Session")
+    ax.set_xticks(x)
+    ax.set_xticklabels([NAT_LABELS.get(n, n) for n in nat_order], fontsize=9)
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Protocol Overhead: Estimated Bytes and Probe Count by NAT Type (7 Servers)",
+                 fontsize=13, y=1.02)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, "11_protocol_overhead.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  11_protocol_overhead.png")
+
+
 # ---------- main ----------
 
 if __name__ == "__main__":
@@ -984,4 +1134,5 @@ if __name__ == "__main__":
     fig_fnr_fpr_summary()
     fig_convergence_heatmap()
     fig_v1_v2_gap_timeline()
+    fig_protocol_overhead()
     print(f"\nAll figures saved to {OUTDIR}/")

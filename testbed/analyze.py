@@ -360,15 +360,99 @@ def compute_time_to_update(traces):
 # ---------------------------------------------------------------------------
 # Protocol Overhead
 #
-# Counts probes and refresh cycles per session to estimate activity level.
-# Exact byte counts require iptables counters (see P3.7); this gives probe
-# rate estimates from spans.
+# Counts probes and refresh cycles per session, and estimates byte-level
+# protocol overhead from trace data (P3.7).
+#
+# Message size model (from autonatv2.proto):
+#   DialRequest:      12 + sum(len(addr)) bytes  (nonce + framing + multiaddrs)
+#   DialDataRequest:  16 bytes (fixed: addrIdx + numBytes + framing)
+#   DialDataResponse: num_bytes (30K-100K amplification, 0 if not triggered)
+#   DialResponse:     12 bytes (fixed: status + addrIdx + dialStatus + framing)
+#   DialBack:         12 bytes (fixed: nonce + framing, separate stream)
 # ---------------------------------------------------------------------------
+
+def _probe_byte_estimate(probe):
+    """Estimate byte costs for a single probe span.
+
+    Uses span events (dial_data_requested, response_received, dial_back_received)
+    when available, falls back to attribute-based estimation.
+
+    Returns a dict with per-message and aggregate byte estimates.
+    """
+    attrs = probe["attrs"]
+    events = probe.get("events", []) or []
+
+    # Parse multiaddr list to compute DialRequest size
+    addrs_raw = attrs.get("autonat.addrs", "[]")
+    if isinstance(addrs_raw, str):
+        try:
+            addrs = json.loads(addrs_raw)
+        except (json.JSONDecodeError, ValueError):
+            addrs = []
+    elif isinstance(addrs_raw, list):
+        addrs = addrs_raw
+    else:
+        addrs = []
+
+    # DialRequest: 12 bytes framing/nonce + serialized multiaddrs
+    addr_bytes = sum(len(a.encode("utf-8")) if isinstance(a, str) else len(str(a)) for a in addrs)
+    dial_request = 12 + addr_bytes
+
+    # Check events for dial_data and dial_back
+    event_names = {e["name"] for e in events}
+
+    # DialDataRequest + DialDataResponse (amplification)
+    dial_data_request = 0
+    dial_data_response = 0
+    if "dial_data_requested" in event_names:
+        dial_data_request = 16
+        for e in events:
+            if e["name"] == "dial_data_requested":
+                nb = _coerce_int(e["attrs"].get("num_bytes"))
+                if nb is not None:
+                    dial_data_response = nb
+                break
+
+    # DialResponse: always present if probe completed
+    dial_response = 12
+
+    # DialBack: present if server successfully dialed back
+    dial_back = 0
+    if "dial_back_received" in event_names:
+        dial_back = 12
+    elif not events:
+        # No events available — infer from reachability attribute
+        if attrs.get("autonat.reachability") == "public":
+            dial_back = 12
+
+    total = dial_request + dial_data_request + dial_data_response + dial_response + dial_back
+    amplification = dial_data_response
+    protocol_only = total - amplification
+
+    return {
+        "dial_request": dial_request,
+        "dial_data_request": dial_data_request,
+        "dial_data_response": dial_data_response,
+        "dial_response": dial_response,
+        "dial_back": dial_back,
+        "total": total,
+        "amplification": amplification,
+        "protocol_only": protocol_only,
+    }
+
 
 def compute_protocol_overhead(traces):
     probe_counts = []
     cycle_counts = []
     session_durations_ms = []
+
+    # Byte-level stats per probe and per session
+    protocol_bytes_per_probe = []
+    amplification_bytes_per_probe = []
+    total_bytes_per_probe = []
+    total_bytes_per_session = []
+    amplification_triggered = 0
+    total_probes = 0
 
     for path, trace in traces:
         probe_counts.append(len(trace["probes"]))
@@ -380,6 +464,21 @@ def compute_protocol_overhead(traces):
             dur = _elapsed_ms(shutdown_events[-1])
             if dur is not None:
                 session_durations_ms.append(dur)
+
+        # Compute byte estimates for each probe
+        session_total = 0
+        for probe in trace["probes"]:
+            est = _probe_byte_estimate(probe)
+            protocol_bytes_per_probe.append(est["protocol_only"])
+            amplification_bytes_per_probe.append(est["amplification"])
+            total_bytes_per_probe.append(est["total"])
+            session_total += est["total"]
+            total_probes += 1
+            if est["amplification"] > 0:
+                amplification_triggered += 1
+
+        if trace["probes"]:
+            total_bytes_per_session.append(session_total)
 
     def stats(values):
         if not values:
@@ -394,13 +493,19 @@ def compute_protocol_overhead(traces):
             "p95": values_sorted[p95_idx],
         }
 
+    amp_pct = (amplification_triggered / total_probes * 100) if total_probes > 0 else 0.0
+
     return {
         "metric": "protocol_overhead",
         "total": len(traces),
         "probes_per_run": stats(probe_counts),
         "refresh_cycles_per_run": stats(cycle_counts),
         "session_duration_ms": stats(session_durations_ms),
-        "note": "Byte counts require iptables counters (P3.7). Probe counts are a proxy for protocol activity.",
+        "protocol_bytes_per_probe": stats(protocol_bytes_per_probe),
+        "amplification_bytes_per_probe": stats(amplification_bytes_per_probe),
+        "total_bytes_per_probe": stats(total_bytes_per_probe),
+        "total_bytes_per_session": stats(total_bytes_per_session),
+        "amplification_triggered_pct": round(amp_pct, 1),
     }
 
 
@@ -416,6 +521,17 @@ def _ms(v):
     if v is None:
         return "n/a"
     return f"{v}ms"
+
+
+def _bytes(v):
+    if v is None:
+        return "n/a"
+    v = float(v)
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.1f}MB"
+    if v >= 1_000:
+        return f"{v / 1_000:.1f}KB"
+    return f"{int(v)}B"
 
 
 def format_text(results):
@@ -472,7 +588,17 @@ def format_text(results):
             if r["session_duration_ms"]:
                 s = r["session_duration_ms"]
                 lines.append(f"  session duration:       mean={_ms(s['mean'])}, median={_ms(s['median'])}")
-            lines.append(f"  Note: {r['note']}")
+            if r.get("protocol_bytes_per_probe"):
+                s = r["protocol_bytes_per_probe"]
+                lines.append(f"  protocol bytes/probe:   mean={_bytes(s['mean'])}, median={_bytes(s['median'])}, p95={_bytes(s['p95'])}  (excl. amplification)")
+            if r.get("amplification_bytes_per_probe"):
+                s = r["amplification_bytes_per_probe"]
+                lines.append(f"  amplification bytes:    mean={_bytes(s['mean'])}, median={_bytes(s['median'])}, p95={_bytes(s['p95'])}")
+            if r.get("total_bytes_per_session"):
+                s = r["total_bytes_per_session"]
+                lines.append(f"  total bytes/session:    mean={_bytes(s['mean'])}, median={_bytes(s['median'])}, p95={_bytes(s['p95'])}")
+            if r.get("amplification_triggered_pct") is not None:
+                lines.append(f"  amplification triggered: {r['amplification_triggered_pct']}% of probes")
             lines.append("")
 
     return "\n".join(lines)
