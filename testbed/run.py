@@ -214,11 +214,28 @@ class Jaeger:
                                 v.get("stringValue", str(v))
                                 for v in val["arrayValue"].get("values", [])
                             ]
+                    # Extract span events (e.g. dial_data_requested on probe spans)
+                    events = []
+                    for ev in s.get("events", []) or []:
+                        ev_attrs = {}
+                        for a in ev.get("attributes", []):
+                            ek = a.get("key", "")
+                            ev_val = a.get("value", {})
+                            for vtype in ("stringValue", "intValue", "boolValue"):
+                                if vtype in ev_val:
+                                    ev_attrs[ek] = ev_val[vtype]
+                                    break
+                        events.append({
+                            "name": ev.get("name", ""),
+                            "time_ns": ev.get("timeUnixNano", "0"),
+                            "attrs": ev_attrs,
+                        })
                     spans.append({
                         "name": s.get("name", ""),
                         "trace_id": s.get("traceId", ""),
                         "start_ns": s.get("startTimeUnixNano", "0"),
                         "attrs": attrs,
+                        "events": events,
                     })
         return spans
 
@@ -260,12 +277,28 @@ class Jaeger:
                 else:
                     otel_attrs.append({"Key": k, "Value": {"Type": "STRING", "Value": str(v)}})
 
+            # Convert span events to OTEL SDK format
+            otel_events = None
+            if s.get("events"):
+                otel_events = []
+                for sev in s["events"]:
+                    ev_otel_attrs = []
+                    for ek, evalue in sev.get("attrs", {}).items():
+                        if isinstance(evalue, int) or (isinstance(evalue, str) and evalue.isdigit()):
+                            ev_otel_attrs.append({"Key": ek, "Value": {"Type": "INT64", "Value": int(evalue)}})
+                        else:
+                            ev_otel_attrs.append({"Key": ek, "Value": {"Type": "STRING", "Value": str(evalue)}})
+                    otel_events.append({
+                        "Name": sev.get("name", ""),
+                        "Time": sev.get("time_ns", ""),
+                        "Attributes": ev_otel_attrs,
+                    })
+
             jsonl_spans.append({
                 "Name": s["name"],
                 "SpanContext": {"TraceID": s.get("trace_id", "")},
                 "Attributes": otel_attrs,
-                # New span-per-event model: no Events array, data is in Attributes
-                "Events": None,
+                "Events": otel_events,
             })
         return jsonl_spans
 
