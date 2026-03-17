@@ -159,7 +159,7 @@ async function main(): Promise<void> {
       autonat: autoNAT(),
     },
     connectionManager: {
-      minConnections: 0,
+      maxConnections: 100,
     },
   })
 
