@@ -8,10 +8,9 @@ use libp2p::{
     swarm::SwarmEvent,
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, trace::Tracer, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
+use opentelemetry_sdk::trace::TracerProvider;
 use opentelemetry_sdk::Resource;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -219,12 +218,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_endpoint(format!("{}/v1/traces", endpoint))
             .build()?;
 
-        let resource = Resource::builder()
-            .with_attributes([KeyValue::new("service.name", "autonat-testbed")])
-            .build();
+        let resource = Resource::new(vec![KeyValue::new("service.name", "autonat-testbed")]);
 
-        let provider = SdkTracerProvider::builder()
-            .with_span_processor(BatchSpanProcessor::builder(exporter).build())
+        let provider = TracerProvider::builder()
+            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
             .with_resource(resource)
             .build();
 
@@ -388,8 +385,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Flush OTLP
-    if let Some(ref provider) = _provider {
-        let _ = provider.shutdown();
+    if let Some(provider) = _provider {
+        global::shutdown_tracer_provider();
+        drop(provider);
     }
 
     Ok(())
