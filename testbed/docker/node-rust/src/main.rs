@@ -310,8 +310,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Ok(addr) = addr_str.parse::<Multiaddr>() {
                 if let Some(pid) = peer_id_from_multiaddr(&addr) {
-                    swarm.add_peer_address(pid, strip_p2p(&addr));
-                    if let Err(e) = swarm.dial(pid) {
+                    let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(pid)
+                        .addresses(vec![strip_p2p(&addr)])
+                        .build();
+                    if let Err(e) = swarm.dial(dial_opts) {
                         eprintln!("Failed to dial {}: {}", pid, e);
                     }
                 }
@@ -540,10 +542,10 @@ async fn connect_from_dir(
 
     // Connect to each peer with all their addresses
     for (pid, addrs) in &peer_addrs {
-        for addr in addrs {
-            swarm.add_peer_address(*pid, addr.clone());
-        }
-        match swarm.dial(*pid) {
+        let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(*pid)
+            .addresses(addrs.clone())
+            .build();
+        match swarm.dial(dial_opts) {
             Ok(()) => eprintln!("Dialing server {}", pid),
             Err(e) => {
                 eprintln!("Failed to dial {}: {}", pid, e);
