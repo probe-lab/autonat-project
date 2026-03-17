@@ -159,6 +159,12 @@
           "minItems": 3,
           "maxItems": 3
         },
+        "client_impl": {
+          "type": "string",
+          "enum": ["go", "rust", "js"],
+          "default": "go",
+          "description": "Client implementation to use: go (default), rust (rust-libp2p), js (js-libp2p)"
+        },
         "measurements": {
           "type": "array",
           "items": {

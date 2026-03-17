@@ -55,6 +55,7 @@ VALID_MOCK_BEHAVIORS = {
 VALID_ASSERTION_TYPES = {"no_event", "has_event", "info"}
 VALID_TOGGLE_ACTIONS = {"add_port_forward", "remove_port_forward"}
 VALID_TOGGLE_WAITS = {"converged", "sleep"}
+VALID_CLIENT_IMPLS = {"go", "rust", "js"}
 
 # Span names emitted by the Go testbed node (via emitSpan)
 SPAN_REACHABLE_ADDRS = "reachable_addrs_changed"
@@ -329,6 +330,7 @@ class Scenario:
     mock_quic_behaviors: Optional[list[str]] = None
     dynamic_toggles: Optional[list[Toggle]] = None
     assertions: Optional[list[Assertion]] = None
+    client_impl: str = "go"
 
 
 def parse_scenario(raw: dict, defaults: dict) -> Scenario:
@@ -376,6 +378,7 @@ def parse_scenario(raw: dict, defaults: dict) -> Scenario:
         mock_quic_behaviors=d.get("mock_quic_behaviors"),
         dynamic_toggles=toggles,
         assertions=assertions,
+        client_impl=d.get("client_impl", "go"),
     )
 
 
@@ -418,6 +421,8 @@ def validate(scenarios: list[Scenario]):
     for i, s in enumerate(scenarios):
         pfx = f"Validation error (scenario #{i+1})"
 
+        if s.client_impl not in VALID_CLIENT_IMPLS:
+            _fail(f"{pfx}: invalid client_impl '{s.client_impl}'")
         if s.nat_type not in VALID_NAT_TYPES:
             _fail(f"{pfx}: invalid nat_type '{s.nat_type}'")
         if s.transport not in VALID_TRANSPORTS:
@@ -515,13 +520,27 @@ def get_profiles(s: Scenario) -> list[str]:
     """Map scenario to Docker Compose profiles."""
     profiles = []
     has_mock = s.mock_behaviors is not None
+    impl = s.client_impl
 
-    if has_mock:
-        profiles.append("mock")
-    elif s.nat_type == "none":
-        profiles.append("nonat")
+    if impl == "go":
+        # Go client uses existing profiles (servers + client in same profile)
+        if has_mock:
+            profiles.append("mock")
+        elif s.nat_type == "none":
+            profiles.append("nonat")
+        else:
+            profiles.append("local")
     else:
-        profiles.append("local")
+        # Rust/JS: use impl-specific profile (which includes servers via
+        # shared profile membership — servers list rust/rust-nonat/js/js-nonat
+        # in their profiles array). This avoids starting the Go client.
+        if has_mock:
+            profiles.append("mock")
+            profiles.append(f"{impl}-mock")
+        elif s.nat_type == "none":
+            profiles.append(f"{impl}-nonat")
+        else:
+            profiles.append(impl)
 
     if not has_mock:
         sc = int(s.server_count) if s.server_count.isdigit() else 0
@@ -537,11 +556,12 @@ def get_profiles(s: Scenario) -> list[str]:
 
 
 def get_client_container(s: Scenario) -> str:
+    impl = s.client_impl
     if s.mock_behaviors is not None:
-        return "client-mock"
+        return f"client-{impl}-mock" if impl != "go" else "client-mock"
     if s.nat_type == "none":
-        return "client-nonat"
-    return "client"
+        return f"client-{impl}-nonat" if impl != "go" else "client-nonat"
+    return f"client-{impl}" if impl != "go" else "client"
 
 
 def get_obs_thresh(s: Scenario) -> int:
@@ -785,15 +805,15 @@ def run_assertions(assertions: list[Assertion], trace_path: str,
 
 def dry_run(scenario_name: str, scenarios: list[Scenario]):
     print(f"\nScenario file: {scenario_name} ({len(scenarios)} scenarios)\n")
-    fmt = "  {:<4} {:<20} {:<10} {:<10} {:<30} {:<6} {:<8} {:<6} {:<8}"
-    print(fmt.format("#", "NAT Type", "Transport", "Servers", "Mock Behaviors",
-                      "Loss", "Latency", "Runs", "Toggles"))
+    fmt = "  {:<4} {:<20} {:<10} {:<10} {:<6} {:<30} {:<6} {:<8} {:<6} {:<8}"
+    print(fmt.format("#", "NAT Type", "Transport", "Servers", "Impl",
+                      "Mock Behaviors", "Loss", "Latency", "Runs", "Toggles"))
     for i, s in enumerate(scenarios):
         mock = ",".join(s.mock_behaviors) if s.mock_behaviors else "-"
         sc = "mock(3)" if s.mock_behaviors else s.server_count
         toggles = str(len(s.dynamic_toggles)) if s.dynamic_toggles else "-"
         print(fmt.format(
-            i + 1, s.nat_type, s.transport, sc, mock,
+            i + 1, s.nat_type, s.transport, sc, s.client_impl, mock,
             f"{s.packet_loss}%", f"{s.latency_ms}ms", s.runs, toggles,
         ))
     print()
@@ -926,6 +946,8 @@ def build_run_label(s: Scenario, run_num: int) -> str:
     else:
         sc = "mock" if s.mock_behaviors else s.server_count
         label = f"{s.nat_type}-{s.transport}-{sc}"
+    if s.client_impl != "go":
+        label += f"-{s.client_impl}"
     if s.packet_loss:
         label += f"-loss{s.packet_loss}"
     if s.latency_ms:
@@ -1009,16 +1031,17 @@ def main():
             result_file = os.path.join(result_dir, f"{label}.json")
 
             print(f"--- [{scenario_num}] {label} ---")
+            impl_info = f" impl={s.client_impl}" if s.client_impl != "go" else ""
             if s.mock_behaviors:
                 print(f"  mock_behaviors=[{','.join(s.mock_behaviors)}] "
-                      f"transport={s.transport} timeout={s.timeout_s}s")
+                      f"transport={s.transport} timeout={s.timeout_s}s{impl_info}")
             else:
                 toggles_info = ""
                 if s.dynamic_toggles:
                     toggles_info = f" toggles={len(s.dynamic_toggles)}"
                 print(f"  NAT={s.nat_type} transport={s.transport} "
                       f"servers={s.server_count} loss={s.packet_loss}% "
-                      f"latency={s.latency_ms}ms timeout={s.timeout_s}s{toggles_info}")
+                      f"latency={s.latency_ms}ms timeout={s.timeout_s}s{toggles_info}{impl_info}")
 
             passed = run_scenario(dc, jaeger, s, run_num, result_file, script_dir)
 
