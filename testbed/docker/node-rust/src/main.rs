@@ -255,10 +255,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(NodeBehaviour {
                 identify: identify::Behaviour::new(identify_config),
-                autonat: autonat::v2::client::Behaviour::new(
+                autonat_client: autonat::v2::client::Behaviour::new(
                     rand::rngs::OsRng,
                     autonat::v2::client::Config::default(),
                 ),
+                autonat_server: autonat::v2::server::Behaviour::new(rand::rngs::OsRng),
             })
         })?
         .with_swarm_config(|cfg| {
@@ -330,7 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             event = swarm.select_next_some() => {
                 match event {
-                    SwarmEvent::Behaviour(NodeBehaviourEvent::Autonat(ev)) => {
+                    SwarmEvent::Behaviour(NodeBehaviourEvent::AutonatClient(ev)) => {
                         let elapsed_ms = start_time.elapsed().as_millis() as i64;
                         handle_autonat_event(
                             ev,
@@ -340,6 +341,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &jsonl_writer,
                         );
                     }
+
+                    SwarmEvent::Behaviour(NodeBehaviourEvent::AutonatServer(_)) => {}
 
                     SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         let elapsed_ms = start_time.elapsed().as_millis() as i64;
@@ -360,6 +363,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     SwarmEvent::NewListenAddr { address, .. } => {
                         eprintln!("Listening on {}/p2p/{}", address, local_peer_id);
+                        // Register non-loopback listen addresses as external so
+                        // AutoNAT v2 probes our actual listen ports, not ephemeral
+                        // connection source ports reported by identify.
+                        let addr_str = address.to_string();
+                        if !addr_str.contains("/127.0.0.1/") {
+                            swarm.add_external_address(address.clone());
+                        }
                     }
 
                     _ => {}
@@ -451,7 +461,8 @@ fn handle_autonat_event(
 #[derive(libp2p::swarm::NetworkBehaviour)]
 struct NodeBehaviour {
     identify: identify::Behaviour,
-    autonat: autonat::v2::client::Behaviour,
+    autonat_client: autonat::v2::client::Behaviour,
+    autonat_server: autonat::v2::server::Behaviour,
 }
 
 fn build_listen_addrs(ip: &str, port: u16, transport: &str) -> Vec<String> {
