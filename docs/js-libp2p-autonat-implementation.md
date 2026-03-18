@@ -334,74 +334,93 @@ It is loaded dynamically and falls back to TCP-only if unavailable.
 
 ---
 
-## Open Questions: DHT and AutoNAT Interaction
+## DHT and AutoNAT Interaction
 
-> **Note:** The observations below are based on source analysis and
-> testbed results, not production deployment. js-libp2p's autonat v2
-> and DHT may be at different maturity levels than go-libp2p's, and
-> some of these behaviors may reflect an implementation that is still
-> evolving rather than final design decisions.
+### DHT Mode Switching Mechanism
 
-### DHT Mode Switching
+js-libp2p's Kademlia DHT (`@libp2p/kad-dht`) has automatic mode
+switching via `self:peer:update` events. From `kad-dht.ts`:
 
-js-libp2p's Kademlia DHT (`@libp2p/kad-dht`) supports a `clientMode`
-parameter and reportedly can switch automatically based on AutoNAT
-reachability. However, since AutoNAT v2 emits **no reachability events**
-to external consumers, it is unclear how the DHT would observe
-reachability changes.
+```typescript
+// When clientMode is not explicitly set, auto-switch based on addresses
+if (init.clientMode == null) {
+  components.events.addEventListener('self:peer:update', (evt) => {
+    const hasPublicAddress = evt.detail.peer.addresses
+      .some(({ multiaddr }) => {
+        return !isPrivate(multiaddr) && !Circuit.exactMatch(multiaddr)
+      })
+    if (hasPublicAddress && mode === 'client') {
+      await this.setMode('server')
+    } else if (mode === 'server' && !hasPublicAddress) {
+      await this.setMode('client')
+    }
+  })
+}
+```
 
-Possible mechanisms (to verify):
-- The DHT may query the address manager directly for confirmed addresses
-- There may be an internal wiring between autonat and DHT not exposed
-  via the public event API
-- The `clientMode` may be purely manual (set at init, never changed)
+The DHT listens for **address changes** (not autonat events directly)
+and checks whether the node has any non-private, non-relay addresses.
+If public addresses appear → switch to server mode. If they disappear →
+switch to client mode.
 
-If the DHT cannot observe AutoNAT v2's reachability decisions, then
-**DHT mode would remain fixed at its initial setting**, regardless of
-whether the node is actually reachable. A node configured as DHT server
-behind symmetric NAT would accept but fail to serve queries; a node
-configured as DHT client with a public IP would never participate as
-a server.
+### How AutoNAT Feeds Into DHT
 
-### Comparison with go-libp2p
+The connection between autonat and DHT is **indirect**:
 
-In go-libp2p, the DHT in `ModeAuto` subscribes to
-`EvtLocalReachabilityChanged` (AutoNAT **v1**) to switch between server
-and client mode. This creates two issues:
+1. AutoNAT (v1, `@libp2p/autonat`) probes reachability
+2. Successful probes update the address manager's confirmed addresses
+3. Address manager changes trigger `self:peer:update` events
+4. DHT picks up the event and checks for public addresses
 
-1. **v1 oscillation cascades to DHT**: with a mix of reliable and
-   unreliable servers, v1 flips between public/private → DHT flips
-   between server/client → routing table churn
-2. **v2 is ignored**: even when v2 correctly confirms per-address
-   reachability, the DHT follows v1's global verdict
+AutoNAT v2 (`@libp2p/autonat-v2`) also updates the address manager on
+success, so the same flow would work — but since v2 emits no events of
+its own, the DHT's only signal comes through the address manager layer.
 
-No implementation currently uses v2's per-address reachability for DHT
-mode decisions.
+### Helia: v1 Only, No v2
 
-### Impact Summary
+**Helia uses `@libp2p/autonat` (v1, `^3.0.5`) — not v2.** The default
+libp2p configuration includes:
 
-| Implementation | DHT mode trigger | AutoNAT issue | DHT consequence |
-|---|---|---|---|
-| **go-libp2p** | `EvtLocalReachabilityChanged` (v1) | v1 oscillation | DHT server↔client oscillation |
-| **rust-libp2p** | External address presence | v2 probes wrong addresses | DHT stuck in client mode |
-| **js-libp2p** | `clientMode` config / autonat (TBV) | v2 emits no events | DHT mode may not react to NAT changes |
+```typescript
+autoNAT: autoNAT()  // v1
+dht: kadDHT({ validators: { ipns: ... }, selectors: { ipns: ... } })
+```
+
+There is no explicit wiring between autonat and DHT in Helia's config.
+The connection happens implicitly through the `self:peer:update` event
+mechanism described above. AutoNAT v1 updates the address manager →
+triggers peer update → DHT evaluates mode.
+
+AutoNAT v2 (`@libp2p/autonat-v2`) is published on npm but is **not used
+by Helia or any other known major JS project**.
+
+### Comparison Across Implementations
+
+| Aspect | go-libp2p | rust-libp2p | js-libp2p |
+|--------|-----------|-------------|-----------|
+| DHT mode trigger | `EvtLocalReachabilityChanged` (v1) | `ExternalAddrConfirmed` (swarm event) | `self:peer:update` (address change) |
+| AutoNAT version used by DHT | v1 (majority vote) | v2 (if enabled) | v1 (via address manager) |
+| Coupling | Direct event subscription | Swarm-level event | Indirect via address manager |
+| Oscillation risk | v1 flips → DHT flips | None (never reaches server) | Depends on address manager stability |
+| Production consumer | Kubo (tens of thousands) | None (Substrate skips autonat) | Helia (v1 only) |
+| AutoNAT v2 in production | Yes (Kubo) | No | No |
+
+### DHT Impact Summary
+
+| Implementation | AutoNAT issue | DHT consequence |
+|---|---|---|
+| **go-libp2p** | v1 oscillation with unreliable servers | DHT server↔client oscillation, routing table churn |
+| **rust-libp2p** | v2 probes ephemeral ports, nothing confirmed | DHT stuck in client mode permanently |
+| **js-libp2p** | v2 not deployed (Helia uses v1) | v1 oscillation possible (same as go-libp2p) |
 
 ### Implementation Maturity
 
 js-libp2p's autonat v2 was introduced in June 2025, over a year after
-go-libp2p's initial implementation. It is the newest of the three
-implementations and may still be maturing. The absence of reachability
-events, configurable intervals, and DHT integration may reflect
-implementation priority and a focus on getting the core protocol correct
-before adding the surrounding infrastructure that go-libp2p has built
-over two years of iteration.
-
-**To verify:**
-- Does `@libp2p/kad-dht` actually wire into autonat v2 results for
-  automatic mode switching, or is `clientMode` purely init-time config?
-- Is there an internal event or state query mechanism not exposed in
-  the public API?
-- Are there open issues or PRs for autonat↔DHT integration?
+go-libp2p's initial implementation. It is the newest of the three and
+has **no known production deployment**. Helia (the primary JS consumer)
+still uses v1. The absence of reachability events, configurable
+intervals, and production deployment may reflect that v2 is available as
+a library but not yet integrated into any shipping product.
 
 ---
 
