@@ -363,18 +363,59 @@ and checks whether the node has any non-private, non-relay addresses.
 If public addresses appear → switch to server mode. If they disappear →
 switch to client mode.
 
-### How AutoNAT Feeds Into DHT
+### How AutoNAT v1 Feeds Into DHT
 
-The connection between autonat and DHT is **indirect**:
+The connection between autonat v1 and the DHT is **indirect**, flowing
+through the address manager and peer store. The full chain:
 
-1. AutoNAT (v1, `@libp2p/autonat`) probes reachability
-2. Successful probes update the address manager's confirmed addresses
-3. Address manager changes trigger `self:peer:update` events
-4. DHT picks up the event and checks for public addresses
+```
+AutoNAT v1 probe succeeds (4 successful dials)
+  → autonat calls addressManager.confirmObservedAddr(multiaddr)
+    → confirmObservedAddr() updates address confidence (verified: true, TTL set)
+      → calls _updatePeerStoreAddresses()
+        → calls peerStore.patch(selfPeerId, { multiaddrs: [...] })
+          → peerStore emits 'self:peer:update' event (because patched ID == self)
+            → DHT's event listener fires
+              → checks if any address is !isPrivate && !Circuit
+                → if yes → setMode('server')
+                → if no  → setMode('client')
+```
 
-AutoNAT v2 (`@libp2p/autonat-v2`) also updates the address manager on
-success, so the same flow would work — but since v2 emits no events of
-its own, the DHT's only signal comes through the address manager layer.
+**AutoNAT v1's `confirmAddress()` method:**
+```typescript
+confirmAddress(results: DialResults): void {
+  this.components.addressManager.confirmObservedAddr(results.multiaddr)
+  this.dialResults.delete(results.multiaddr.toString())
+  results.result = true
+}
+```
+
+**AddressManager's `confirmObservedAddr()`** updates the address's
+verified status and TTL, then calls `_updatePeerStoreAddresses()` which
+patches the peer store with the full current address list.
+
+**PeerStore's `patch()`** emits `self:peer:update` when the patched peer
+ID matches the node's own ID:
+```typescript
+#emitIfUpdated(id, result) {
+  if (this.peerId.equals(id)) {
+    this.events.safeDispatchEvent('self:peer:update', { detail: result })
+  }
+}
+```
+
+The same chain works for `unconfirmAddress()` (after 8 failures), which
+calls `addressManager.removeObservedAddr()` → updates peer store →
+triggers `self:peer:update` → DHT re-evaluates and may switch to client.
+
+### AutoNAT v2 Would Use the Same Path
+
+AutoNAT v2 (`@libp2p/autonat-v2`) also calls
+`addressManager.confirmObservedAddr()` on success, so the same
+address manager → peer store → DHT chain would work. The key difference
+is that v2 emits no application-level events of its own — but the DHT
+doesn't need them since it listens to `self:peer:update` from the peer
+store layer.
 
 ### Helia: v1 Only, No v2
 
