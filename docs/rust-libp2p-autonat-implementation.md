@@ -380,6 +380,66 @@ addresses indefinitely instead of falling back to TCP.
 
 ---
 
+## Open Questions: DHT and AutoNAT Interaction
+
+> **Note:** The observations below are based on source analysis and
+> testbed results, not production deployment. rust-libp2p's autonat v2
+> and DHT may be at different maturity levels than go-libp2p's, and
+> some of these behaviors may be intentional design choices for an
+> implementation that is still evolving.
+
+### DHT Mode Switching
+
+In rust-libp2p, the Kademlia DHT (`libp2p-kad`) determines server vs.
+client mode based on whether the swarm has **confirmed external
+addresses** — not by subscribing to autonat events directly. If a node
+has at least one external address, it operates as a DHT server; otherwise
+it operates as a client.
+
+This creates a dependency chain with autonat v2:
+
+1. AutoNAT v2 probes address candidates (from identify observations)
+2. Successful probes would confirm addresses as external
+3. The DHT would then switch to server mode
+
+However, because of the ephemeral port probing issue (#1 above), autonat
+v2 never confirms any address as reachable. This means **the DHT may
+never enter server mode** for a node that is genuinely reachable — the
+autonat v2 address selection failure cascades into DHT participation
+failure.
+
+**To verify:**
+- Does the DHT in rust-libp2p actually use `ExternalAddrConfirmed` events
+  from autonat v2, or does it rely on manual `add_external_address()` calls?
+- Is there an equivalent of go-libp2p's `ModeAuto` that reacts to
+  reachability changes, or is mode switching manual?
+- Is this interaction considered stable or still under development?
+
+### Comparison with go-libp2p
+
+In go-libp2p, the DHT subscribes to `EvtLocalReachabilityChanged`
+(AutoNAT **v1**), not `EvtHostReachableAddrsChanged` (v2). This means:
+
+- go-libp2p's DHT mode is controlled by v1's majority vote, even when v2
+  is running and correctly confirming per-address reachability
+- v1 oscillation (with unreliable servers) causes DHT server↔client
+  oscillation and routing table churn
+- No implementation currently uses v2's per-address reachability for DHT
+  mode decisions
+
+### Implementation Maturity
+
+rust-libp2p's autonat v2 was introduced in v0.54.1 (August 2024),
+roughly 3 months after go-libp2p's initial implementation. However,
+go-libp2p has had significantly more iteration — including the
+`addrsReachabilityTracker` (v0.42.0), confidence system, and address
+grouping. Features like observed address consolidation, per-address
+confidence tracking, and DHT integration may be on the rust-libp2p
+roadmap but not yet implemented. The absence of these features may
+reflect implementation priority rather than architectural disagreement.
+
+---
+
 ## References
 
 - [AutoNAT v2 Protocol Walkthrough](autonat-v2.md)

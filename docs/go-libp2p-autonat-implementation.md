@@ -375,6 +375,20 @@ full analysis, testbed workaround, and upstream fix proposal.
 
 > ⚠️ **Do not use `EvtLocalReachabilityChanged`** — that event is AutoNAT v1 only and is not emitted by the v2 subsystem.
 
+### DHT Mode Dependency on v1
+
+The Kademlia DHT in `ModeAuto` subscribes to `EvtLocalReachabilityChanged`
+(v1) to switch between server and client mode. It does **not** subscribe
+to `EvtHostReachableAddrsChanged` (v2). This means:
+
+- v1 oscillation (e.g., with a mix of reliable and unreliable servers)
+  cascades directly into DHT server↔client oscillation and routing table
+  churn — see [v1/v2 reachability gap](v1-v2-reachability-gap.md)
+- Even when v2 correctly confirms per-address reachability, the DHT
+  follows v1's global majority vote
+- No implementation (go, rust, or js) currently uses v2's per-address
+  reachability for DHT mode decisions
+
 The orchestrator subscribes to three events to maintain the eligible server pool:
 
 - `EvtPeerIdentificationCompleted` — peer just completed Identify; check if it supports `/libp2p/autonat/2/dial-request`
