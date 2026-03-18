@@ -128,12 +128,33 @@ raw candidate events, which helps filter out ephemeral addresses.
 
 ## Confidence System
 
-js-libp2p uses fixed thresholds instead of go-libp2p's sliding window:
+js-libp2p uses **monotonic counters with fixed thresholds** instead of
+go-libp2p's sliding window. This design is significantly more resistant
+to oscillation.
 
 ### Thresholds
 
 - **Reachable**: 4 successful dials (`REQUIRED_SUCCESSFUL_DIALS`)
 - **Unreachable**: 8 failed dials (`REQUIRED_FAILED_DIALS`)
+
+### Counter Behavior
+
+Counters are **monotonic** — they only increment, never decrement.
+Success and failure counters are independent. The first threshold reached
+wins:
+
+```
+success++ on each successful dial
+failure++ on each failed dial
+
+if success >= 4 → confirmAddress() → delete DialResults, set TTL
+if failure >= 8 → unconfirmAddress() → delete DialResults, remove addr
+```
+
+Once either threshold is reached, the entire `DialResults` entry is
+**deleted**. The address is either confirmed with a TTL in the address
+manager, or removed entirely. There is no further counting until the
+TTL expires and re-verification starts from scratch.
 
 ### Observed vs. Announced Addresses
 
@@ -141,19 +162,63 @@ Announced (explicitly configured) addresses are confirmed on first
 success. Observed addresses require the full 4-success threshold. This
 reflects lower trust in addresses learned through identify observations.
 
+### Re-verification Cycle
+
+After an address is confirmed, it stays confirmed for its TTL duration.
+When the TTL expires:
+
+1. `getFirstUnverifiedMultiaddr()` detects `addr.expires < Date.now()`
+2. The cuckoo filter entry is cleared to allow retesting
+3. A fresh `DialResults` object is created (counters start at 0)
+4. Re-verification begins — needs 4 new successes or 8 new failures
+
+The 60-second `findRandomPeers` repeating task provides the periodic
+trigger for discovering peers and initiating verification.
+
+### Oscillation Resistance
+
+This design is **much more resistant to oscillation** than go-libp2p's
+v1 sliding window:
+
+| Factor | go-libp2p v1 | js-libp2p v1 |
+|--------|-------------|-------------|
+| Counter type | Net confidence (success - failure) | Independent monotonic counters |
+| A single failure after confirmation | Decrements confidence → may flip | No effect (entry deleted, TTL protects) |
+| Mixed reliable/unreliable servers | Confidence bounces → oscillation | Successes accumulate independently of failures |
+| Threshold to flip from public to private | Confidence drops to 0 (can be 1 failure) | 8 failures from fresh start (after TTL expiry) |
+| Protection period after confirmation | None (continuous re-evaluation) | Full TTL duration (no new counting) |
+
+**Example with 2 reliable + 5 unreliable servers:**
+
+go-libp2p v1:
+```
+success → confidence=1 → failure → confidence=0 → failure → PRIVATE
+success → confidence=1 → PUBLIC → failure → confidence=0 → failure → PRIVATE
+(oscillates)
+```
+
+js-libp2p v1:
+```
+success=1,fail=0 → success=2,fail=1 → success=3,fail=2 → success=4 → CONFIRMED (TTL set)
+... TTL period: stays confirmed regardless of failures ...
+TTL expires → fresh counters → success=1,fail=0 → ... → likely confirms again
+```
+
+The key insight: in js-libp2p, failures during the counting phase don't
+undo successes. With 2 reliable out of 7 servers, the success counter
+reaches 4 (after ~7 probes on average) well before the failure counter
+reaches 8. And once confirmed, the TTL prevents any re-evaluation.
+
 ### Comparison
 
-| Aspect | go-libp2p | rust-libp2p | js-libp2p |
-|--------|-----------|-------------|-----------|
-| Model | Sliding window (last 5) | Single probe | Fixed threshold |
+| Aspect | go-libp2p v1 | rust-libp2p v2 | js-libp2p v1 |
+|--------|-------------|----------------|-------------|
+| Model | Sliding window (last 5) | Single probe | Monotonic counters + TTL |
 | Success criterion | net confidence ≥ 2 | 1 success | 4 successes (observed) or 1 (announced) |
 | Failure criterion | net confidence ≤ -2 | 1 failure | 8 failures |
-| High confidence | targetConfidence = 3 | N/A | 4 successes = confirmed |
-| Backoff | Exponential (5s → 5min) | None | None |
-
-The asymmetric thresholds (4 success vs. 8 failure) mean js-libp2p is
-more conservative about declaring addresses unreachable — a design choice
-that reduces false positives at the cost of slower failure detection.
+| Oscillation risk | **High** (failures undo successes) | **High** (single probe flips) | **Low** (counters are independent, TTL protects) |
+| Re-evaluation | Continuous | Continuous | Only after TTL expiry |
+| Backoff | Exponential (5s → 5min) | None | None (TTL acts as implicit backoff) |
 
 ---
 
