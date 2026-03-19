@@ -187,12 +187,7 @@ EIF from ADF.
    NAT would block it. This is closer to STUN's multi-server design but
    adds protocol complexity and trust requirements.
 
-3. **NAT type detection first**: Run a STUN-like NAT classification
-   (mapping behavior + filtering behavior) before or alongside AutoNAT
-   v2. If the node detects ADF filtering, it knows to distrust a
-   "reachable" result.
-
-4. **Accept as known limitation**: Document that AutoNAT v2 cannot
+3. **Accept as known limitation**: Document that AutoNAT v2 cannot
    distinguish EIF from ADF, and note that ADF is rare. The false
    positive has limited practical impact because peers that connect to
    the node (and would thus be in the NAT's allowed list) are the ones
