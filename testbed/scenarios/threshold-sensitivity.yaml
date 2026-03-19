@@ -1,0 +1,95 @@
+name: threshold-sensitivity
+description: >
+  Test observed address activation threshold sensitivity.
+
+  With 3 servers and the default threshold of 4, addresses never reach
+  activation because only 3 distinct observers exist. Lowering to 2
+  allows activation with 3 servers.
+
+  This demonstrates that the threshold is a critical deployment parameter:
+  small server counts require lower thresholds, but lower thresholds
+  reduce the confidence that the observed address is stable.
+
+defaults:
+  timeout_s: 120
+  runs: 1
+  server_count: 3
+
+scenarios:
+  # --- Threshold 4 (default) with 3 servers: should NOT converge ---
+
+  - name: thresh4-none-tcp-3
+    nat_type: none
+    transport: tcp
+    obs_addr_thresh: 4
+    assertions:
+      - type: no_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "With threshold=4 and 3 servers, address should never activate"
+
+  - name: thresh4-none-quic-3
+    nat_type: none
+    transport: quic
+    obs_addr_thresh: 4
+    assertions:
+      - type: no_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "With threshold=4 and 3 servers, address should never activate"
+
+  # --- Threshold 2 with 3 servers: should converge ---
+
+  - name: thresh2-none-tcp-3
+    nat_type: none
+    transport: tcp
+    obs_addr_thresh: 2
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "With threshold=2 and 3 servers, address should activate and be reachable"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: thresh2-none-quic-3
+    nat_type: none
+    transport: quic
+    obs_addr_thresh: 2
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "With threshold=2 and 3 servers, address should activate and be reachable"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  # --- Threshold 1 with symmetric NAT: should converge (but unreachable) ---
+  # Tests whether lowering threshold allows autonat v2 to run for symmetric NAT
+  # (normally silent because no address reaches default threshold)
+
+  - name: thresh1-symmetric-tcp-3
+    nat_type: symmetric
+    transport: tcp
+    obs_addr_thresh: 1
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "With threshold=1, symmetric NAT should at least produce a reachability event"
+
+  - name: thresh1-symmetric-quic-3
+    nat_type: symmetric
+    transport: quic
+    obs_addr_thresh: 1
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        message: "With threshold=1, symmetric NAT should at least produce a reachability event"
