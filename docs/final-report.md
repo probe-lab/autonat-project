@@ -306,7 +306,7 @@ configurable parameters:
 | `upnp` | true/false | miniupnpd on router for dynamic port mapping |
 | `obs_addr_thresh` | 1, 2, 4 | Override observed address activation threshold |
 | `unreliable_servers` | 0, 5 | Servers with dial-back blocked (for v1 oscillation) |
-| `autonat_refresh` | 0, 30 (s) | v1 refresh interval override (default 15 min) |
+| `autonat_refresh` | 0, 30 (s) | **v1 only:** refresh interval override (default 15 min). Shortened to 30s in v1/v2 gap scenarios to observe oscillation within testbed timeouts. |
 | `timeout_s` | 120, 600 | Per-scenario timeout |
 | `runs` | 1, 20 | Repeated runs for statistical confidence |
 
