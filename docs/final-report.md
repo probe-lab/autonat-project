@@ -54,12 +54,12 @@ emits no reachability events. Neither has a production consumer
 
 | # | Finding | Category | Severity |
 |---|---------|----------|----------|
-| 1 | [ADF false positive (100% FPR)](#finding-1-address-restricted-nat-false-positive) | Protocol | Medium |
-| 2 | [Symmetric NAT silent failure](#finding-2-symmetric-nat-silent-failure) | Protocol | Medium |
-| 3 | [v1/v2 reachability gap](#finding-3-v1v2-reachability-gap) | go-libp2p | High |
-| 4 | [v1 oscillation → DHT oscillation](#finding-4-v1-oscillation--dht-oscillation) | go-libp2p | High |
-| 5 | [UDP black hole blocks QUIC dial-back](#finding-5-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
-| 6 | [Rust: ephemeral port probing](#finding-6-rust-libp2p-ephemeral-port-probing) | Cross-impl | High |
+| 1 | [v1/v2 reachability gap](#finding-1-v1v2-reachability-gap) | go-libp2p | High |
+| 2 | [v1 oscillation → DHT oscillation](#finding-2-v1-oscillation--dht-oscillation) | go-libp2p | High |
+| 3 | [Rust: ephemeral port probing](#finding-3-rust-libp2p-ephemeral-port-probing) | Cross-impl | High |
+| 4 | [ADF false positive (100% FPR)](#finding-4-address-restricted-nat-false-positive) | Protocol | Medium |
+| 5 | [Symmetric NAT silent failure](#finding-5-symmetric-nat-silent-failure) | Protocol | Medium |
+| 6 | [UDP black hole blocks QUIC dial-back](#finding-6-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
 | 7 | [JS: no reachability events](#finding-7-js-libp2p-no-reachability-events) | Cross-impl | Medium |
 | 8 | [No v2 production deployment outside Kubo](#finding-8-no-production-deployment-outside-kubo) | Cross-impl | Info |
 | 9 | [QUIC resilience to packet loss](#finding-9-quic-resilience-to-packet-loss) | Performance | Info |
@@ -167,7 +167,80 @@ architecture details, see [testbed.md](testbed.md).
 
 ## Findings
 
-### Finding 1: Address-Restricted NAT False Positive
+### Finding 1: v1/v2 Reachability Gap
+
+**Category:** go-libp2p | **Severity:** High
+
+v1 and v2 produce independent, incompatible reachability signals. All
+go-libp2p subsystems that react to reachability consume v1 only:
+
+| Consumer | Event consumed | v2 aware? |
+|----------|---------------|-----------|
+| Kademlia DHT | `EvtLocalReachabilityChanged` (v1) | **No** |
+| AutoRelay | `EvtLocalReachabilityChanged` (v1) | **No** |
+| Address Manager | `EvtLocalReachabilityChanged` (v1) | **No** |
+| NAT Service | `EvtLocalReachabilityChanged` (v1) | **No** |
+
+A node can have v2-confirmed reachable addresses while v1 simultaneously
+reports Private — triggering unnecessary relay usage and DHT client mode.
+
+**Source references:**
+- DHT subscribes to v1: [subscriber_notifee.go#L30](https://github.com/libp2p/go-libp2p-kad-dht/blob/master/subscriber_notifee.go#L30)
+- `EvtHostReachableAddrsChanged` (v2) does NOT appear in go-libp2p-kad-dht
+
+**Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md)
+
+### Finding 2: v1 Oscillation → DHT Oscillation
+
+**Category:** go-libp2p | **Severity:** High
+
+v1 uses random peer selection and a sliding window of 3. A single failed
+dial-back from an unreliable peer can flip Public→Private.
+
+**Testbed evidence** (full-cone NAT, 2 reliable + 5 unreliable servers):
+
+Best trace (`v1v2-gap-fullcone-tcp`, run 2):
+```
+  3,026ms   v1  PUBLIC
+  6,018ms   v2  reachable=["/ip4/73.0.0.2/tcp/4001"]  ← stable
+108,027ms   v1  PRIVATE  ← flipped!
+183,027ms   v1  PUBLIC   ← flipped back!
+```
+
+v2 reached reachable at 6s and **never changed**. v1 oscillated.
+
+![v1/v2 Gap Comparison](../results/figures/10_v1_v2_gap_comparison.png)
+*Figure 1: v1 oscillates (red segments) while v2 stays stable (green). Three unreliable server ratios.*
+
+| Metric | v1 | v2 |
+|--------|----|----|
+| Oscillation rate (5/7 unreliable) | 60% of runs | **0%** |
+| Stability after convergence | Flips on random peer failure | Stable (targetConfidence=3) |
+
+**Full analysis:** [v1-vs-v2-performance.md](v1-vs-v2-performance.md)
+
+### Finding 3: rust-libp2p Ephemeral Port Probing
+
+**Category:** Cross-implementation | **Severity:** High
+
+The rust-libp2p autonat v2 client probes observed connection addresses
+(ephemeral source ports from identify) instead of listen addresses. Every
+probe targets a port nothing listens on → 100% false negative rate.
+
+**Root cause:** rust-libp2p has no equivalent of go-libp2p's
+`ObservedAddrManager` ([manager.go#L24](https://github.com/libp2p/go-libp2p/blob/master/p2p/host/observedaddrs/manager.go#L24),
+`ActivationThresh=4`) that consolidates observed addresses by listen port.
+
+**DHT impact:** The DHT uses `ExternalAddrConfirmed` for mode switching
+([behaviour.rs#L1169](https://github.com/libp2p/rust-libp2p/blob/master/protocols/kad/src/behaviour.rs#L1169)).
+Since no address is ever confirmed, the DHT stays in client mode
+permanently.
+
+**Production status:** Substrate/Polkadot does not enable autonat at all.
+
+**Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
+
+### Finding 4: Address-Restricted NAT False Positive
 
 **Category:** Protocol design | **Severity:** Medium
 
@@ -190,11 +263,11 @@ design guarantees this outcome for ADF NATs.
 default to APDF). But no measurement data exists to quantify prevalence.
 
 ![Detection Correctness](../results/figures/05_detection_correctness.png)
-*Figure 1: Detection correctness heatmap — address-restricted reports reachable (false positive).*
+*Figure 2: Detection correctness heatmap — address-restricted reports reachable (false positive).*
 
 **Full analysis:** [adf-false-positive.md](adf-false-positive.md)
 
-### Finding 2: Symmetric NAT Silent Failure
+### Finding 5: Symmetric NAT Silent Failure
 
 **Category:** Protocol design | **Severity:** Medium
 
@@ -220,59 +293,7 @@ confidence in the observed address.
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
 
-### Finding 3: v1/v2 Reachability Gap
-
-**Category:** go-libp2p | **Severity:** High
-
-v1 and v2 produce independent, incompatible reachability signals. All
-go-libp2p subsystems that react to reachability consume v1 only:
-
-| Consumer | Event consumed | v2 aware? |
-|----------|---------------|-----------|
-| Kademlia DHT | `EvtLocalReachabilityChanged` (v1) | **No** |
-| AutoRelay | `EvtLocalReachabilityChanged` (v1) | **No** |
-| Address Manager | `EvtLocalReachabilityChanged` (v1) | **No** |
-| NAT Service | `EvtLocalReachabilityChanged` (v1) | **No** |
-
-A node can have v2-confirmed reachable addresses while v1 simultaneously
-reports Private — triggering unnecessary relay usage and DHT client mode.
-
-**Source references:**
-- DHT subscribes to v1: [subscriber_notifee.go#L30](https://github.com/libp2p/go-libp2p-kad-dht/blob/master/subscriber_notifee.go#L30)
-- `EvtHostReachableAddrsChanged` (v2) does NOT appear in go-libp2p-kad-dht
-
-**Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md)
-
-### Finding 4: v1 Oscillation → DHT Oscillation
-
-**Category:** go-libp2p | **Severity:** High
-
-v1 uses random peer selection and a sliding window of 3. A single failed
-dial-back from an unreliable peer can flip Public→Private.
-
-**Testbed evidence** (full-cone NAT, 2 reliable + 5 unreliable servers):
-
-Best trace (`v1v2-gap-fullcone-tcp`, run 2):
-```
-  3,026ms   v1  PUBLIC
-  6,018ms   v2  reachable=["/ip4/73.0.0.2/tcp/4001"]  ← stable
-108,027ms   v1  PRIVATE  ← flipped!
-183,027ms   v1  PUBLIC   ← flipped back!
-```
-
-v2 reached reachable at 6s and **never changed**. v1 oscillated.
-
-![v1/v2 Gap Comparison](../results/figures/10_v1_v2_gap_comparison.png)
-*Figure 2: v1 oscillates (red segments) while v2 stays stable (green). Three unreliable server ratios.*
-
-| Metric | v1 | v2 |
-|--------|----|----|
-| Oscillation rate (5/7 unreliable) | 60% of runs | **0%** |
-| Stability after convergence | Flips on random peer failure | Stable (targetConfidence=3) |
-
-**Full analysis:** [v1-vs-v2-performance.md](v1-vs-v2-performance.md)
-
-### Finding 5: UDP Black Hole Detector Blocks QUIC Dial-Back
+### Finding 6: UDP Black Hole Detector Blocks QUIC Dial-Back
 
 **Category:** go-libp2p | **Severity:** Medium
 
@@ -290,27 +311,6 @@ from [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)).
 **Source:** `dialerHost` shares counter at [config.go#L240](https://github.com/libp2p/go-libp2p/blob/master/config/config.go#L240). v1 fix disables it at [config.go#L712](https://github.com/libp2p/go-libp2p/blob/master/config/config.go#L712).
 
 **Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
-
-### Finding 6: rust-libp2p Ephemeral Port Probing
-
-**Category:** Cross-implementation | **Severity:** High
-
-The rust-libp2p autonat v2 client probes observed connection addresses
-(ephemeral source ports from identify) instead of listen addresses. Every
-probe targets a port nothing listens on → 100% false negative rate.
-
-**Root cause:** rust-libp2p has no equivalent of go-libp2p's
-`ObservedAddrManager` ([manager.go#L24](https://github.com/libp2p/go-libp2p/blob/master/p2p/host/observedaddrs/manager.go#L24),
-`ActivationThresh=4`) that consolidates observed addresses by listen port.
-
-**DHT impact:** The DHT uses `ExternalAddrConfirmed` for mode switching
-([behaviour.rs#L1169](https://github.com/libp2p/rust-libp2p/blob/master/protocols/kad/src/behaviour.rs#L1169)).
-Since no address is ever confirmed, the DHT stays in client mode
-permanently.
-
-**Production status:** Substrate/Polkadot does not enable autonat at all.
-
-**Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
 
 ### Finding 7: js-libp2p No Reachability Events
 
@@ -346,7 +346,7 @@ v1's sliding window. See [js-libp2p analysis](js-libp2p-autonat-implementation.m
 | **Substrate** | Rust | **None** | Cargo.toml: no `autonat` feature |
 
 AutoNAT v2 exists in three implementations but is battle-tested in only
-one. The issues found in rust (#6) and js (#7) may not have been caught
+one. The issues found in rust (#3) and js (#7) may not have been caught
 because nobody runs them in production.
 
 ### Finding 9: QUIC Resilience to Packet Loss
