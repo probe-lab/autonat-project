@@ -12,8 +12,8 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [Glossary](#glossary)
-3. [Background](#background)
+2. [Background](#background)
+3. [Glossary](#glossary)
 4. [Testbed](#testbed)
 5. [Findings](#findings)
 6. [Key Metrics](#key-metrics)
@@ -28,8 +28,22 @@
 
 ### Motivation
 
-Multiple libp2p-based projects have reported reachability detection
-issues in production:
+Peer-to-peer networks built on libp2p require nodes to determine whether
+their addresses are reachable from the internet. Most residential and
+mobile devices sit behind Network Address Translation (NAT) — a router
+technique that maps private IP addresses to a shared public IP. While
+NAT allows outbound connections, it blocks most inbound traffic. A node
+that doesn't know it's behind NAT may advertise unreachable addresses,
+participate as a DHT server when it can't serve queries, or fail to
+reserve relay connections it needs.
+
+libp2p's **AutoNAT** protocol solves this by having peers test whether a
+node's addresses are actually dialable from outside. AutoNAT v1 uses a
+simple majority vote; AutoNAT v2 (specified 2023, deployed 2024)
+improves on this with per-address testing and nonce-based verification.
+
+However, multiple libp2p-based projects have reported that reachability
+detection **does not work reliably in production**:
 
 - **Obol Network** ([Charon](https://github.com/ObolNetwork/charon),
   go-libp2p v0.47.0): Distributed validator nodes running behind home
@@ -47,8 +61,7 @@ issues in production:
 
 These are not isolated incidents. They reflect fundamental issues in how
 AutoNAT determines and communicates reachability across the libp2p
-ecosystem. This project investigates AutoNAT v2 — the protocol designed
-to fix these problems — and evaluates whether it succeeds.
+ecosystem. This project investigates AutoNAT v2 and evaluates whether it succeeds.
 
 See [obol.md](obol.md) and [avail.md](avail.md) for detailed impact
 analysis on each project.
@@ -99,43 +112,7 @@ Helia uses v1 only).
 
 ---
 
-## Glossary
-
-| Acronym | Full Name | Description |
-|---------|-----------|-------------|
-| **NAT** | Network Address Translation | Maps private IPs to public ones |
-| **AutoNAT** | Automatic NAT Detection | libp2p protocol for testing address reachability |
-| **EIM** | Endpoint-Independent Mapping | Same external port regardless of destination (cone NAT) |
-| **ADPM** | Address- and Port-Dependent Mapping | Different external port per destination (symmetric NAT) |
-| **EIF** | Endpoint-Independent Filtering | Allows inbound from any source (full-cone) |
-| **ADF** | Address-Dependent Filtering | Allows inbound only from previously contacted IPs (address-restricted) |
-| **APDF** | Address- and Port-Dependent Filtering | Allows inbound only from exact previously contacted IP:port (port-restricted) |
-| **DHT** | Distributed Hash Table | Kademlia-based peer discovery in libp2p |
-| **TTC** | Time-to-Confidence | Time from node start to stable reachability determination |
-| **TTU** | Time-to-Update | Time to detect a mid-session reachability change |
-| **FNR** | False Negative Rate | Fraction of reachable nodes incorrectly classified as unreachable |
-| **FPR** | False Positive Rate | Fraction of unreachable nodes incorrectly classified as reachable |
-| **DCUtR** | Direct Connection Upgrade through Relay | libp2p hole punching protocol |
-
----
-
 ## Background
-
-### Why AutoNAT Is Needed
-
-In peer-to-peer networks, nodes need to know whether their addresses are
-reachable from the internet. A node behind NAT has a private IP address
-(e.g., `192.168.1.10`) that isn't routable — other peers can't connect
-to it directly. The NAT router maps private addresses to a public IP,
-but the rules governing inbound connections vary by NAT type.
-
-Without reachability detection, a NATted node might:
-- Advertise addresses that peers can't reach, wasting connection attempts
-- Stay in DHT server mode when it should be a client, corrupting routing tables
-- Skip relay reservation when it needs one for connectivity
-
-AutoNAT solves this by having other peers test whether a node's addresses
-are actually reachable from the outside.
 
 ### NAT Types
 
@@ -258,6 +235,26 @@ does NOT evaluate:
 The key difference at step 2: STUN tests from multiple IPs, which
 distinguishes full-cone from address-restricted. AutoNAT v2 tests from
 the same IP the client already contacted, making these indistinguishable.
+
+---
+
+## Glossary
+
+| Acronym | Full Name | Description |
+|---------|-----------|-------------|
+| **NAT** | Network Address Translation | Maps private IPs to public ones |
+| **AutoNAT** | Automatic NAT Detection | libp2p protocol for testing address reachability |
+| **EIM** | Endpoint-Independent Mapping | Same external port regardless of destination (cone NAT) |
+| **ADPM** | Address- and Port-Dependent Mapping | Different external port per destination (symmetric NAT) |
+| **EIF** | Endpoint-Independent Filtering | Allows inbound from any source (full-cone) |
+| **ADF** | Address-Dependent Filtering | Allows inbound only from previously contacted IPs (address-restricted) |
+| **APDF** | Address- and Port-Dependent Filtering | Allows inbound only from exact previously contacted IP:port (port-restricted) |
+| **DHT** | Distributed Hash Table | Kademlia-based peer discovery in libp2p |
+| **TTC** | Time-to-Confidence | Time from node start to stable reachability determination |
+| **TTU** | Time-to-Update | Time to detect a mid-session reachability change |
+| **FNR** | False Negative Rate | Fraction of reachable nodes incorrectly classified as unreachable |
+| **FPR** | False Positive Rate | Fraction of unreachable nodes incorrectly classified as reachable |
+| **DCUtR** | Direct Connection Upgrade through Relay | libp2p hole punching protocol |
 
 ---
 
