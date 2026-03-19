@@ -89,8 +89,87 @@ emits no reachability events. Neither has a production consumer
 
 ## Background
 
-For full background on NAT types, mapping/filtering behaviors, and
-how they affect AutoNAT v2 dial-back, see [autonat-v2.md](autonat-v2.md).
+### Why AutoNAT Is Needed
+
+In peer-to-peer networks, nodes need to know whether their addresses are
+reachable from the internet. A node behind NAT has a private IP address
+(e.g., `192.168.1.10`) that isn't routable — other peers can't connect
+to it directly. The NAT router maps private addresses to a public IP,
+but the rules governing inbound connections vary by NAT type.
+
+Without reachability detection, a NATted node might:
+- Advertise addresses that peers can't reach, wasting connection attempts
+- Stay in DHT server mode when it should be a client, corrupting routing tables
+- Skip relay reservation when it needs one for connectivity
+
+AutoNAT solves this by having other peers test whether a node's addresses
+are actually reachable from the outside.
+
+### NAT Types
+
+NAT behavior is defined by two independent properties: **mapping**
+(how the router assigns external ports) and **filtering** (which
+inbound packets are allowed through).
+
+| NAT Type | Mapping | Filtering | Inbound from strangers | Prevalence |
+|----------|---------|-----------|----------------------|------------|
+| **No NAT** | — | — | Always works | Servers, cloud |
+| **Full-cone** | EIM | EIF | Always works | Rare (intentional DMZ/forward) |
+| **Address-restricted** | EIM | ADF | Only from previously contacted IPs | Rare in modern routers |
+| **Port-restricted** | EIM | APDF | Only from exact previously contacted IP:port | Most common home router default |
+| **Symmetric** | ADPM | APDF | Never (different port per destination) | CGNAT, mobile carriers |
+
+For the full mapping/filtering taxonomy (RFC 4787), see
+[autonat-v2.md](autonat-v2.md).
+
+### Related Protocols in libp2p
+
+AutoNAT does not operate in isolation. It is part of a protocol stack
+where each component handles a different aspect of connectivity:
+
+**Identify** (`/ipfs/id/1.0.0`) — When two peers connect, they exchange
+metadata including the `ObservedAddr` — the address each peer sees the
+other connecting from. This is how a node discovers its external address
+(the NAT-mapped public IP:port). Identify is the **input** to AutoNAT:
+the observed addresses become candidates for reachability testing.
+
+**AutoNAT v1** (`/libp2p/autonat/1.0.0`) — The original reachability
+protocol. A node asks a random connected peer to dial it back. The peer
+reports success or failure. v1 produces a **global** verdict
+(Public/Private/Unknown) based on a majority vote across recent probes.
+
+**AutoNAT v2** (`/libp2p/autonat/2/dial-request`,
+`/libp2p/autonat/2/dial-back`) — The improved protocol tested in this
+report. Tests **individual addresses** with nonce-based verification and
+amplification protection. Produces per-address reachability.
+
+**Circuit Relay v2** (`/libp2p/circuit/relay/0.2.0/hop`,
+`/libp2p/circuit/relay/0.2.0/stop`) — When a node is determined to be
+behind NAT, it reserves a relay slot on a public node. Other peers
+connect through the relay as a fallback.
+
+**DCUtR** (`/libp2p/dcutr`) — Direct Connection Upgrade through Relay.
+After connecting via relay, peers attempt hole punching to establish a
+direct connection, eliminating the relay overhead.
+
+**Kademlia DHT** — Uses the reachability signal to decide server vs
+client mode. Server-mode nodes accept and serve DHT queries; client-mode
+nodes only issue queries. The DHT subscribes to AutoNAT v1's global
+flag (not v2's per-address signal).
+
+The dependency chain:
+
+```
+Identify (discover external address)
+  → ObservedAddrManager (consolidate observations, activation threshold)
+    → AutoNAT v2 (test address reachability)
+      → EvtHostReachableAddrsChanged (per-address result)
+    → AutoNAT v1 (test global reachability)
+      → EvtLocalReachabilityChanged (global result)
+        → DHT mode (server/client)
+        → AutoRelay (reserve relay if private)
+          → DCUtR (hole punch if relayed)
+```
 
 ### How NAT Filtering Affects AutoNAT v2 Dial-Back
 
@@ -104,22 +183,36 @@ NAT mapping: client:4001 → 203.0.113.1:50000
 Server's dialerHost dials back from 1.2.3.4:random_port to 203.0.113.1:50000
 
 Full-cone (EIF):       "Any source allowed"                → PASS
-Addr-restricted (ADF): "Is 1.2.3.4 trusted? YES"          → PASS ← Finding #1
+Addr-restricted (ADF): "Is 1.2.3.4 trusted? YES"          → PASS ← Finding #4
 Port-restricted (APDF):"Is 1.2.3.4:random trusted? NO"    → BLOCK (correct)
-Symmetric (APDF):      N/A — v2 never reaches this stage   ← Finding #2
+Symmetric (APDF):      N/A — v2 never reaches this stage   ← Finding #5
 ```
 
-### AutoNAT v2 vs v1
+### AutoNAT v1 vs v2
 
 | Aspect | v1 | v2 |
 |--------|----|----|
-| Scope | Global (whole-node) | Per-address |
-| Probing | Random peer, majority vote | Specific server, per-address confidence |
-| Confidence | Sliding window of 3 | Sliding window of 5, targetConfidence=3 |
-| Nonce verification | No | Yes |
-| Amplification protection | No | Yes (30-100KB) |
-| Event (go-libp2p) | `EvtLocalReachabilityChanged` | `EvtHostReachableAddrsChanged` |
-| DHT consumes | **Yes** | **No** |
+| **Protocol** | `/libp2p/autonat/1.0.0` | `/libp2p/autonat/2/dial-request` + `dial-back` |
+| **Scope** | Global (whole-node: Public/Private) | Per-address (each address independently) |
+| **Probing** | Random peer, majority vote | Specific server selection, per-address confidence |
+| **Confidence** | Sliding window of 3 | Sliding window of 5, targetConfidence=3 |
+| **Nonce verification** | No | Yes (prevents spoofing) |
+| **Amplification protection** | No | Yes (30-100KB data when IP differs) |
+| **Dial-back identity** | Same peer ID | Separate peer ID (go-libp2p) |
+| **Event (go-libp2p)** | `EvtLocalReachabilityChanged` | `EvtHostReachableAddrsChanged` |
+| **DHT consumes** | **Yes** | **No** (Finding #1) |
+| **Spec** | Informal, no RFC | [specs/autonat/autonat-v2.md](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md) |
+
+### Scope of This Study
+
+This report evaluates AutoNAT v2's correctness, performance, and
+integration across three libp2p implementations (go, rust, js). It
+does NOT evaluate:
+
+- Hole punching success rates (DCUtR) — see Trautwein et al. 2022/2025
+- Relay performance (Circuit Relay v2)
+- DHT performance itself (routing, lookup latency)
+- AutoNAT v1 in isolation (only v1/v2 comparison)
 
 ### NAT Traversal: libp2p vs Traditional
 
