@@ -231,30 +231,110 @@ the same IP the client already contacted, making these indistinguishable.
 
 ## Testbed
 
-Docker-based lab with configurable NAT types via iptables. For full
-architecture details, see [testbed.md](testbed.md).
+Docker-based lab with configurable NAT types via iptables on a Linux
+host. All experiments run in isolated Docker networks with no external
+traffic. For full architecture details, see [testbed.md](testbed.md).
+Scenario format reference: [scenario-schema.md](scenario-schema.md).
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  public-net (73.0.0.0/24)                               │
+│                                                         │
+│  ┌──────────┐ ┌──────────┐     ┌──────────┐            │
+│  │ Server 1 │ │ Server 2 │ ... │ Server 7 │  (go-libp2p)│
+│  │ 73.0.0.3 │ │ 73.0.0.4 │     │ 73.0.0.9 │            │
+│  └──────────┘ └──────────┘     └──────────┘            │
+│                                                         │
+│  ┌──────────┐              ┌──────────┐                 │
+│  │  Jaeger  │              │  Router  │                 │
+│  │ 73.0.0.50│              │ 73.0.0.2 │                 │
+│  └──────────┘              └────┬─────┘                 │
+└─────────────────────────────────┼───────────────────────┘
+                                  │ NAT (iptables)
+┌─────────────────────────────────┼───────────────────────┐
+│  private-net (10.0.1.0/24)      │                       │
+│                            ┌────┴─────┐                 │
+│                            │  Router  │                 │
+│                            │ 10.0.1.2 │                 │
+│                            └──────────┘                 │
+│  ┌──────────┐                                           │
+│  │  Client  │  (go / rust / js libp2p)                  │
+│  │ 10.0.1.10│                                           │
+│  └──────────┘                                           │
+└─────────────────────────────────────────────────────────┘
+```
 
 **Networks:**
-- `public-net` (73.0.0.0/24) — servers and router public side
-- `private-net` (10.0.1.0/24) — client and router private side
+- `public-net` (73.0.0.0/24) — uses a "public-looking" range because
+  go-libp2p's `manet.IsPublicAddr()` filters out private/CGNAT ranges.
+  AutoNAT v2 only probes addresses that pass this filter.
+- `private-net` (10.0.1.0/24) — standard private range, matching
+  real-world deployments.
 
 **Components:**
-- Router with configurable NAT (none, full-cone, address-restricted,
-  port-restricted, symmetric), latency/packet-loss injection, port
-  forwarding, UPnP
-- 3-7 go-libp2p AutoNAT servers
-- Client nodes: go-libp2p (primary), rust-libp2p, js-libp2p
-- Jaeger for OTel trace collection
-- Python orchestrator (`run.py`) with YAML scenario definitions
+- **Router** — Alpine container with iptables. Implements all 5 NAT
+  types via masquerade + filtering rules. Also supports `tc netem` for
+  latency/packet-loss injection, static port forwarding (DNAT), and
+  miniupnpd for UPnP emulation.
+- **Servers** (3-7) — go-libp2p nodes running AutoNAT v2 server with
+  our probe-lab fork (OTel instrumentation + UDP black hole fix).
+  Write multiaddrs to a shared Docker volume for client discovery.
+- **Client** — go-libp2p (primary), rust-libp2p, or js-libp2p node
+  behind the router. Reads server addresses from shared volume.
+  Exports OTel spans to Jaeger.
+- **Jaeger** — OTel trace collector on both networks. `run.py` queries
+  Jaeger API for convergence detection and trace export.
+- **Orchestrator** — `run.py` reads YAML scenario files, manages Docker
+  Compose lifecycle, waits for convergence via Jaeger polling, exports
+  traces as JSONL for `analyze.py`.
 
-**Traces collected:** 178 runs total
-- Full matrix: 10 (5 NATs × 2 transports)
-- High latency: 16 (4 NATs × 2 transports × 2 latencies)
-- Packet loss: 24 (4 NATs × 2 transports × 3 loss rates)
-- ADF false positive: 120 (2 NATs × 3 transports × 20 runs)
-- Threshold sensitivity: 6
-- Time-to-update toggles: 5 (with 2 phases each)
-- v1/v2 gap: 5 (with 600s observation windows)
+### Scenario Parameters
+
+Experiments are defined in YAML scenario files with the following
+configurable parameters:
+
+| Parameter | Values tested | Description |
+|-----------|--------------|-------------|
+| `nat_type` | none, full-cone, address-restricted, port-restricted, symmetric | NAT filtering/mapping behavior |
+| `transport` | tcp, quic, both | Client transport protocol |
+| `server_count` | 3, 5, 7 | Number of AutoNAT servers |
+| `latency_ms` | 0, 200, 500 | One-way added latency via `tc netem` (RTT = 2×) |
+| `packet_loss` | 0, 1, 5, 10 (%) | Packet loss via `tc netem` on router |
+| `port_forward` | true/false | Static DNAT from router public IP to client |
+| `upnp` | true/false | miniupnpd on router for dynamic port mapping |
+| `obs_addr_thresh` | 1, 2, 4 | Override observed address activation threshold |
+| `unreliable_servers` | 0, 5 | Servers with dial-back blocked (for v1 oscillation) |
+| `autonat_refresh` | 0, 30 (s) | v1 refresh interval override (default 15 min) |
+| `timeout_s` | 120, 600 | Per-scenario timeout |
+| `runs` | 1, 20 | Repeated runs for statistical confidence |
+
+### Experiment Matrix
+
+| Scenario file | Scenarios | Runs | What it tests |
+|--------------|-----------|------|---------------|
+| `matrix.yaml` | 10 | 1 each | Baseline: 5 NATs × 2 transports (server_count=7) |
+| `high-latency.yaml` | 16 | 1 each | 4 NATs × 2 transports × {200ms, 500ms} latency |
+| `packet-loss.yaml` | 24 | 1 each | 4 NATs × 2 transports × {1%, 5%, 10%} loss |
+| `adf-false-positive.yaml` | 6 | 20 each | ADF vs APDF × 3 transports (120 total) |
+| `reachable-forwarded.yaml` | 5 | 1 each | Port forwarding toggle detection (600s timeout, 2 phases) |
+| `v1-v2-gap.yaml` | 2 | 1 each | 2 reliable + 5 unreliable servers (600s observation) |
+| `threshold-sensitivity.yaml` | 6 | 1 each | obs_addr_thresh {1,2,4} × {no-NAT, symmetric} |
+
+**Total: 178 runs** producing OTel traces analyzed by `analyze.py`.
+
+### Metrics Collected
+
+From each run, `analyze.py` extracts:
+
+- **FNR** — was a reachable node detected as reachable?
+- **FPR** — was an unreachable node incorrectly detected as reachable?
+- **TTC** — time from node start to first `reachable_addrs_changed` or
+  `reachability_changed` event with a definitive result
+- **TTU** — time from port forwarding toggle to detection of the change
+- **Probe count** — number of `autonatv2.probe` spans per session
+- **v1 flips** — number of `reachability_changed` events (oscillation indicator)
 
 ---
 
