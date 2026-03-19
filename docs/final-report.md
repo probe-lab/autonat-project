@@ -220,9 +220,6 @@ confidence in the observed address.
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
 
-![Time-to-Update](../results/figures/06_time_to_update.png)
-*Figure 6: Time-to-update timeline — 30s to detect added port forward, 69s to detect removal.*
-
 ### Finding 3: v1/v2 Reachability Gap
 
 **Category:** go-libp2p | **Severity:** High
@@ -399,6 +396,9 @@ enables v2 to produce a correct determination instead of silence.
 | Port-restricted (TCP/QUIC/both) | **30s** | **69s** |
 | Symmetric | NOT detected | NOT detected |
 | Address-restricted | NOT detected (already FP reachable) | NOT detected |
+
+![Time-to-Update](../results/figures/06_time_to_update.png)
+*Figure 6: Time-to-update timeline for port-restricted NAT — 30s to detect added port forward, 69s to detect removal.*
 
 ---
 
