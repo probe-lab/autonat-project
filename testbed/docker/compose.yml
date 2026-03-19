@@ -7,6 +7,12 @@
 #   7servers   - Add servers 6-7 (use with local/nonat + 5servers)
 #   unreliable - Add 3 unreliable servers (dial-back blocked, for v1/v2 gap reproduction)
 #   mock       - Mock AutoNAT v2 servers with controllable behaviors
+#   rust       - Rust client behind NAT (rust-libp2p)
+#   rust-nonat - Rust client on public network
+#   rust-mock  - Rust client with mock servers
+#   js         - JS client behind NAT (js-libp2p)
+#   js-nonat   - JS client on public network
+#   js-mock    - JS client with mock servers
 #   test       - Lightweight NAT verification (socat, no Go binary)
 #
 # Jaeger (OTLP trace collector) starts automatically with every experiment.
@@ -53,6 +59,16 @@ x-node-build: &node-build
   build:
     context: ..
     dockerfile: docker/node/Dockerfile
+
+x-node-rust-build: &node-rust-build
+  build:
+    context: ../..
+    dockerfile: testbed/docker/node-rust/Dockerfile
+
+x-node-js-build: &node-js-build
+  build:
+    context: ../..
+    dockerfile: testbed/docker/node-js/Dockerfile
 
 # Shared healthcheck timing for server containers.
 # test command is overridden per server to check its specific addr file.
@@ -112,7 +128,7 @@ services:
       - router
     cap_add:
       - NET_ADMIN
-    profiles: ["local", "nonat"]
+    profiles: ["local", "nonat", "rust", "rust-nonat", "js", "js-nonat"]
     environment:
       - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
     command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-1"]
@@ -130,7 +146,7 @@ services:
       - router
     cap_add:
       - NET_ADMIN
-    profiles: ["local", "nonat"]
+    profiles: ["local", "nonat", "rust", "rust-nonat", "js", "js-nonat"]
     environment:
       - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
     command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-2"]
@@ -148,7 +164,7 @@ services:
       - router
     cap_add:
       - NET_ADMIN
-    profiles: ["local", "nonat"]
+    profiles: ["local", "nonat", "rust", "rust-nonat", "js", "js-nonat"]
     environment:
       - GOLOG_LOG_LEVEL=${GOLOG_LOG_LEVEL:-}
     command: ["--role=server", "--transport=${TRANSPORT:-both}", "--port=4001", "--addr-file=/peer-addrs/server-3"]
@@ -511,6 +527,168 @@ services:
     networks:
       public-net:
         ipv4_address: 73.0.0.100
+
+  # === Rust client behind NAT ===
+  client-rust:
+    <<: *node-rust-build
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      router:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      server-1:
+        condition: service_healthy
+      server-2:
+        condition: service_healthy
+      server-3:
+        condition: service_healthy
+    profiles: ["rust"]
+    environment:
+      - GATEWAY=auto
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --otlp-endpoint=http://jaeger:4318
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+    networks:
+      private-net:
+        ipv4_address: 10.0.1.10
+
+  # === Rust client with public IP (no NAT) ===
+  client-rust-nonat:
+    <<: *node-rust-build
+    depends_on:
+      jaeger:
+        condition: service_started
+      server-1:
+        condition: service_healthy
+      server-2:
+        condition: service_healthy
+      server-3:
+        condition: service_healthy
+    profiles: ["rust-nonat"]
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --otlp-endpoint=http://jaeger:4318
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.101
+
+  # === Rust client for mock server experiments ===
+  client-rust-mock:
+    <<: *node-rust-build
+    depends_on:
+      jaeger:
+        condition: service_started
+      mock-server-1:
+        condition: service_healthy
+      mock-server-2:
+        condition: service_healthy
+      mock-server-3:
+        condition: service_healthy
+    profiles: ["rust-mock"]
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --otlp-endpoint=http://jaeger:4318
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.101
+
+  # === JS client behind NAT ===
+  client-js:
+    <<: *node-js-build
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      router:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      server-1:
+        condition: service_healthy
+      server-2:
+        condition: service_healthy
+      server-3:
+        condition: service_healthy
+    profiles: ["js"]
+    environment:
+      - GATEWAY=auto
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --otlp-endpoint=http://jaeger:4318
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+    networks:
+      private-net:
+        ipv4_address: 10.0.1.10
+
+  # === JS client with public IP (no NAT) ===
+  client-js-nonat:
+    <<: *node-js-build
+    depends_on:
+      jaeger:
+        condition: service_started
+      server-1:
+        condition: service_healthy
+      server-2:
+        condition: service_healthy
+      server-3:
+        condition: service_healthy
+    profiles: ["js-nonat"]
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --otlp-endpoint=http://jaeger:4318
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.102
+
+  # === JS client for mock server experiments ===
+  client-js-mock:
+    <<: *node-js-build
+    depends_on:
+      jaeger:
+        condition: service_started
+      mock-server-1:
+        condition: service_healthy
+      mock-server-2:
+        condition: service_healthy
+      mock-server-3:
+        condition: service_healthy
+    profiles: ["js-mock"]
+    command: >-
+      --role=client
+      --transport=${TRANSPORT:-both}
+      --port=4001
+      --peer-dir=/peer-addrs
+      --otlp-endpoint=http://jaeger:4318
+    volumes:
+      - peer-addrs:/peer-addrs:ro
+    networks:
+      public-net:
+        ipv4_address: 73.0.0.102
 
   # === NAT verification (lightweight, no Go binary) ===
   # Used by testbed/verify-nat.sh to validate iptables rules with plain TCP/UDP.

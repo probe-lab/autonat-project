@@ -80,6 +80,7 @@ all combinations into individual scenarios (Cartesian product).
 | `mock_probabilities` | array[3] of float 0–1 | — | Probability for `probabilistic` behavior |
 | `mock_tcp_behaviors` | array[3] | — | TCP-specific behavior override per server |
 | `mock_quic_behaviors` | array[3] | — | QUIC-specific behavior override per server |
+| `client_impl` | enum | `go` | Client implementation: `go`, `rust`, `js` |
 | `measurements` | array of string | — | Metrics to compute via `analyze.py` (see below) |
 | `assertions` | array of objects | — | Pass/fail checks on trace events |
 

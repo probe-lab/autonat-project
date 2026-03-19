@@ -1,0 +1,119 @@
+name: adf-false-positive
+description: >
+  Tests whether address-restricted (ADF) NAT produces false positives.
+
+  Address-restricted NAT (EIM + ADF) allows inbound traffic from any port
+  of an IP the client has previously contacted. Since AutoNAT v2 servers
+  dial back from the same IP the client connected to, the NAT allows
+  the dial-back through — causing AutoNAT v2 to report REACHABLE.
+
+  This is a "false positive" from a real-world perspective: arbitrary
+  peers that the node has NOT contacted cannot reach it.
+
+  Port-restricted NAT (EIM + APDF) is the control: dial-back fails because
+  the server uses a different source port than the one the client contacted.
+
+  20 runs each for statistical confidence.
+
+  Post-process:
+    python3 testbed/analyze.py results/adf-false-positive-*/*.json
+
+defaults:
+  timeout_s: 120
+  runs: 20
+  server_count: 7
+
+scenarios:
+  # --- Address-restricted NAT: expected to report REACHABLE (false positive) ---
+
+  - name: adf-tcp
+    nat_type: address-restricted
+    transport: tcp
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "ADF NAT: address reported reachable (expected — this is the false positive)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: adf-quic
+    nat_type: address-restricted
+    transport: quic
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "ADF NAT: address reported reachable (expected — this is the false positive)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: adf-both
+    nat_type: address-restricted
+    transport: both
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "ADF NAT: address reported reachable (expected — this is the false positive)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  # --- Port-restricted NAT: control group, should report UNREACHABLE ---
+
+  - name: apdf-tcp
+    nat_type: port-restricted
+    transport: tcp
+    assertions:
+      - type: no_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "APDF NAT: no address should be reachable (false positive if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: unreachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_unreachable_ms
+
+  - name: apdf-quic
+    nat_type: port-restricted
+    transport: quic
+    assertions:
+      - type: no_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "APDF NAT: no address should be reachable (false positive if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: unreachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_unreachable_ms
+
+  - name: apdf-both
+    nat_type: port-restricted
+    transport: both
+    assertions:
+      - type: no_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "APDF NAT: no address should be reachable (false positive if fails)"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: unreachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_unreachable_ms
