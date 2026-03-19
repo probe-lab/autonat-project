@@ -67,6 +67,29 @@ Nebula's PostgreSQL schema stores all required fields (verified from
 | Relay-dependent peers | `WHERE is_relay = true` on addresses | Size of restrictive-NAT population |
 | Cloud vs residential | `is_cloud` / `asn` segmentation | NAT analysis excluding servers |
 
+### Additional Queryable Fields
+
+Nebula stores richer per-visit data that enables additional queries
+beyond protocol/version analysis:
+
+| Field | Query | Value |
+|-------|-------|-------|
+| `connect_error` | `IS NULL` = dialable; `io_timeout` / `connection_refused` = likely NATted | Reachability proxy from Nebula's vantage point |
+| `connect_maddr` | Parse transport from the address that succeeded | Which transport (TCP/QUIC) actually connected? |
+| `dial_errors` | Per-address error breakdown | Per-transport dial failure patterns |
+| `dial_duration` / `connect_duration` | Timing per visit | Connection timing by transport and region |
+| `listen_maddrs` | All addresses peer claims to listen on | Full address set vs what's actually dialable |
+| `sessions` (`successful/failed_visits_count`) | Success rate over time per peer | Intermittent reachability (oscillation proxy) |
+
+These enable additional Tier 1 queries:
+
+| Query | Method | Answers |
+|-------|--------|---------|
+| Reachability proxy | `connect_error IS NULL` vs persistent errors | Rough public/private split from crawler's vantage |
+| Transport reachability | Parse `connect_maddr` for `/tcp/` vs `/quic-v1` | Which transport succeeds more often? |
+| QUIC vs TCP correlation | Cross-reference per peer: TCP dialable AND/OR QUIC dialable | Are peers reachable on TCP also reachable on QUIC? (relevant to UDP black hole finding) |
+| Intermittent reachability | `failed_visits_count / (successful + failed)` per peer | Proxy for v1 oscillation in the wild |
+
 ### Effort
 
 Days. SQL queries on existing ProbeLab Nebula database.
@@ -77,6 +100,17 @@ Nebula only sees DHT server-mode nodes. Peers behind restrictive NAT
 (DHT clients) are invisible. This gives a biased view weighted toward
 reachable nodes. Tier 1 answers "what protocols do reachable nodes
 support?" but not "what NAT type are unreachable nodes behind?"
+
+### Historical Context
+
+Prior measurements provide rough baselines, though they are dated:
+
+- **~64% of peers behind NAT** — Halkes & Pouwelse, 2011 [7]
+- **~11% behind symmetric NAT** — same source
+- **~70% hole punching success rate** — Trautwein et al., 2022/2025 [5][6]
+
+Current numbers are unknown — measuring them is a key motivation for
+this proposal.
 
 ### Deliverable
 
