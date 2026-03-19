@@ -26,6 +26,35 @@
 
 ## Executive Summary
 
+### Motivation
+
+Multiple libp2p-based projects have reported reachability detection
+issues in production:
+
+- **Obol Network** ([Charon](https://github.com/ObolNetwork/charon),
+  go-libp2p v0.47.0): Distributed validator nodes running behind home
+  or corporate NAT experience oscillating reachability status. Their
+  Prometheus metric `p2p_reachability_status` flips between public and
+  private, triggering unnecessary relay activation and DHT client mode
+  — degrading validator coordination through higher-latency relay paths.
+
+- **Avail Network** ([avail-light](https://github.com/availproject/avail-light),
+  rust-libp2p v0.55.0): Light clients reported persistent
+  "autonat-over-quic libp2p errors" starting from v1.7.4. The team
+  ultimately **disabled AutoNAT entirely** in v1.13.2 (September 2025),
+  forcing operators to manually set `--external-address` for DHT server
+  mode — defeating the purpose of automatic reachability detection.
+
+These are not isolated incidents. They reflect fundamental issues in how
+AutoNAT determines and communicates reachability across the libp2p
+ecosystem. This project investigates AutoNAT v2 — the protocol designed
+to fix these problems — and evaluates whether it succeeds.
+
+See [obol.md](obol.md) and [avail.md](avail.md) for detailed impact
+analysis on each project.
+
+### Findings
+
 AutoNAT v2 is a significant improvement over v1 in per-address
 reachability detection. In controlled testbed conditions, it produces
 **0% false negative rate and 0% false positive rate** across all
@@ -42,13 +71,16 @@ systems that matter most** (DHT, AutoRelay) in go-libp2p, the only
 implementation where v2 is deployed in production. v1 still controls the
 global reachability flag, and v1 oscillates under real-world conditions
 (3 out of 5 testbed runs with unreliable servers show v1 flipping between
-Public and Private while v2 remains stable).
+Public and Private while v2 remains stable). This directly explains the
+oscillation observed by Obol.
 
 Cross-implementation analysis reveals that **only go-libp2p has a
 functional AutoNAT v2 deployment**. rust-libp2p has a critical address
-selection bug (probes ephemeral ports, 100% false negative). js-libp2p
-emits no reachability events. Neither has a production consumer
-(Substrate skips autonat entirely; Helia uses v1 only).
+selection bug (probes ephemeral ports, 100% false negative) — which,
+combined with the QUIC dial-back issue, explains the errors that led
+Avail to disable AutoNAT. js-libp2p emits no reachability events.
+Neither has a production consumer (Substrate skips autonat entirely;
+Helia uses v1 only).
 
 ### Findings at a Glance
 
