@@ -205,45 +205,228 @@ network, this is acceptable. On a production node this would be undesirable
 
 ---
 
-## Proper Upstream Fix
+## Impact on AutoNAT Results
 
-The `dialerHost` should not share the main host's black hole counter.
-Unlike a regular node making speculative connections, the `dialerHost`
-only dials addresses that a client has explicitly requested to test. If
-UDP doesn't work for a particular dial-back, that's the information the
-client needs — the detector shouldn't suppress it.
+When the black hole detector blocks QUIC dial-back, the server responds
+to the client with `E_DIAL_REFUSED` for the QUIC address. From the
+client's perspective:
 
-The fix in `config/config.go:makeAutoNATV2Host()`:
+| Scenario | Server behavior | Client sees | Result |
+|----------|----------------|-------------|--------|
+| Detector allows QUIC | Server dials back, succeeds | REACHABLE | Correct |
+| Detector allows QUIC | Server dials back, NAT blocks | UNREACHABLE | Correct |
+| **Detector blocks QUIC** | **Server refuses to dial** | **UNREACHABLE** | **False negative** |
+
+This is a **false negative**, not merely "unknown." The server actively
+reports the address as unreachable because it refused to attempt the
+dial-back. The client counts this as a failure toward its confidence
+target. With enough affected servers, a genuinely QUIC-reachable address
+may accumulate 3 net failures and be declared unreachable.
+
+### Why This Matters
+
+The false negative is particularly insidious because:
+
+1. **It's server-side, not client-side** — the client can't distinguish
+   "server refused because of its own detector" from "server tried and
+   NAT blocked it." Both look like `E_DIAL_REFUSED`.
+
+2. **It's transient** — once the server accumulates enough successful
+   UDP connections (from regular traffic, not AutoNAT), the detector
+   enters `Allowed` state and QUIC dial-backs start working. On Kubo
+   nodes this typically happens within minutes of startup.
+
+3. **It's testbed-specific in severity** — isolated Docker servers with
+   no background UDP traffic stay in `Blocked` state indefinitely. On
+   the live IPFS network, servers are long-running Kubo nodes with
+   healthy UDP counters.
+
+4. **TCP is unaffected** — the detector only gates UDP/QUIC. TCP
+   dial-backs always proceed regardless of the detector state.
+
+---
+
+## Why the Detector Is Necessary
+
+Despite causing problems for AutoNAT, the UDP black hole detector
+serves an important purpose for regular libp2p operation:
+
+### The Problem It Solves
+
+On networks that silently drop UDP traffic (common in corporate
+environments, some mobile carriers, restrictive WiFi portals):
+
+- Every QUIC connection attempt is wasted — the SYN-equivalent packet
+  is silently dropped, the node waits for a timeout (typically 5-30s)
+- A DHT routing table with hundreds of peers means hundreds of wasted
+  QUIC attempts
+- Each failed attempt consumes CPU (crypto handshake prep), memory
+  (connection state), and time (timeout wait)
+- The node is effectively throttled by UDP timeouts even though TCP
+  would work fine
+
+The detector learns this pattern within ~100 dial attempts and switches
+to TCP-only operation, dramatically improving performance on
+UDP-hostile networks.
+
+### Why Simply Disabling It Isn't the Answer
+
+Disabling the detector network-wide would hurt nodes on UDP-hostile
+networks. The fix must be scoped to the AutoNAT dial-back path
+specifically, not the entire swarm.
+
+---
+
+## Proposed Upstream Fixes
+
+### Option A: Disable detector on dialerHost (recommended)
+
+The `dialerHost` should not have a black hole detector at all. Unlike
+a regular node making speculative connections, the `dialerHost` only
+dials addresses that a client has explicitly requested to test. If UDP
+doesn't work for a particular dial-back, that failure IS the information
+the client needs — the detector should not suppress it.
 
 ```go
+// config/config.go:makeAutoNATV2Host()
 autoNatCfg := Config{
     UDPBlackHoleSuccessCounter:        nil,
     CustomUDPBlackHoleSuccessCounter:  true,  // don't create default counter
     IPv6BlackHoleSuccessCounter:       nil,
     CustomIPv6BlackHoleSuccessCounter: true,
-    SwarmOpts: []swarm.Option{
-        swarm.WithReadOnlyBlackHoleDetector(),
-    },
+    // No SwarmOpts — no read-only detector either
 }
 ```
 
-Setting the counter to `nil` with `Custom=true` tells go-libp2p not to
-create a default counter. The `dialerHost` will attempt all dials
-regardless of UDP success history.
+This is equivalent to what
+[PR #2529](https://github.com/libp2p/go-libp2p/pull/2529) did for the
+AutoNAT v1 dialer, which has been running in production since August 2023
+without issues.
 
-This approach aligns with how
-[PR #2529](https://github.com/libp2p/go-libp2p/pull/2529) solved the same
-problem for AutoNAT v1.
+**Pros:**
+- Simplest fix, proven approach (same as v1)
+- AutoNAT dial-backs always attempted — result reflects actual network state
+- No counter state to manage or leak
 
-### Alternative: Start in Allowed State
+**Cons:**
+- If the server's network genuinely blocks UDP, every QUIC dial-back
+  attempt wastes a timeout. But this is bounded: the server only handles
+  AutoNAT requests at rate-limited intervals (60 RPM), not hundreds
+  of DHT dials.
 
-Starting the counter in `Allowed` state (instead of disabling it) would
-also fix the initial problem but introduces a subtlety: the counter could
-later transition to `Blocked` if enough dial-backs fail (e.g., the
-`dialerHost` handles many requests for nodes behind symmetric NAT where
-QUIC dial-backs always fail). This would re-introduce the same problem
-over time. Disabling the counter entirely is safer and semantically
-correct — the `dialerHost` doesn't need network quality heuristics.
+### Option B: Skip detector for AutoNAT dial-backs specifically
+
+Add a dial option that bypasses the black hole detector for specific
+dials, rather than disabling it on the entire `dialerHost`:
+
+```go
+// In server.go dialBack():
+h.Connect(ctx, pi,
+    swarm.WithSkipBlackHoleDetection(),  // new option
+)
+```
+
+This keeps the `dialerHost`'s detector intact for any other potential
+use while exempting AutoNAT dial-backs.
+
+**Pros:**
+- Narrowest scope — only AutoNAT dials skip the detector
+- If `dialerHost` is ever used for other purposes, they still get protection
+
+**Cons:**
+- Requires adding a new swarm dial option
+- In practice, `dialerHost` is only used for AutoNAT — same effect as Option A
+
+### Option C: Seed counter from main host's success history
+
+When creating the `dialerHost`, initialize its counter with the main
+host's current success count instead of starting from zero:
+
+```go
+mainCount := cfg.UDPBlackHoleSuccessCounter.SuccessCount()
+dialerCounter := swarm.NewBlackHoleSuccessCounter(N, MinSuccesses)
+dialerCounter.SeedWith(mainCount)  // new method
+```
+
+**Pros:**
+- Fresh servers with healthy main hosts work immediately
+- Preserves detector behavior for long-running servers
+
+**Cons:**
+- Doesn't help fresh servers where the main host also has zero history
+  (the exact testbed scenario)
+- Counter could still transition to `Blocked` over time if many
+  dial-backs fail (servers handling many symmetric NAT clients)
+- More complex than Option A
+
+### Option D: Start counter in Allowed state
+
+Override the initial state to `Allowed` instead of `Probing`:
+
+```go
+dialerCounter := swarm.NewBlackHoleSuccessCounter(N, MinSuccesses)
+dialerCounter.ForceState(Allowed)  // new method
+```
+
+**Pros:**
+- Works immediately on fresh servers
+
+**Cons:**
+- Counter may transition to `Blocked` over time (same as Option C)
+- Semantically incorrect — the counter claims "UDP works" without evidence
+- Re-introduces the original problem after enough failed dial-backs
+
+### Option E: Use main host's counter in read-write mode
+
+Current code uses read-only mode. Switching to read-write would let
+successful dial-backs feed back into the counter:
+
+```go
+// Remove WithReadOnlyBlackHoleDetector()
+SwarmOpts: []swarm.Option{
+    // counter is read-write — successful dial-backs count
+},
+```
+
+**Pros:**
+- Self-healing — successful QUIC dial-backs push counter toward `Allowed`
+
+**Cons:**
+- Failed dial-backs also count, potentially corrupting the main host's
+  counter (the original problem that PR #2529 fixed for v1)
+- Nodes behind symmetric NAT generate many failures, pushing the
+  counter toward `Blocked`
+
+### Recommendation
+
+**Option A** is the recommended fix. It matches the proven v1 approach,
+is the simplest to implement, and has the clearest semantics: the
+AutoNAT dial-back host should attempt every requested dial regardless of
+UDP history, because the dial result itself is the output the client needs.
+
+Option B achieves the same practical effect with a narrower scope but
+requires new API surface. It's worth considering if `dialerHost` gains
+other responsibilities in the future, but today it's unnecessary
+complexity.
+
+Options C, D, and E all attempt to preserve the detector on the dial-back
+path, which is fundamentally the wrong approach — the detector's purpose
+(protect against wasted speculative dials) doesn't apply to AutoNAT
+(one-shot requested dials where the failure itself is useful information).
+
+---
+
+## Cross-Implementation Comparison
+
+| Implementation | UDP black hole detector | AutoNAT dial-back impact |
+|----------------|----------------------|-------------------------|
+| **go-libp2p** | Yes (swarm layer) | v2 dialerHost shares counter → QUIC blocked on fresh servers |
+| **rust-libp2p** | No | No issue — but also no protection against UDP-hostile networks |
+| **js-libp2p** | No | No issue — but also no protection |
+
+Only go-libp2p has this detector. The issue is specific to go-libp2p's
+design choice of sharing the counter between the main host and the
+AutoNAT dial-back host.
 
 ---
 
