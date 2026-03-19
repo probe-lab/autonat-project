@@ -190,7 +190,7 @@ design guarantees this outcome for ADF NATs.
 default to APDF). But no measurement data exists to quantify prevalence.
 
 ![Detection Correctness](../results/figures/05_detection_correctness.png)
-*Figure 5: Detection correctness heatmap — address-restricted reports reachable (false positive).*
+*Figure 1: Detection correctness heatmap — address-restricted reports reachable (false positive).*
 
 **Full analysis:** [adf-false-positive.md](adf-false-positive.md)
 
@@ -263,7 +263,7 @@ Best trace (`v1v2-gap-fullcone-tcp`, run 2):
 v2 reached reachable at 6s and **never changed**. v1 oscillated.
 
 ![v1/v2 Gap Comparison](../results/figures/10_v1_v2_gap_comparison.png)
-*Figure 10: v1 oscillates (red segments) while v2 stays stable (green). Three unreliable server ratios.*
+*Figure 2: v1 oscillates (red segments) while v2 stays stable (green). Three unreliable server ratios.*
 
 | Metric | v1 | v2 |
 |--------|----|----|
@@ -367,10 +367,10 @@ significantly more reliable over lossy networks. Both transports maintain
 only convergence time increases.
 
 ![Packet Loss Impact](../results/figures/04_packet_loss_impact.png)
-*Figure 4: Packet loss impact — QUIC (right) flat lines vs TCP (left) steep increase at 10% loss.*
+*Figure 3: Packet loss impact — QUIC (right) flat lines vs TCP (left) steep increase at 10% loss.*
 
 ![Latency Impact](../results/figures/03_latency_impact.png)
-*Figure 3: Latency impact — both transports scale linearly, QUIC more resilient.*
+*Figure 4: Latency impact — both transports scale linearly, QUIC more resilient.*
 
 ### Finding 10: Observed Address Threshold and Symmetric NAT
 
@@ -398,7 +398,7 @@ enables v2 to produce a correct determination instead of silence.
 | Address-restricted | NOT detected (already FP reachable) | NOT detected |
 
 ![Time-to-Update](../results/figures/06_time_to_update.png)
-*Figure 6: Time-to-update timeline for port-restricted NAT — 30s to detect added port forward, 69s to detect removal.*
+*Figure 5: Time-to-update timeline for port-restricted NAT — 30s to detect added port forward, 69s to detect removal.*
 
 ---
 
@@ -420,16 +420,17 @@ From 178 testbed runs:
 | TTU: port forward removed | ~69s |
 
 ![v1 vs v2 Convergence](../results/figures/01_convergence.png)
-*Figure 1: v1 vs v2 time to first convergence event by NAT type. Symmetric NAT: v2 produces no event.*
+*Figure 6: v1 vs v2 time to first convergence event by NAT type. Symmetric NAT: v2 produces no event.*
 
 ![FNR/FPR Summary](../results/figures/07_fnr_fpr_summary.png)
 *Figure 7: False negative and false positive rates across all conditions — 0% for v2 in all standard scenarios.*
 
+
 ![Convergence Heatmap TCP](../results/figures/08_convergence_heatmap_tcp.png)
-*Figure 8a: Convergence time heatmap (TCP) across NAT types and network conditions.*
+*Figure 8: Convergence time heatmap (TCP) across NAT types and network conditions.*
 
 ![Convergence Heatmap QUIC](../results/figures/08_convergence_heatmap_quic.png)
-*Figure 8b: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
+*Figure 9: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
 | QUIC TTC increase at 10% loss | **+1%** |
 | TCP TTC increase at 10% loss | +147% |
 
