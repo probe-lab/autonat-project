@@ -485,11 +485,26 @@ and file naming.
 | `testbed/main.go` | libp2p node binary (server, client, mock-server roles) |
 | `testbed/mock_server.go` | Mock AutoNAT v2 server (controllable behaviors) |
 | `testbed/go.mod` | Go module definition |
-| `testbed/run.sh` | YAML-driven experiment runner |
+| `testbed/run.py` | YAML-driven experiment runner (Python, replaces run.sh) |
+| `testbed/run.sh` | Legacy bash experiment runner |
 | `testbed/run-local.sh` | Local experiment runner (no Docker, real NAT) |
-| `testbed/verify-nat.sh` | NAT verification test runner (network-layer) |
+| `testbed/analyze.py` | Post-hoc trace analysis (FNR, FPR, TTC, TTU, overhead) |
 | `testbed/eval-assertions.py` | Assertion evaluator for experiment logs |
+| `testbed/verify-nat.sh` | NAT verification test runner (network-layer) |
 | `testbed/scenarios/` | YAML scenario definitions |
 | `testbed/docker/compose.yml` | Docker Compose topology |
-| `testbed/docker/node/` | AutoNAT node container |
+| `testbed/docker/node/` | Go AutoNAT node container |
+| `testbed/docker/node-rust/` | Rust AutoNAT node container (rust-libp2p) |
+| `testbed/docker/node-js/` | JS AutoNAT node container (js-libp2p) |
 | `testbed/docker/router/` | NAT router (iptables) |
+| `results/generate_figures.py` | Generate report figures from trace data |
+
+## Related Documentation
+
+| Document | Content |
+|----------|---------|
+| [otel-tracing.md](otel-tracing.md) | OTel span hierarchy, attributes, and Jaeger queries |
+| [trace-spec.md](trace-spec.md) | Implementation-agnostic trace format specification |
+| [instrumentation-requirements.md](instrumentation-requirements.md) | What each client implementation must instrument |
+| [upnp-nat-detection.md](upnp-nat-detection.md) | UPnP/NAT-PMP port mapping and detection details |
+| [scenario-schema.md](scenario-schema.md) | YAML scenario format reference |
