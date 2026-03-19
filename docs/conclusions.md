@@ -99,11 +99,19 @@ At 10% packet loss, QUIC convergence time increases by 1% vs TCP's
 AutoNAT v2 significantly more reliable over lossy networks when using
 QUIC. [Data](../results/testbed/data/analysis-summary.md)
 
-**10. Observed Address Threshold Sensitivity**
-The `ActivationThresh=4` gate determines whether AutoNAT v2 runs at
-all. With fewer than 4 servers with distinct IPs, addresses never
-activate. This affects small deployments and is a hidden configuration
-dependency. *(Testbed verification in progress — #76)*
+**10. Observed Address Threshold and Symmetric NAT**
+The `ActivationThresh=4` controls observed address promotion. Testbed
+verification revealed two key findings:
+
+- **No-NAT nodes are unaffected by the threshold** — even with
+  threshold=4 and only 3 servers, no-NAT nodes converge normally
+  because their listen address is directly public (no observation
+  needed).
+- **Symmetric NAT silence is threshold-caused and fixable** — with
+  `obs_addr_thresh=1`, symmetric NAT nodes receive an UNREACHABLE
+  determination (correct) instead of silence. The threshold prevents
+  any observed address from activating because each server sees a
+  different port. Lowering the threshold trades confidence for coverage.
 
 ---
 
