@@ -76,7 +76,7 @@ non-edge-case NAT types, converges in ~6 seconds, and is resilient to
 high latency and packet loss (QUIC adds only +1% convergence time at 10%
 packet loss vs TCP's +147%).
 
-However, we identified **9 findings** that affect its real-world
+However, we identified **8 findings** that affect its real-world
 effectiveness — ranging from protocol-level design issues to
 implementation gaps and cross-implementation inconsistencies.
 
@@ -108,7 +108,6 @@ Helia uses v1 only).
 | 6 | [UDP black hole blocks QUIC dial-back](#finding-6-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
 | 7 | [JS: no reachability events](#finding-7-js-libp2p-no-reachability-events) | Cross-impl | Medium |
 | 8 | [No v2 production deployment outside Kubo](#finding-8-no-production-deployment-outside-kubo) | Cross-impl | Info |
-| 9 | [Threshold sensitivity and symmetric NAT fix](#finding-9-observed-address-threshold-and-symmetric-nat) | Performance | Info |
 
 ---
 
@@ -458,7 +457,8 @@ external port. No address reaches the observed address activation
 threshold (`ActivationThresh=4`) → AutoNAT v2 never runs → no
 reachability signal at all.
 
-**Testbed evidence:** All symmetric NAT scenarios produce zero events:
+**Testbed evidence:** All symmetric NAT scenarios produce zero events
+across all conditions tested (baseline, latency, packet loss):
 
 ```
 symmetric-tcp-7:     NO SIGNAL
@@ -467,13 +467,23 @@ symmetric-*-lat*:    NO SIGNAL
 symmetric-*-loss*:   NO SIGNAL
 ```
 
-**Key finding:** This is threshold-caused and fixable. With
-`obs_addr_thresh=1`, symmetric NAT nodes receive an UNREACHABLE
-determination (correct) instead of silence. The tradeoff is lower
-confidence in the observed address.
+**Root cause — threshold sensitivity:** The `ActivationThresh` only
+affects *observed* address promotion for NATted nodes. Testbed
+verification:
+
+| Threshold | NAT type | Result |
+|-----------|----------|--------|
+| 4 (default) | no-NAT | Converges (listen address is directly public) |
+| 4 (default) | symmetric | NO SIGNAL |
+| 1 | symmetric | **UNREACHABLE** (correct — v2 finally runs!) |
+
+With `ActivationThresh=1`, symmetric NAT nodes receive a correct
+UNREACHABLE determination instead of silence. The tradeoff is lower
+confidence in the observed address — a single observation promotes it.
 
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
+See [measurement-results.md](measurement-results.md) for full TTU data.
 
 ### Finding 6: UDP Black Hole Detector Blocks QUIC Dial-Back
 
@@ -530,34 +540,6 @@ v1's sliding window. See [js-libp2p analysis](js-libp2p-autonat-implementation.m
 AutoNAT v2 exists in three implementations but is battle-tested in only
 one. The issues found in rust (#3) and js (#7) may not have been caught
 because nobody runs them in production.
-
-### Finding 9: Observed Address Threshold and Symmetric NAT
-
-**Category:** Performance | **Severity:** Info
-
-Testbed verification of `ActivationThresh` behavior:
-
-| Scenario | Result |
-|----------|--------|
-| thresh=4, 3 servers, no-NAT | Converges (threshold doesn't block public addresses) |
-| thresh=2, 3 servers, no-NAT | Converges |
-| thresh=1, 3 servers, symmetric | **UNREACHABLE** (correct — v2 finally runs!) |
-
-**Key insight:** The threshold only affects *observed* address promotion
-(NATted nodes). No-NAT nodes converge regardless because their listen
-address is directly public. Lowering the threshold for symmetric NAT
-enables v2 to produce a correct determination instead of silence.
-
-**Time-to-Update** (port forwarding toggle detection):
-
-| NAT type | Add forward | Remove forward |
-|----------|------------|----------------|
-| Port-restricted (TCP/QUIC/both) | **30s** | **69s** |
-| Symmetric | NOT detected | NOT detected |
-| Address-restricted | NOT detected (already FP reachable) | NOT detected |
-
-![Time-to-Update](../results/figures/06_time_to_update.png)
-*Figure 5: Time-to-update timeline for port-restricted NAT — 30s to detect added port forward, 69s to detect removal.*
 
 ---
 
