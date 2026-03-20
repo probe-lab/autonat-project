@@ -89,8 +89,8 @@ Public and Private while v2 remains stable). This directly explains the
 oscillation observed by Obol.
 
 Cross-implementation analysis reveals that **only go-libp2p has a
-functional AutoNAT v2 deployment**. rust-libp2p has a critical address
-selection bug (probes ephemeral ports, 100% false negative) — which,
+functional AutoNAT v2 deployment**. rust-libp2p works correctly when
+properly configured but lacks a safety net when TCP port reuse fails — which,
 combined with the QUIC dial-back issue, explains the errors that led
 Avail to disable AutoNAT. js-libp2p emits no reachability events.
 Neither has a production consumer (Substrate skips autonat entirely;
@@ -681,7 +681,7 @@ For complete per-scenario data and additional figures, see
 | **Maturity** | Primary (May 2024) | Second (Aug 2024) | Third (June 2025) |
 | **Production consumer** | Kubo (tens of thousands) | None (Substrate skips autonat) | None (Helia uses v1) |
 | **Confidence system** | Sliding window, targetConfidence=3 | None (single probe) | Fixed thresholds (4/8) |
-| **Address filtering** | ObservedAddrManager (threshold=4) | None → ephemeral port bug | Address manager + cuckoo filter |
+| **Address filtering** | ObservedAddrManager (threshold=4) | Identify translation (when `PortUse::New`) | Address manager + cuckoo filter |
 | **Reachability events** | `EvtHostReachableAddrsChanged` | Per-probe `Event` struct | **None** |
 | **v2 → DHT wiring** | No (DHT reads v1 only) | Indirect (`ExternalAddrConfirmed`) | Indirect (`self:peer:update`) |
 | **Dial-back identity** | Separate dialerHost | Same swarm | Same identity |
@@ -707,9 +707,12 @@ For complete per-scenario data and additional figures, see
 
 ### For rust-libp2p
 
-4. **Add observed address consolidation** — Implement equivalent of
-   go-libp2p's `ObservedAddrManager`. Without this, autonat v2 is
-   non-functional.
+4. **Fix silent `PortUse::Reuse` fallback** — When TCP port reuse
+   fails and falls back to an ephemeral port, identify skips address
+   translation because the connection is still marked `Reuse`. Either
+   identify should check the actual local port, or the TCP transport
+   should report the actual outcome. Optionally, add an
+   `ObservedAddrManager`-equivalent as a safety net.
 
 ### For js-libp2p
 
@@ -719,18 +722,18 @@ For complete per-scenario data and additional figures, see
 6. **Upgrade Helia to v2** — v1's monotonic counters are
    oscillation-resistant but v2 provides per-address granularity.
 
-### For the AutoNAT v2 specification
-
-7. **Address the ADF blind spot** — Consider requiring dial-back from a
-   different IP (multi-server verification).
-
-8. **Add timeout-based inference for symmetric NAT** — Emit "likely
-   unreachable" after N minutes with no address activation.
-
 ### For the ecosystem
 
-9. **Measure real-world NAT type distribution** — Deploy monitoring to
-   quantify ADF prevalence and v2 adoption. See [Future Work](#future-work).
+7. **Measure real-world NAT type distribution** — Deploy monitoring to
+   quantify ADF prevalence, symmetric NAT fraction, and v2 adoption.
+   See [Future Work](#future-work).
+
+> **Note:** Recommendations for the AutoNAT v2 specification (addressing
+> ADF blind spot and symmetric NAT silent failure) are under
+> investigation — see [#89](https://github.com/probe-lab/autonat-project/issues/89).
+> go-libp2p already detects symmetric NAT via `getNATType()` but how to
+> act on it (and whether this is a spec or implementation concern)
+> requires further analysis.
 
 ---
 
