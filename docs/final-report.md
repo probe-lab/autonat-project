@@ -76,7 +76,7 @@ non-edge-case NAT types, converges in ~6 seconds, and is resilient to
 high latency and packet loss (QUIC adds only +1% convergence time at 10%
 packet loss vs TCP's +147%).
 
-However, we identified **8 findings** that affect its real-world
+However, we identified **7 findings** that affect its real-world
 effectiveness — ranging from protocol-level design issues to
 implementation gaps and cross-implementation inconsistencies.
 
@@ -106,8 +106,7 @@ Helia uses v1 only).
 | 4 | [ADF false positive (100% FPR)](#finding-4-address-restricted-nat-false-positive) | Protocol | Medium |
 | 5 | [Symmetric NAT silent failure](#finding-5-symmetric-nat-silent-failure) | Protocol | Medium |
 | 6 | [UDP black hole blocks QUIC dial-back](#finding-6-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
-| 7 | [JS: no reachability events](#finding-7-js-libp2p-no-reachability-events) | Cross-impl | Medium |
-| 8 | [No v2 production deployment outside Kubo](#finding-8-no-production-deployment-outside-kubo) | Cross-impl | Info |
+| 7 | [v2 only functional in go-libp2p](#finding-7-v2-only-functional-in-go-libp2p) | Cross-impl | Info |
 
 ---
 
@@ -504,62 +503,44 @@ from [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)).
 
 **Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
 
-### Finding 7: js-libp2p No Reachability Events
-
-**Category:** Cross-implementation | **Severity:** Medium
-
-The `@libp2p/autonat-v2` package emits no events to external consumers.
-The DHT receives reachability signals indirectly through:
-
-```
-autonat → confirmObservedAddr() → peerStore.patch() → self:peer:update → DHT
-```
-
-This works but is imprecise — the DHT checks for public addresses in the
-address list, not autonat v2's actual probe results.
-
-**Oscillation resistance:** js-libp2p v1 uses monotonic counters (4
-successes to confirm, 8 failures to unconfirm) with TTL-based
-re-evaluation — significantly more oscillation-resistant than go-libp2p
-v1's sliding window. See [js-libp2p analysis](js-libp2p-autonat-implementation.md#confidence-system).
-
-**Production status:** Helia uses `@libp2p/autonat` v1 only, not v2.
-
-**Full analysis:** [js-libp2p-autonat-implementation.md](js-libp2p-autonat-implementation.md)
-
-### Finding 8: AutoNAT v2 Adoption Gap
+### Finding 7: v2 Only Functional in go-libp2p
 
 **Category:** Cross-implementation | **Severity:** Info
 
 AutoNAT v2 exists as a library in all three libp2p implementations, but
-**only go-libp2p deploys it in production** (via Kubo). The other two
-major consumers either disabled autonat entirely or never adopted v2:
+**only go-libp2p deploys it in production** and produces correct results.
 
-| Project | Language | AutoNAT status | Consequence |
-|---------|----------|---------------|-------------|
-| **Kubo** | Go | v1 + v2 (both active) | Only production v2 deployment |
-| **Helia** | JS | **v1 only** (v2 package exists but unused) | v1's monotonic counters avoid oscillation; no v2 benefits |
-| **Substrate** | Rust | **Disabled entirely** | Operators must set `--external-address` manually |
+| Project | Language | AutoNAT status | v2 functional? |
+|---------|----------|---------------|----------------|
+| **Kubo** | Go | v1 + v2 (both active) | **Yes** — 0% FNR/FPR |
+| **Helia** | JS | v1 only (v2 exists but unused) | Untested in production |
+| **Substrate** | Rust | Disabled entirely | **No** — ephemeral port bug (Finding #3) |
 
-This matters because:
+**rust-libp2p v2** has a critical address selection bug (Finding #3)
+that produces 100% false negatives. This was likely never caught because
+Substrate — rust-libp2p's primary consumer — does not enable autonat at
+all. Avail disabled autonat entirely in v1.13.2 after persistent errors;
+even upgrading to v2 would not help due to the ephemeral port bug.
 
-- **rust-libp2p v2 has a critical bug** (Finding #3: ephemeral port
-  probing) that was likely never caught because no consumer uses it.
-  Avail's decision to disable autonat entirely (#58 was likely related to v1 issues and the UDP
-  black hole problem, but even if they upgraded to v2, the ephemeral
-  port bug would produce 100% false negatives.
+**js-libp2p v2** exists (`@libp2p/autonat-v2` package) but no project
+has adopted it. Helia uses v1 only. The v2 package lacks direct
+reachability events, though the DHT still receives signals indirectly
+via the address manager. Notably, **js-libp2p's v1 is better designed
+than go-libp2p's v1** for oscillation resistance — its monotonic
+counters (4 successes to confirm, 8 failures to unconfirm) with
+TTL-based re-evaluation avoid the sliding window problem that causes
+go-libp2p v1 to oscillate (Finding #2). See
+[js-libp2p analysis](js-libp2p-autonat-implementation.md#confidence-system).
 
-- **js-libp2p v2 emits no events** (Finding #7), but this hasn't been
-  noticed because Helia uses v1. Notably, js-libp2p's v1 implementation
-  is **better designed** than go-libp2p's v1 for oscillation resistance
-  — its monotonic counters with TTL-based re-evaluation avoid the
-  sliding window problem that causes go-libp2p v1 to oscillate
-  (Finding #2).
+**The protocol itself works** when the implementation is correct
+(go-libp2p: 0% FNR/FPR). The cross-implementation issues are in the
+surrounding infrastructure (address management, event model), not in
+the AutoNAT v2 protocol logic.
 
-- **The protocol itself works** when the implementation is correct
-  (go-libp2p: 0% FNR/FPR). The cross-implementation issues are in the
-  surrounding infrastructure (address management, event model), not in
-  the AutoNAT v2 protocol logic.
+**Full analysis:**
+[rust-libp2p](rust-libp2p-autonat-implementation.md) ·
+[js-libp2p](js-libp2p-autonat-implementation.md) ·
+[go-libp2p](go-libp2p-autonat-implementation.md)
 
 ---
 
