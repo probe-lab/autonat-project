@@ -224,7 +224,7 @@ ready before any dials, so the observed address is already correct
 
 ### Root Causes
 
-Three issues contribute:
+Three issues contribute to the testbed failure:
 
 1. **TCP listener registration is asynchronous** — the listen address
    isn't available to `local_dial_addr()` until the TCP listener is
@@ -242,6 +242,54 @@ Three issues contribute:
    `outbound_connections_with_ephemeral_port` (populated only for
    `PortUse::New`). Since the connection says `Reuse`, translation is
    skipped even though the actual port is ephemeral.
+
+### Testbed Fix and Verification
+
+Fixing the timing (waiting for `NewListenAddr` before dialing)
+resolves the issue completely — both TCP and QUIC report REACHABLE:
+
+```
+Waiting for 2 listeners to be ready...
+Listening on /ip4/73.0.0.101/tcp/4001
+Listening on /ip4/73.0.0.101/udp/4001/quic-v1
+All 2 listeners ready, connecting to peers...
+NewExternalAddrCandidate: /ip4/73.0.0.101/tcp/4001          ← correct!
+NewExternalAddrCandidate: /ip4/73.0.0.101/udp/4001/quic-v1  ← correct!
+AutoNAT v2: /ip4/73.0.0.101/tcp/4001 REACHABLE
+AutoNAT v2: /ip4/73.0.0.101/udp/4001/quic-v1 REACHABLE
+```
+
+This confirms that **TCP port reuse works correctly** in rust-libp2p
+when the listener is ready. The issue is purely a timing/startup
+ordering problem, not a kernel or socket-level failure.
+
+### Broader Issue: No Safety Net Without Port Reuse
+
+While the testbed timing issue is fixable, a deeper architectural
+difference remains. If port reuse is not available or fails for any
+reason, the three implementations behave differently:
+
+| Scenario | go-libp2p | rust-libp2p | js-libp2p |
+|----------|-----------|-------------|-----------|
+| Port reuse works | ✅ Correct port | ✅ Correct port | N/A (no port reuse in Node.js) |
+| Port reuse not used / fails | ✅ `ObservedAddrManager` corrects port via thin-waist grouping | ⚠️ Identify translation works ONLY if `PortUse::New` is explicit | ❌ No translation mechanism |
+| Port reuse requested, fails silently | N/A (generally works) | ❌ Identify skips translation (trusts `PortUse` metadata) | N/A |
+
+**go-libp2p** is the most robust: the `ObservedAddrManager` provides a
+safety net independent of port reuse. It groups observations by thin
+waist (IP + transport, port-independent) and replaces the observed port
+with the listen port. Even with all ephemeral ports, the correct
+address is promoted after `ActivationThresh=4` observations.
+
+**rust-libp2p** has identify address translation that works when
+`PortUse::New` is explicit — but fails when reuse is requested and
+silently falls back. There is no `ObservedAddrManager` equivalent as a
+safety net.
+
+**js-libp2p** has no port reuse (Node.js TCP doesn't support
+`SO_REUSEPORT`) and no address translation for ephemeral ports. It
+relies on the address manager's `confirmObservedAddr()` path, which
+stores observed addresses without port correction.
 
 ### Comparison: Why go-libp2p Doesn't Have This Problem
 
@@ -440,35 +488,31 @@ addresses; rust-libp2p applies similar but not identical filtering.
 
 ## Known Issues and Limitations
 
-### 1. TCP Address Candidate Failure (Critical — TCP only)
+### 1. TCP Address Candidate Failure
 
-**Status**: Confirmed in testbed. QUIC is not affected.
+**Status**: Confirmed and root-caused in testbed. Fixed in testbed
+client. Upstream issue remains (no safety net without port reuse).
 
-**Summary**: TCP AutoNAT v2 probes fail because the identify protocol
-emits candidates with ephemeral ports instead of the listen port. This
-is caused by a race condition between TCP listener registration and
-outbound connection establishment, combined with silent port reuse
-failure and inaccurate `PortUse` metadata.
+**Summary**: TCP AutoNAT v2 probes fail when port reuse is unavailable
+(e.g., listener not yet registered, `SO_REUSEPORT` not supported).
+Identify's address translation is bypassed when `PortUse::Reuse` was
+requested but silently failed. Unlike go-libp2p, there is no
+`ObservedAddrManager` to correct the port as a fallback.
 
-**Impact**: 100% false negative rate for TCP addresses. QUIC addresses
-work correctly (REACHABLE confirmed in testbed).
+**Testbed root cause**: A timing issue where outbound connections
+started before the TCP listener was registered, preventing port reuse.
+Fixed by waiting for `NewListenAddr` before dialing — TCP then works
+correctly (REACHABLE confirmed).
 
-**Root cause chain**:
-1. TCP listener registration is asynchronous
-2. Outbound connections may start before the listener is registered
-3. TCP port reuse fails silently (no listen port to bind to)
-4. Connection marked `PortUse::Reuse` despite using ephemeral port
-5. Identify skips address translation (trusts `PortUse` metadata)
-6. `NewExternalAddrCandidate` emitted with ephemeral port
-7. AutoNAT v2 probes ephemeral port → UNREACHABLE
+**Remaining upstream issue**: rust-libp2p has no safety net when port
+reuse genuinely fails (kernel limitation, socket error, etc.). go-libp2p
+handles this via `ObservedAddrManager`; rust-libp2p does not.
 
-**Why QUIC works**: QUIC binds the UDP socket synchronously, so the
-listen port is always available. All connections share the same socket,
-so the observed port is inherently correct (no translation needed).
+**QUIC is not affected**: UDP socket binds synchronously, all
+connections share it.
 
 See [Address Candidate Selection](#address-candidate-selection) for
-full analysis including go-libp2p comparison, testbed evidence, and
-potential upstream fixes.
+full analysis.
 
 Related: [rust-libp2p #4873](https://github.com/libp2p/rust-libp2p/issues/4873)
 (address ordering issue in v1 — different but related).

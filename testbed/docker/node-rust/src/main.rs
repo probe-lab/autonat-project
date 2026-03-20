@@ -300,6 +300,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &jsonl_writer,
     );
 
+    // Wait for all listeners to be ready before dialing peers.
+    // This ensures TCP port reuse can find the listen address.
+    let expected_listeners = listen_addrs.len();
+    let mut ready_listeners = 0;
+    eprintln!("Waiting for {} listeners to be ready...", expected_listeners);
+    while ready_listeners < expected_listeners {
+        if let Some(event) = swarm.next().await {
+            match event {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    eprintln!("Listening on {}/p2p/{}", address, local_peer_id);
+                    let addr_str = address.to_string();
+                    if !addr_str.contains("/127.0.0.1/") {
+                        swarm.add_external_address(address.clone());
+                        ready_listeners += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    eprintln!("All {} listeners ready, connecting to peers...", ready_listeners);
+
     // Connect to peers from --peer-dir or --peers
     if let Some(ref peer_dir) = args.peer_dir {
         connect_from_dir(&mut swarm, peer_dir, start_time, &jsonl_writer).await;
@@ -344,9 +366,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     SwarmEvent::Behaviour(NodeBehaviourEvent::AutonatServer(_)) => {}
 
-                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                    SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                         let elapsed_ms = start_time.elapsed().as_millis() as i64;
-                        eprintln!("Connected to {}", peer_id);
+                        eprintln!("Connected to {} endpoint={:?}", peer_id, endpoint);
                         emit_span(
                             "connected",
                             vec![
@@ -361,15 +383,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
 
+                    SwarmEvent::NewExternalAddrCandidate { address } => {
+                        eprintln!("NewExternalAddrCandidate: {}", address);
+                    }
+
+                    SwarmEvent::ExternalAddrConfirmed { address } => {
+                        eprintln!("ExternalAddrConfirmed: {}", address);
+                    }
+
+                    SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                        eprintln!("OutgoingConnectionError: peer={:?} error={}", peer_id, error);
+                    }
+
+                    SwarmEvent::IncomingConnection { local_addr, send_back_addr, .. } => {
+                        eprintln!("IncomingConnection: local={} remote={}", local_addr, send_back_addr);
+                    }
+
                     SwarmEvent::NewListenAddr { address, .. } => {
                         eprintln!("Listening on {}/p2p/{}", address, local_peer_id);
-                        // Register non-loopback listen addresses as external so
-                        // AutoNAT v2 probes our actual listen ports, not ephemeral
-                        // connection source ports reported by identify.
-                        let addr_str = address.to_string();
-                        if !addr_str.contains("/127.0.0.1/") {
-                            swarm.add_external_address(address.clone());
-                        }
                     }
 
                     _ => {}
