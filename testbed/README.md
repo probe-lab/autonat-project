@@ -192,7 +192,7 @@ dimensions in `matrix`.
 | `transport` | yes | — | `tcp`, `quic`, `both` |
 | `server_count` | yes | — | `3`, `5`, `7`, or `ipfs-network` (ignored when `mock_behaviors` is set) |
 | `packet_loss` | no | 0 | Integer 0–100 (percentage via `tc netem` on router) |
-| `latency_ms` | no | 0 | Non-negative integer, one-way ms via `tc netem` (RTT = 2×) |
+| `latency_ms` | no | 10 | Non-negative integer, one-way ms via `tc netem` (RTT = 2×) |
 | `tcp_block_port` | no | — | Port number 1–65535 |
 | `port_remap` | no | — | `"INT:INT"` format (e.g. `"4001:29538"`) |
 | `timeout_s` | no | 120 | Positive integer (seconds) |
