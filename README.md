@@ -21,7 +21,9 @@ Key results:
 - **v1/v2 integration gap**: v2 results ignored by DHT and relay (High)
 - **v1 oscillation**: 60% of runs flip under unreliable peers (High)
 - **ADF false positive**: 100% FPR for address-restricted NAT (Medium)
-- **QUIC resilience**: +1% TTC at 10% packet loss vs TCP's +147%
+- **Symmetric NAT silent failure**: no reachability signal produced (Medium)
+- **UDP black hole**: blocks QUIC dial-back on fresh servers (Medium)
+- **QUIC convergence advantage**: more stable under packet loss (observed, under investigation)
 
 ## Quick Start
 

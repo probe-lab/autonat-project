@@ -582,11 +582,20 @@ From 178 testbed runs:
 
 ### Transport Resilience
 
-QUIC is dramatically more resilient to packet loss than TCP. At 10%
-loss, TCP convergence nearly triples (+147%) while QUIC is essentially
-unaffected (+1%). QUIC handles retransmission at the transport layer,
-absorbing loss before AutoNAT observes it. Correctness (0% FNR/FPR)
-is unaffected in all conditions.
+QUIC shows dramatically better convergence stability under packet loss
+than TCP: at 10% loss, TCP TTC increases by +147% while QUIC increases
+by only +1%. Under latency, the gap is smaller but consistent (TCP
++432% vs QUIC +233% at 500ms). Correctness (0% FNR/FPR) is unaffected
+in all conditions for both transports.
+
+The magnitude of the QUIC advantage under packet loss (+1% vs +147%)
+is larger than expected and not fully explained. Contributing factors
+likely include TCP's longer retransmission timeout (1s initial RTO with
+exponential backoff) and the 3-way handshake exposing more packets to
+loss. However, a testbed artifact (e.g., `tc netem` treating new TCP
+connections differently from existing UDP flows) cannot be ruled out.
+See [measurement-results.md](measurement-results.md) for full analysis
+and suggested verification tests.
 
 ### Convergence Heatmaps
 

@@ -117,9 +117,36 @@ architecture, see [testbed.md](testbed.md).
 **Observations:**
 - Correctness unaffected (0% FNR/FPR at all loss rates)
 - QUIC dramatically more loss-resilient: +1% at 10% loss vs TCP +147%
-- QUIC handles retransmission at transport layer
 - 1% loss has negligible impact on both transports
 - Symmetric NAT still NO SIGNAL at all loss rates
+
+**QUIC vs TCP gap — observed but not fully explained.** The +1% vs
++147% difference at 10% loss is much larger than expected from the
+transport differences alone. Both TCP and QUIC have retransmission,
+but the gap is ~147x under packet loss vs ~2x under latency (432%
+vs 233% at 500ms). Possible contributing factors:
+
+- **TCP RTO penalty**: Linux TCP initial retransmission timeout is 1s
+  with exponential backoff. A dropped SYN during the 3-way handshake
+  adds 1-3s per retry. QUIC implementations typically use shorter
+  initial timeouts (100-500ms).
+- **Handshake exposure**: TCP dial-back requires a new 3-way handshake
+  (SYN, SYN-ACK, ACK = 3 packets through the lossy path). QUIC's
+  1-RTT handshake exposes fewer packets to loss.
+- **Compound loss probability**: `tc netem` applies on both router
+  interfaces (bidirectional). For TCP, both the dial-back SYN and
+  SYN-ACK traverse the lossy path. At 10% per-direction, ~19% chance
+  at least one handshake packet is lost.
+- **Possible testbed artifact**: QUIC connections may partially reuse
+  existing UDP flows that receive different treatment from `tc netem`
+  than new TCP connections. Packet captures would be needed to verify
+  that TCP and QUIC packets are dropped at the same rate.
+
+**Suggested further tests:**
+- Capture packets on router during loss scenarios to verify equal drop rates
+- Test with loss on one direction only (isolate compound effect)
+- Test finer loss increments (2%, 3%, 4%, 7%) to find the TCP inflection point
+- Verify QUIC dial-back actually performs a new handshake (not reusing existing connection)
 
 ![Packet Loss Impact](../results/figures/04_packet_loss_impact.png)
 *Convergence time vs packet loss rate.*
