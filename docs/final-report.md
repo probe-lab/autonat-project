@@ -483,13 +483,18 @@ connection count or sybil identities. Even threshold=2 would require
 2 colluding IPs. See [#89](https://github.com/probe-lab/autonat-project/issues/89)
 for full security analysis and a proposed weighted-scoring alternative.
 
-**The silence also prevents detecting reachability.** A node behind
-symmetric NAT that gains reachability through port forwarding, DMZ, or
-UPnP will never discover it — AutoNAT v2 never runs, so it can't detect
-the change. The node stays in "unknown" permanently, never enters DHT
-server mode, even though peers could reach it. Our testbed confirmed
-this: the toggle scenario with symmetric NAT showed "NOT detected" for
-both adding and removing port forwarding.
+**The silence also prevents detecting reachability** for nodes without
+UPnP. A node behind symmetric NAT that gains reachability through
+static port forwarding will never discover it — AutoNAT v2 never runs,
+so it can't detect the change. Our testbed confirmed this: the toggle
+scenario with symmetric NAT showed "NOT detected."
+
+However, **UPnP-mapped addresses bypass the threshold entirely**. In
+go-libp2p, UPnP-discovered mappings enter the reachability tracker
+through `NATManager.GetMapping()` → `appendNATAddrs()` — a separate
+path from the `ObservedAddrManager`. This means nodes with UPnP-capable
+routers should still get probed even behind symmetric NAT. This has not
+been verified in the testbed yet (see [#90](https://github.com/probe-lab/autonat-project/issues/90)).
 
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
