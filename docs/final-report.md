@@ -102,7 +102,7 @@ Helia uses v1 only).
 |---|---------|----------|----------|
 | 1 | [v1/v2 reachability gap](#finding-1-v1v2-reachability-gap) | go-libp2p | High |
 | 2 | [v1 oscillation → DHT oscillation](#finding-2-v1-oscillation--dht-oscillation) | go-libp2p | High |
-| 3 | [Rust: ephemeral port probing](#finding-3-rust-libp2p-ephemeral-port-probing) | Cross-impl | High |
+| 3 | [Rust: TCP port reuse and address translation](#finding-3-rust-libp2p-tcp-port-reuse-and-address-translation) | Cross-impl | Medium |
 | 4 | [ADF false positive (100% FPR)](#finding-4-address-restricted-nat-false-positive) | Protocol | Medium |
 | 5 | [Symmetric NAT silent failure](#finding-5-symmetric-nat-silent-failure) | Protocol | Medium |
 | 6 | [UDP black hole blocks QUIC dial-back](#finding-6-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
@@ -399,22 +399,42 @@ v2 reached reachable at 6s and **never changed**. v1 oscillated.
 
 **Full analysis:** [v1-vs-v2-performance.md](v1-vs-v2-performance.md)
 
-### Finding 3: rust-libp2p Ephemeral Port Probing
+### Finding 3: rust-libp2p TCP Port Reuse and Address Translation
 
-**Category:** Cross-implementation | **Severity:** High
+**Category:** Cross-implementation | **Severity:** Medium
 
-The rust-libp2p autonat v2 client probes observed connection addresses
-(ephemeral source ports from identify) instead of listen addresses. Every
-probe targets a port nothing listens on → 100% false negative rate.
+rust-libp2p's AutoNAT v2 **works correctly** when the application
+ensures TCP listeners are ready before dialing peers. Our initial
+testing showed 100% false negatives, but investigation revealed a
+startup timing issue in our testbed client, not a protocol bug.
 
-**Root cause:** rust-libp2p has no equivalent of go-libp2p's
-`ObservedAddrManager` ([manager.go#L24](https://github.com/libp2p/go-libp2p/blob/master/p2p/host/observedaddrs/manager.go#L24),
-`ActivationThresh=4`) that consolidates observed addresses by listen port.
+**Root cause:** TCP listener registration is asynchronous. When
+outbound connections start before the listener is registered, TCP port
+reuse fails silently (no listen port to bind to). The connection is
+marked `PortUse::Reuse` despite using an ephemeral port. The identify
+protocol trusts this metadata and skips address translation, emitting
+the raw ephemeral port as a candidate.
 
-**DHT impact:** The DHT uses `ExternalAddrConfirmed` for mode switching
-([behaviour.rs#L1169](https://github.com/libp2p/rust-libp2p/blob/master/protocols/kad/src/behaviour.rs#L1169)).
-Since no address is ever confirmed, the DHT stays in client mode
-permanently.
+**After fix (wait for listeners):** All NAT types produce correct
+results, matching go-libp2p:
+
+| NAT Type | Transport | Result |
+|----------|-----------|--------|
+| no-NAT | TCP+QUIC | REACHABLE |
+| full-cone | TCP | REACHABLE |
+| full-cone | QUIC | REACHABLE |
+| addr-restricted | TCP | REACHABLE (ADF FP, same as go) |
+| port-restricted | TCP+QUIC | UNREACHABLE |
+| symmetric | QUIC | UNREACHABLE |
+
+Port reuse disabled (`PortUse::New`) also works — the identify
+`_address_translation` correctly replaces the ephemeral port with the
+listen port.
+
+**Remaining upstream issue:** Unlike go-libp2p's `ObservedAddrManager`
+(which corrects ports independently of port reuse), rust-libp2p has no
+safety net when `PortUse::Reuse` is requested but fails silently. The
+identify translation only activates for explicit `PortUse::New`.
 
 **Production status:** Substrate/Polkadot does not enable autonat at all.
 

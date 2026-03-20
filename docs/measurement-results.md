@@ -268,20 +268,51 @@ Testing `ActivationThresh` behavior with 3 servers.
 
 ---
 
-## 8. Cross-Implementation (verified, not quantified)
+## 8. Cross-Implementation
 
 **Client implementations tested:** go-libp2p, rust-libp2p, js-libp2p
-**Server:** go-libp2p only (7 servers, no-NAT scenario)
+**Server:** go-libp2p only (3 servers)
 
-| Client | Connected | Spans emitted | AutoNAT result |
-|--------|-----------|---------------|----------------|
-| go-libp2p | 7/7 servers | started, connected(7), reachable_addrs_changed | REACHABLE (correct) |
-| rust-libp2p | 7/7 servers | started, connected(7), reachable_addrs_changed(7) | UNREACHABLE — ephemeral ports |
-| js-libp2p | 7/7 servers | started, connected(7), reachable_addrs_changed(2) | Peer update events (proxy) |
+### Initial results (before Rust timing fix)
 
-Quantitative cross-implementation comparison not meaningful due to
-fundamental issues in rust (wrong addresses probed) and js (proxy events).
-See implementation docs for code-level analysis.
+| Client | AutoNAT result | Issue |
+|--------|----------------|-------|
+| go-libp2p | REACHABLE | Correct |
+| rust-libp2p | UNREACHABLE (all TCP) | Ephemeral ports — timing bug |
+| js-libp2p | Peer update events | Proxy, not direct autonat |
+
+### Rust client after timing fix (wait for listeners)
+
+**Port reuse enabled (default):**
+
+| NAT Type | Transport | Candidate | Result | Matches go? |
+|----------|-----------|-----------|--------|-------------|
+| no-NAT | both | tcp/4001, udp/4001 | TCP+QUIC REACHABLE | Yes |
+| full-cone | tcp | tcp/4001 | REACHABLE | Yes |
+| full-cone | both | udp/4001 | QUIC REACHABLE | Yes |
+| addr-restricted | tcp | tcp/4001 | REACHABLE (FP) | Yes (ADF) |
+| port-restricted | tcp | tcp/4001 | UNREACHABLE | Yes |
+| port-restricted | both | udp/4001 | UNREACHABLE | Yes |
+| symmetric | both | udp/random | UNREACHABLE | Yes* |
+
+\* go-libp2p produces NO SIGNAL for symmetric (threshold blocks);
+rust-libp2p produces UNREACHABLE (no threshold filtering). Both are
+correct — rust is actually more informative.
+
+**Port reuse disabled (`--no-port-reuse` / `PortUse::New`):**
+
+| NAT Type | Transport | Candidate | Result |
+|----------|-----------|-----------|--------|
+| no-NAT | both | tcp/4001, udp/4001 | TCP+QUIC REACHABLE |
+
+When port reuse is explicitly disabled, identify's `_address_translation`
+correctly replaces the ephemeral port with the listen port. AutoNAT v2
+produces correct results.
+
+**Conclusion:** After fixing the startup timing, rust-libp2p matches
+go-libp2p's correctness across all NAT types. The remaining difference
+is the lack of an `ObservedAddrManager` safety net for cases where port
+reuse silently fails.
 
 ---
 
@@ -290,7 +321,7 @@ See implementation docs for code-level analysis.
 | Metric | Value | Source |
 |--------|-------|--------|
 | Total runs | 178 | All scenario files |
-| FNR (non-symmetric, non-rust) | **0%** | Baseline + latency + loss |
+| FNR (non-symmetric) | **0%** | Baseline + latency + loss + rust (fixed) |
 | FPR (non-ADF) | **0%** | Baseline + latency + loss |
 | ADF FPR | **100%** | 120 runs |
 | Baseline TTC (TCP) | ~6,000ms | Baseline matrix |

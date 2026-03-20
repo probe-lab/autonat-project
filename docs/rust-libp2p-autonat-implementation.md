@@ -291,6 +291,40 @@ safety net.
 relies on the address manager's `confirmObservedAddr()` path, which
 stores observed addresses without port correction.
 
+### Full Testbed Validation
+
+After fixing the listener timing, the Rust client was tested across
+all NAT types with port reuse enabled (default) and disabled
+(`--no-port-reuse`):
+
+**Port reuse enabled (default):**
+
+| NAT Type | Transport | Candidate Port | Result | Correct? |
+|----------|-----------|----------------|--------|----------|
+| no-NAT | both | tcp/4001, udp/4001 | TCP+QUIC REACHABLE | Yes |
+| full-cone | tcp | tcp/4001 | REACHABLE | Yes |
+| full-cone | both | udp/4001 | QUIC REACHABLE | Yes |
+| addr-restricted | tcp | tcp/4001 | REACHABLE (FP) | Same as go (ADF) |
+| port-restricted | tcp | tcp/4001 | UNREACHABLE | Yes |
+| port-restricted | both | udp/4001 | UNREACHABLE | Yes |
+| symmetric | both | udp/random | UNREACHABLE | Yes |
+
+**Port reuse disabled (`--no-port-reuse` / `PortUse::New`):**
+
+| NAT Type | Transport | Candidate Port | Result | Correct? |
+|----------|-----------|----------------|--------|----------|
+| no-NAT | both | tcp/4001, udp/4001 | TCP+QUIC REACHABLE | Yes |
+
+When port reuse is explicitly disabled, the identify `_address_translation`
+correctly replaces the ephemeral port with the listen port. Both TCP and
+QUIC produce correct candidates and REACHABLE results.
+
+**Conclusion:** rust-libp2p AutoNAT v2 produces correct results in all
+tested scenarios when either: (a) listeners are ready before dialing
+(port reuse works), or (b) `PortUse::New` is explicit (identify
+translation works). The only failure mode is when `PortUse::Reuse` is
+requested but fails silently — identify then skips translation.
+
 ### Comparison: Why go-libp2p Doesn't Have This Problem
 
 | Aspect | go-libp2p | rust-libp2p |
