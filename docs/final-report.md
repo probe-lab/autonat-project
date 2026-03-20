@@ -588,27 +588,16 @@ unaffected (+1%). QUIC handles retransmission at the transport layer,
 absorbing loss before AutoNAT observes it. Correctness (0% FNR/FPR)
 is unaffected in all conditions.
 
-![Packet Loss Impact](../results/figures/04_packet_loss_impact.png)
-*Figure 3: Packet loss impact — QUIC (right) flat lines vs TCP (left) steep increase at 10% loss.*
-
-![Latency Impact](../results/figures/03_latency_impact.png)
-*Figure 4: Latency impact — both transports scale linearly, QUIC more resilient.*
-
-### Overview Figures
-
-![v1 vs v2 Convergence](../results/figures/01_convergence.png)
-*Figure 5: v1 vs v2 time to first convergence event by NAT type. Symmetric NAT: v2 produces no event.*
-
-![FNR/FPR Summary](../results/figures/07_fnr_fpr_summary.png)
-*Figure 6: False negative and false positive rates across all conditions.*
+### Convergence Heatmaps
 
 ![Convergence Heatmap TCP](../results/figures/08_convergence_heatmap_tcp.png)
-*Figure 7: Convergence time heatmap (TCP) across NAT types and network conditions.*
+*Figure 3: Convergence time heatmap (TCP) across NAT types and network conditions.*
 
 ![Convergence Heatmap QUIC](../results/figures/08_convergence_heatmap_quic.png)
-*Figure 8: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
+*Figure 4: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
 
-For complete per-scenario data, see [measurement-results.md](measurement-results.md).
+For complete per-scenario data and additional figures, see
+[measurement-results.md](measurement-results.md).
 
 ---
 
