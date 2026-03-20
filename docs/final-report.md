@@ -592,10 +592,10 @@ AutoNAT v2 exists as a library in all three libp2p implementations, but
 |---------|----------|---------------|----------------|
 | **Kubo** | Go | v1 + v2 (both active) | **Yes** — 0% FNR/FPR |
 | **Helia** | JS | v1 only (v2 exists but unused) | Untested in production |
-| **Substrate** | Rust | Disabled entirely | **No** — ephemeral port bug (Finding #3) |
+| **Substrate** | Rust | Disabled entirely | Works when properly configured (Finding #6) |
 
-**rust-libp2p v2** has a critical address selection bug (Finding #3)
-that produces 100% false negatives. This was likely never caught because
+**rust-libp2p v2** works correctly when TCP listeners are ready before
+dialing, but lacks a safety net when port reuse fails (Finding #6).
 Substrate — rust-libp2p's primary consumer — does not enable autonat at
 all. Avail disabled autonat v1 entirely in v1.13.2 after persistent
 "autonat-over-quic" errors — these were v1-specific issues, not related
@@ -658,7 +658,10 @@ likely include TCP's longer retransmission timeout (1s initial RTO with
 exponential backoff) and the 3-way handshake exposing more packets to
 loss. However, a testbed artifact (e.g., `tc netem` treating new TCP
 connections differently from existing UDP flows) cannot be ruled out.
-See [measurement-results.md](measurement-results.md) for full analysis
+**This observation requires further revision and confirmation** before
+drawing conclusions about transport choice for AutoNAT. See
+[#87](https://github.com/probe-lab/autonat-project/issues/87) and
+[measurement-results.md](measurement-results.md) for full analysis
 and suggested verification tests.
 
 ### Convergence Heatmaps
