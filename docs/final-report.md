@@ -13,14 +13,15 @@
 
 1. [Executive Summary](#executive-summary)
 2. [Background](#background)
-3. [Glossary](#glossary)
-4. [Testbed](#testbed)
-5. [Findings](#findings)
-6. [Key Metrics](#key-metrics)
-7. [Cross-Implementation Comparison](#cross-implementation-comparison)
-8. [Recommendations](#recommendations)
-9. [Future Work](#future-work)
+3. [Testbed](#testbed)
+4. [Findings](#findings)
+5. [Key Metrics](#key-metrics)
+6. [Cross-Implementation Comparison](#cross-implementation-comparison)
+7. [Recommendations](#recommendations)
+8. [Future Work](#future-work)
+9. [What v2 Got Right](#what-v2-got-right)
 10. [References](#references)
+11. [Glossary](#glossary)
 
 ---
 
@@ -235,26 +236,6 @@ does NOT evaluate:
 The key difference at step 2: STUN tests from multiple IPs, which
 distinguishes full-cone from address-restricted. AutoNAT v2 tests from
 the same IP the client already contacted, making these indistinguishable.
-
----
-
-## Glossary
-
-| Acronym | Full Name | Description |
-|---------|-----------|-------------|
-| **NAT** | Network Address Translation | Maps private IPs to public ones |
-| **AutoNAT** | Automatic NAT Detection | libp2p protocol for testing address reachability |
-| **EIM** | Endpoint-Independent Mapping | Same external port regardless of destination (cone NAT) |
-| **ADPM** | Address- and Port-Dependent Mapping | Different external port per destination (symmetric NAT) |
-| **EIF** | Endpoint-Independent Filtering | Allows inbound from any source (full-cone) |
-| **ADF** | Address-Dependent Filtering | Allows inbound only from previously contacted IPs (address-restricted) |
-| **APDF** | Address- and Port-Dependent Filtering | Allows inbound only from exact previously contacted IP:port (port-restricted) |
-| **DHT** | Distributed Hash Table | Kademlia-based peer discovery in libp2p |
-| **TTC** | Time-to-Confidence | Time from node start to stable reachability determination |
-| **TTU** | Time-to-Update | Time to detect a mid-session reachability change |
-| **FNR** | False Negative Rate | Fraction of reachable nodes incorrectly classified as unreachable |
-| **FPR** | False Positive Rate | Fraction of unreachable nodes incorrectly classified as reachable |
-| **DCUtR** | Direct Connection Upgrade through Relay | libp2p hole punching protocol |
 
 ---
 
@@ -780,3 +761,23 @@ symmetric) that the protocol doesn't handle.
 - [go-libp2p](https://github.com/libp2p/go-libp2p) · [rust-libp2p](https://github.com/libp2p/rust-libp2p) · [js-libp2p](https://github.com/libp2p/js-libp2p)
 - [Kubo](https://github.com/ipfs/kubo) · [Helia](https://github.com/ipfs/helia) · [Substrate](https://github.com/nickcen/polkadot-sdk)
 - [Nebula crawler](https://github.com/probe-lab/nebula) · [ants-watch](https://github.com/probe-lab/ants-watch)
+
+---
+
+## Glossary
+
+| Acronym | Full Name | Description |
+|---------|-----------|-------------|
+| **NAT** | Network Address Translation | Maps private IPs to public ones |
+| **AutoNAT** | Automatic NAT Detection | libp2p protocol for testing address reachability |
+| **EIM** | Endpoint-Independent Mapping | Same external port regardless of destination (cone NAT) |
+| **ADPM** | Address- and Port-Dependent Mapping | Different external port per destination (symmetric NAT) |
+| **EIF** | Endpoint-Independent Filtering | Allows inbound from any source (full-cone) |
+| **ADF** | Address-Dependent Filtering | Allows inbound only from previously contacted IPs (address-restricted) |
+| **APDF** | Address- and Port-Dependent Filtering | Allows inbound only from exact previously contacted IP:port (port-restricted) |
+| **DHT** | Distributed Hash Table | Kademlia-based peer discovery in libp2p |
+| **TTC** | Time-to-Confidence | Time from node start to stable reachability determination |
+| **TTU** | Time-to-Update | Time to detect a mid-session reachability change |
+| **FNR** | False Negative Rate | Fraction of reachable nodes incorrectly classified as unreachable |
+| **FPR** | False Positive Rate | Fraction of unreachable nodes incorrectly classified as reachable |
+| **DCUtR** | Direct Connection Upgrade through Relay | libp2p hole punching protocol |
