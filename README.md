@@ -84,7 +84,6 @@ for requirements.
 ```
 autonat/
 ├── docs/                    # Analysis and protocol documentation
-├── paper/                   # IEEE conference paper (LaTeX)
 ├── testbed/                 # Docker testbed and experiment runner
 │   ├── main.go              # go-libp2p node (server + client)
 │   ├── run.py               # YAML-driven experiment runner
