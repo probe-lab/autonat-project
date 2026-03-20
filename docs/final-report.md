@@ -368,6 +368,11 @@ reports Private — triggering unnecessary relay usage and DHT client mode.
 - DHT subscribes to v1: [subscriber_notifee.go#L30](https://github.com/libp2p/go-libp2p-kad-dht/blob/master/subscriber_notifee.go#L30)
 - `EvtHostReachableAddrsChanged` (v2) does NOT appear in go-libp2p-kad-dht
 
+**Cross-implementation status:**
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| Affected? | **Yes** — DHT/relay consume v1 only | No — DHT uses `ExternalAddrConfirmed` (v2 path) | No — DHT uses `self:peer:update` (address-level) |
+
 **Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md)
 
 ### Finding 2: v1 Oscillation → DHT Oscillation
@@ -397,6 +402,11 @@ v2 reached reachable at 6s and **never changed**. v1 oscillated.
 | Oscillation rate (5/7 unreliable) | 60% of runs | **0%** |
 | Stability after convergence | Flips on random peer failure | Stable (targetConfidence=3) |
 
+**Cross-implementation status:**
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| Affected? | **Yes** — sliding window oscillates | No — v1 not consumed | **Mitigated** — v1 uses monotonic counters + TTL (less oscillation-prone) |
+
 **Full analysis:** [v1-vs-v2-performance.md](v1-vs-v2-performance.md)
 
 ### Finding 3: Address-Restricted NAT False Positive
@@ -423,6 +433,13 @@ default to APDF). But no measurement data exists to quantify prevalence.
 
 ![Detection Correctness](../results/figures/05_detection_correctness.png)
 *Figure 2: Detection correctness heatmap — address-restricted reports reachable (false positive).*
+
+**Cross-implementation status:**
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| Affected? | **Yes** | **Yes** | **Yes** |
+
+Protocol-level issue — affects all implementations identically.
 
 **Full analysis:** [adf-false-positive.md](adf-false-positive.md)
 
@@ -461,6 +478,11 @@ confidence in the observed address — a single observation promotes it.
 
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
+**Cross-implementation status:**
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| Affected? | **Yes** — NO SIGNAL (threshold blocks) | **No** — no threshold, produces UNREACHABLE directly | Unknown (v2 not deployed) |
+
 See [measurement-results.md](measurement-results.md) for full TTU data.
 
 ### Finding 5: UDP Black Hole Detector Blocks QUIC Dial-Back
@@ -479,6 +501,11 @@ actively reports the address as unreachable.
 from [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)).
 
 **Source:** `dialerHost` shares counter at [config.go#L240](https://github.com/libp2p/go-libp2p/blob/master/config/config.go#L240). v1 fix disables it at [config.go#L712](https://github.com/libp2p/go-libp2p/blob/master/config/config.go#L712).
+
+**Cross-implementation status:**
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| Affected? | **Yes** — detector present, shared with dialerHost | **No** — no detector | **No** — no detector |
 
 **Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
 
@@ -514,6 +541,11 @@ Port reuse disabled (`PortUse::New`) also works — the identify
 **Remaining upstream issue:** Unlike go-libp2p's `ObservedAddrManager`
 (which corrects ports independently of port reuse), rust-libp2p has no
 safety net when `PortUse::Reuse` fails silently.
+
+**Cross-implementation status:**
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| Affected? | **No** — has `ObservedAddrManager` safety net | **Yes** — no safety net when port reuse fails | **Unknown** — Node.js lacks `SO_REUSEPORT`; no port reuse tested |
 
 **Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
 
