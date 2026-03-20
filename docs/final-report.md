@@ -513,7 +513,7 @@ directly. See [#89](https://github.com/probe-lab/autonat-project/issues/89).
 **Cross-implementation status:**
 | | go-libp2p | rust-libp2p | js-libp2p |
 |-|-----------|-------------|-----------|
-| Affected? | **Yes** — NO SIGNAL (threshold blocks, despite detecting symmetric NAT) | **No** — no threshold, produces UNREACHABLE directly | Unknown (v2 not deployed) |
+| Affected? | **Yes** — NO SIGNAL (threshold blocks, despite detecting symmetric NAT) | **No** — no threshold, produces UNREACHABLE directly | **TBC** — v2 package exists (`@libp2p/autonat-v2`) but not used by Helia or tested; our testbed JS client uses v1 |
 
 See [measurement-results.md](measurement-results.md) for full TTU data.
 
