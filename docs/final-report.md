@@ -493,10 +493,22 @@ both adding and removing port forwarding.
 
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
+
+**go-libp2p already detects symmetric NAT** — the `ObservedAddrManager`
+has a `getNATType()` function that classifies NAT as
+`EndpointDependent` when observed ports are inconsistent, and emits
+`EvtNATDeviceTypeChanged`. Testbed confirmed: with 7 servers and 60s
+observation, it correctly classifies cone NAT as `EndpointIndependent`.
+However, **nothing acts on this detection** — the event is emitted but
+no subsystem uses it to help AutoNAT or provide a reachability signal.
+The fix would be to wire `EndpointDependent` detection into either
+lowering the activation threshold or emitting an UNREACHABLE signal
+directly. See [#89](https://github.com/probe-lab/autonat-project/issues/89).
+
 **Cross-implementation status:**
 | | go-libp2p | rust-libp2p | js-libp2p |
 |-|-----------|-------------|-----------|
-| Affected? | **Yes** — NO SIGNAL (threshold blocks) | **No** — no threshold, produces UNREACHABLE directly | Unknown (v2 not deployed) |
+| Affected? | **Yes** — NO SIGNAL (threshold blocks, despite detecting symmetric NAT) | **No** — no threshold, produces UNREACHABLE directly | Unknown (v2 not deployed) |
 
 See [measurement-results.md](measurement-results.md) for full TTU data.
 
