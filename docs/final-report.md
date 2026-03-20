@@ -473,8 +473,23 @@ verification:
 | 1 | symmetric | **UNREACHABLE** (correct — v2 finally runs!) |
 
 With `ActivationThresh=1`, symmetric NAT nodes receive a correct
-UNREACHABLE determination instead of silence. The tradeoff is lower
-confidence in the observed address — a single observation promotes it.
+UNREACHABLE determination instead of silence. The security tradeoff is
+smaller than it appears: the `ObservedAddrManager` deduplicates by
+**observer IP** (not peer ID), the identify `ObservedAddr` field is
+**singular** (one address per response, set by the receiver from
+`conn.RemoteMultiaddr()`), and identify push **cannot override** it.
+A single attacker IP can only contribute 1 observation regardless of
+connection count or sybil identities. Even threshold=2 would require
+2 colluding IPs. See [#89](https://github.com/probe-lab/autonat-project/issues/89)
+for full security analysis and a proposed weighted-scoring alternative.
+
+**The silence also prevents detecting reachability.** A node behind
+symmetric NAT that gains reachability through port forwarding, DMZ, or
+UPnP will never discover it — AutoNAT v2 never runs, so it can't detect
+the change. The node stays in "unknown" permanently, never enters DHT
+server mode, even though peers could reach it. Our testbed confirmed
+this: the toggle scenario with symmetric NAT showed "NOT detected" for
+both adding and removing port forwarding.
 
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
