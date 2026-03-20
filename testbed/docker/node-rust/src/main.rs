@@ -45,6 +45,9 @@ struct Args {
 
     #[arg(long, default_value = "0")]
     obs_addr_thresh: u32,
+
+    #[arg(long, default_value = "false")]
+    no_port_reuse: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -322,9 +325,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("All {} listeners ready, connecting to peers...", ready_listeners);
 
+    if args.no_port_reuse {
+        eprintln!("Port reuse DISABLED (--no-port-reuse)");
+    }
+
     // Connect to peers from --peer-dir or --peers
     if let Some(ref peer_dir) = args.peer_dir {
-        connect_from_dir(&mut swarm, peer_dir, start_time, &jsonl_writer).await;
+        connect_from_dir(&mut swarm, peer_dir, start_time, &jsonl_writer, args.no_port_reuse).await;
     } else if let Some(ref peers_str) = args.peers {
         for addr_str in peers_str.split(',') {
             let addr_str = addr_str.trim();
@@ -516,6 +523,7 @@ async fn connect_from_dir(
     dir: &str,
     start_time: Instant,
     jsonl_writer: &Option<Mutex<JsonlWriter>>,
+    no_port_reuse: bool,
 ) {
     // Wait for addr files to appear
     let max_wait = std::time::Duration::from_secs(30);
@@ -584,9 +592,16 @@ async fn connect_from_dir(
 
     // Connect to each peer with all their addresses
     for (pid, addrs) in &peer_addrs {
-        let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(*pid)
-            .addresses(addrs.clone())
-            .build();
+        let dial_opts = if no_port_reuse {
+            libp2p::swarm::dial_opts::DialOpts::peer_id(*pid)
+                .addresses(addrs.clone())
+                .allocate_new_port()
+                .build()
+        } else {
+            libp2p::swarm::dial_opts::DialOpts::peer_id(*pid)
+                .addresses(addrs.clone())
+                .build()
+        };
         match swarm.dial(dial_opts) {
             Ok(()) => eprintln!("Dialing server {}", pid),
             Err(e) => {
