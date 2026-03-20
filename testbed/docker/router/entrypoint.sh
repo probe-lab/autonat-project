@@ -14,7 +14,7 @@ NAT_TYPE="${NAT_TYPE:-none}"
 
 # Network degradation options (for tc netem experiments)
 PACKET_LOSS="${PACKET_LOSS:-0}"
-LATENCY_MS="${LATENCY_MS:-0}"
+LATENCY_MS="${LATENCY_MS:-10}"
 
 # Selective TCP port blocking (e.g., TCP_BLOCK_PORT=4001 blocks outbound TCP to port 4001)
 TCP_BLOCK_PORT="${TCP_BLOCK_PORT:-}"

@@ -22,7 +22,7 @@
 #   NAT_TYPE       - none, full-cone, address-restricted, port-restricted, symmetric
 #   TRANSPORT        - tcp, quic, or both (default: both)
 #   PACKET_LOSS      - Packet loss percentage for tc netem (default: 0)
-#   LATENCY_MS       - Added latency in ms for tc netem (default: 0)
+#   LATENCY_MS       - Added latency in ms for tc netem (default: 10)
 #   TCP_BLOCK_PORT   - Block outbound TCP to this port (e.g., 4001)
 #   PORT_REMAP       - Remap source port (e.g., 4001:29538)
 #   MOCK_BEHAVIOR_N  - Behavior for mock-server-N (default: force-unreachable)
@@ -106,7 +106,7 @@ services:
     environment:
       - NAT_TYPE=${NAT_TYPE:-none}
       - PACKET_LOSS=${PACKET_LOSS:-0}
-      - LATENCY_MS=${LATENCY_MS:-0}
+      - LATENCY_MS=${LATENCY_MS:-10}
       - TCP_BLOCK_PORT=${TCP_BLOCK_PORT:-}
       - PORT_REMAP=${PORT_REMAP:-}
       - PORT_FORWARD=${PORT_FORWARD:-}

@@ -68,7 +68,7 @@ all combinations into individual scenarios (Cartesian product).
 | `timeout_s` | integer ≥ 1 | defaults | Per-run timeout override |
 | `runs` | integer ≥ 1 | defaults | Run count override |
 | `packet_loss` | integer 0–100 | 0 | Packet loss % via `tc netem` on router |
-| `latency_ms` | integer ≥ 0 | 0 | One-way added latency via `tc netem` (RTT = 2×) |
+| `latency_ms` | integer ≥ 0 | 10 | One-way added latency via `tc netem` (RTT = 2×) |
 | `tcp_block_port` | integer 1–65535 | — | Drop outbound TCP to this port |
 | `port_remap` | string `"INT:INT"` | — | Remap source port (e.g. `"4001:29538"`) |
 | `port_forward` | bool | — | Static DNAT from router public IP to client |

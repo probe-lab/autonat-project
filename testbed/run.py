@@ -343,7 +343,7 @@ class Scenario:
     transport: str = "both"
     server_count: str = "7"
     packet_loss: int = 0
-    latency_ms: int = 0
+    latency_ms: int = 10
     timeout_s: int = 120
     runs: int = 1
     name: str = ""
@@ -391,7 +391,7 @@ def parse_scenario(raw: dict, defaults: dict) -> Scenario:
         transport=d.get("transport", "both"),
         server_count=str(d.get("server_count", "7")),
         packet_loss=int(d.get("packet_loss", 0)),
-        latency_ms=int(d.get("latency_ms", 0)),
+        latency_ms=int(d.get("latency_ms", 10)),
         timeout_s=int(d.get("timeout_s", 120)),
         runs=int(d.get("runs", 1)),
         name=d.get("name", ""),

@@ -87,7 +87,7 @@ SCENARIOS=$(echo "$SCENARIOS" | jq --argjson dt "$DEFAULT_TIMEOUT" --argjson dr 
         timeout_s: (.timeout_s // $dt),
         runs: (.runs // $dr),
         packet_loss: (.packet_loss // 0),
-        latency_ms: (.latency_ms // 0),
+        latency_ms: (.latency_ms // 10),
         tcp_block_port: (.tcp_block_port // null),
         port_remap: (.port_remap // null),
         obs_addr_thresh: (.obs_addr_thresh // null),
