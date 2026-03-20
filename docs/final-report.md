@@ -76,7 +76,7 @@ non-edge-case NAT types, converges in ~6 seconds, and is resilient to
 high latency and packet loss (QUIC adds only +1% convergence time at 10%
 packet loss vs TCP's +147%).
 
-However, we identified **10 findings** that affect its real-world
+However, we identified **9 findings** that affect its real-world
 effectiveness — ranging from protocol-level design issues to
 implementation gaps and cross-implementation inconsistencies.
 
@@ -108,8 +108,7 @@ Helia uses v1 only).
 | 6 | [UDP black hole blocks QUIC dial-back](#finding-6-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
 | 7 | [JS: no reachability events](#finding-7-js-libp2p-no-reachability-events) | Cross-impl | Medium |
 | 8 | [No v2 production deployment outside Kubo](#finding-8-no-production-deployment-outside-kubo) | Cross-impl | Info |
-| 9 | [QUIC resilience to packet loss](#finding-9-quic-resilience-to-packet-loss) | Performance | Info |
-| 10 | [Threshold sensitivity and symmetric NAT fix](#finding-10-observed-address-threshold-and-symmetric-nat) | Performance | Info |
+| 9 | [Threshold sensitivity and symmetric NAT fix](#finding-9-observed-address-threshold-and-symmetric-nat) | Performance | Info |
 
 ---
 
@@ -532,30 +531,7 @@ AutoNAT v2 exists in three implementations but is battle-tested in only
 one. The issues found in rust (#3) and js (#7) may not have been caught
 because nobody runs them in production.
 
-### Finding 9: QUIC Resilience to Packet Loss
-
-**Category:** Performance | **Severity:** Info (positive finding)
-
-| Condition | TCP TTC increase | QUIC TTC increase |
-|-----------|-----------------|------------------|
-| 1% packet loss | +0% | +0% |
-| 5% packet loss | +17% | +4% |
-| 10% packet loss | **+147%** | **+1%** |
-| 200ms latency | +210% | +110% |
-| 500ms latency | +432% | +233% |
-
-QUIC handles retransmission at the transport layer, making AutoNAT v2
-significantly more reliable over lossy networks. Both transports maintain
-0% FNR/FPR even under degraded conditions — correctness is unaffected,
-only convergence time increases.
-
-![Packet Loss Impact](../results/figures/04_packet_loss_impact.png)
-*Figure 3: Packet loss impact — QUIC (right) flat lines vs TCP (left) steep increase at 10% loss.*
-
-![Latency Impact](../results/figures/03_latency_impact.png)
-*Figure 4: Latency impact — both transports scale linearly, QUIC more resilient.*
-
-### Finding 10: Observed Address Threshold and Symmetric NAT
+### Finding 9: Observed Address Threshold and Symmetric NAT
 
 **Category:** Performance | **Severity:** Info
 
@@ -601,21 +577,38 @@ From 178 testbed runs:
 | v2 oscillation rate | **0%** |
 | TTU: port forward added | ~30s |
 | TTU: port forward removed | ~69s |
-
-![v1 vs v2 Convergence](../results/figures/01_convergence.png)
-*Figure 6: v1 vs v2 time to first convergence event by NAT type. Symmetric NAT: v2 produces no event.*
-
-![FNR/FPR Summary](../results/figures/07_fnr_fpr_summary.png)
-*Figure 7: False negative and false positive rates across all conditions — 0% for v2 in all standard scenarios.*
-
-
-![Convergence Heatmap TCP](../results/figures/08_convergence_heatmap_tcp.png)
-*Figure 8: Convergence time heatmap (TCP) across NAT types and network conditions.*
-
-![Convergence Heatmap QUIC](../results/figures/08_convergence_heatmap_quic.png)
-*Figure 9: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
 | QUIC TTC increase at 10% loss | **+1%** |
 | TCP TTC increase at 10% loss | +147% |
+
+### Transport Resilience
+
+QUIC is dramatically more resilient to packet loss than TCP. At 10%
+loss, TCP convergence nearly triples (+147%) while QUIC is essentially
+unaffected (+1%). QUIC handles retransmission at the transport layer,
+absorbing loss before AutoNAT observes it. Correctness (0% FNR/FPR)
+is unaffected in all conditions.
+
+![Packet Loss Impact](../results/figures/04_packet_loss_impact.png)
+*Figure 3: Packet loss impact — QUIC (right) flat lines vs TCP (left) steep increase at 10% loss.*
+
+![Latency Impact](../results/figures/03_latency_impact.png)
+*Figure 4: Latency impact — both transports scale linearly, QUIC more resilient.*
+
+### Overview Figures
+
+![v1 vs v2 Convergence](../results/figures/01_convergence.png)
+*Figure 5: v1 vs v2 time to first convergence event by NAT type. Symmetric NAT: v2 produces no event.*
+
+![FNR/FPR Summary](../results/figures/07_fnr_fpr_summary.png)
+*Figure 6: False negative and false positive rates across all conditions.*
+
+![Convergence Heatmap TCP](../results/figures/08_convergence_heatmap_tcp.png)
+*Figure 7: Convergence time heatmap (TCP) across NAT types and network conditions.*
+
+![Convergence Heatmap QUIC](../results/figures/08_convergence_heatmap_quic.png)
+*Figure 8: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
+
+For complete per-scenario data, see [measurement-results.md](measurement-results.md).
 
 ---
 
@@ -747,7 +740,7 @@ symmetric) that the protocol doesn't handle.
 | [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md) | rust-libp2p analysis |
 | [js-libp2p-autonat-implementation.md](js-libp2p-autonat-implementation.md) | js-libp2p analysis |
 | [future-work-nat-monitoring.md](future-work-nat-monitoring.md) | NAT monitoring proposal |
-| [analysis-summary.md](../results/testbed/data/analysis-summary.md) | Quantitative metrics |
+| [measurement-results.md](measurement-results.md) | Complete testbed results (all 178 runs) |
 | [testbed.md](testbed.md) | Testbed architecture |
 | [scenario-schema.md](scenario-schema.md) | Scenario format reference |
 
