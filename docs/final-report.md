@@ -102,11 +102,11 @@ Helia uses v1 only).
 |---|---------|----------|----------|
 | 1 | [v1/v2 reachability gap](#finding-1-v1v2-reachability-gap) | go-libp2p | High |
 | 2 | [v1 oscillation → DHT oscillation](#finding-2-v1-oscillation--dht-oscillation) | go-libp2p | High |
-| 3 | [Rust: TCP port reuse and address translation](#finding-3-rust-libp2p-tcp-port-reuse-and-address-translation) | Cross-impl | Medium |
-| 4 | [ADF false positive (100% FPR)](#finding-4-address-restricted-nat-false-positive) | Protocol | Medium |
-| 5 | [Symmetric NAT silent failure](#finding-5-symmetric-nat-silent-failure) | Protocol | Medium |
-| 6 | [UDP black hole blocks QUIC dial-back](#finding-6-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
-| 7 | [v2 only functional in go-libp2p](#finding-7-v2-only-functional-in-go-libp2p) | Cross-impl | Info |
+| 3 | [ADF false positive (100% FPR)](#finding-3-address-restricted-nat-false-positive) | Protocol | Medium |
+| 4 | [Symmetric NAT silent failure](#finding-4-symmetric-nat-silent-failure) | Protocol | Medium |
+| 5 | [UDP black hole blocks QUIC dial-back](#finding-5-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
+| 6 | [Rust: TCP port reuse safety net](#finding-6-rust-libp2p-tcp-port-reuse-and-address-translation) | Cross-impl | Low |
+| 7 | [v2 adoption gap](#finding-7-v2-adoption-gap) | Cross-impl | Info |
 
 ---
 
@@ -399,48 +399,7 @@ v2 reached reachable at 6s and **never changed**. v1 oscillated.
 
 **Full analysis:** [v1-vs-v2-performance.md](v1-vs-v2-performance.md)
 
-### Finding 3: rust-libp2p TCP Port Reuse and Address Translation
-
-**Category:** Cross-implementation | **Severity:** Medium
-
-rust-libp2p's AutoNAT v2 **works correctly** when the application
-ensures TCP listeners are ready before dialing peers. Our initial
-testing showed 100% false negatives, but investigation revealed a
-startup timing issue in our testbed client, not a protocol bug.
-
-**Root cause:** TCP listener registration is asynchronous. When
-outbound connections start before the listener is registered, TCP port
-reuse fails silently (no listen port to bind to). The connection is
-marked `PortUse::Reuse` despite using an ephemeral port. The identify
-protocol trusts this metadata and skips address translation, emitting
-the raw ephemeral port as a candidate.
-
-**After fix (wait for listeners):** All NAT types produce correct
-results, matching go-libp2p:
-
-| NAT Type | Transport | Result |
-|----------|-----------|--------|
-| no-NAT | TCP+QUIC | REACHABLE |
-| full-cone | TCP | REACHABLE |
-| full-cone | QUIC | REACHABLE |
-| addr-restricted | TCP | REACHABLE (ADF FP, same as go) |
-| port-restricted | TCP+QUIC | UNREACHABLE |
-| symmetric | QUIC | UNREACHABLE |
-
-Port reuse disabled (`PortUse::New`) also works — the identify
-`_address_translation` correctly replaces the ephemeral port with the
-listen port.
-
-**Remaining upstream issue:** Unlike go-libp2p's `ObservedAddrManager`
-(which corrects ports independently of port reuse), rust-libp2p has no
-safety net when `PortUse::Reuse` is requested but fails silently. The
-identify translation only activates for explicit `PortUse::New`.
-
-**Production status:** Substrate/Polkadot does not enable autonat at all.
-
-**Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
-
-### Finding 4: Address-Restricted NAT False Positive
+### Finding 3: Address-Restricted NAT False Positive
 
 **Category:** Protocol design | **Severity:** Medium
 
@@ -467,7 +426,7 @@ default to APDF). But no measurement data exists to quantify prevalence.
 
 **Full analysis:** [adf-false-positive.md](adf-false-positive.md)
 
-### Finding 5: Symmetric NAT Silent Failure
+### Finding 4: Symmetric NAT Silent Failure
 
 **Category:** Protocol design | **Severity:** Medium
 
@@ -504,7 +463,7 @@ confidence in the observed address — a single observation promotes it.
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
 See [measurement-results.md](measurement-results.md) for full TTU data.
 
-### Finding 6: UDP Black Hole Detector Blocks QUIC Dial-Back
+### Finding 5: UDP Black Hole Detector Blocks QUIC Dial-Back
 
 **Category:** go-libp2p | **Severity:** Medium
 
@@ -523,7 +482,42 @@ from [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)).
 
 **Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
 
-### Finding 7: v2 Only Functional in go-libp2p
+### Finding 6: rust-libp2p TCP Port Reuse Safety Net
+
+**Category:** Cross-implementation | **Severity:** Low
+
+rust-libp2p's AutoNAT v2 **works correctly** when the application
+ensures TCP listeners are ready before dialing peers. Our initial
+testing showed 100% false negatives, but investigation revealed a
+startup timing issue in our testbed client, not a protocol bug.
+
+**Root cause:** TCP listener registration is asynchronous. When
+outbound connections start before the listener is registered, TCP port
+reuse fails silently. The connection is marked `PortUse::Reuse` despite
+using an ephemeral port, so the identify protocol skips address
+translation.
+
+**After fix (wait for listeners):** All NAT types produce correct
+results, matching go-libp2p:
+
+| NAT Type | Transport | Result |
+|----------|-----------|--------|
+| no-NAT | TCP+QUIC | REACHABLE |
+| full-cone | TCP+QUIC | REACHABLE |
+| addr-restricted | TCP | REACHABLE (ADF FP, same as go) |
+| port-restricted | TCP+QUIC | UNREACHABLE |
+| symmetric | QUIC | UNREACHABLE |
+
+Port reuse disabled (`PortUse::New`) also works — the identify
+`_address_translation` correctly replaces the ephemeral port.
+
+**Remaining upstream issue:** Unlike go-libp2p's `ObservedAddrManager`
+(which corrects ports independently of port reuse), rust-libp2p has no
+safety net when `PortUse::Reuse` fails silently.
+
+**Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
+
+### Finding 7: v2 Adoption Gap
 
 **Category:** Cross-implementation | **Severity:** Info
 
