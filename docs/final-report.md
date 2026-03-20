@@ -527,19 +527,39 @@ v1's sliding window. See [js-libp2p analysis](js-libp2p-autonat-implementation.m
 
 **Full analysis:** [js-libp2p-autonat-implementation.md](js-libp2p-autonat-implementation.md)
 
-### Finding 8: No Production Deployment Outside Kubo
+### Finding 8: AutoNAT v2 Adoption Gap
 
 **Category:** Cross-implementation | **Severity:** Info
 
-| Project | Language | AutoNAT version | Source |
-|---------|----------|----------------|--------|
-| **Kubo** | Go | v1 + v2 (both) | [nat.go#L29](https://github.com/ipfs/kubo/blob/master/core/node/libp2p/nat.go#L29) |
-| **Helia** | JS | **v1 only** | [package.json](https://github.com/ipfs/helia/blob/main/packages/helia/package.json) (`@libp2p/autonat ^3.0.5`) |
-| **Substrate** | Rust | **None** | Cargo.toml: no `autonat` feature |
+AutoNAT v2 exists as a library in all three libp2p implementations, but
+**only go-libp2p deploys it in production** (via Kubo). The other two
+major consumers either disabled autonat entirely or never adopted v2:
 
-AutoNAT v2 exists in three implementations but is battle-tested in only
-one. The issues found in rust (#3) and js (#7) may not have been caught
-because nobody runs them in production.
+| Project | Language | AutoNAT status | Consequence |
+|---------|----------|---------------|-------------|
+| **Kubo** | Go | v1 + v2 (both active) | Only production v2 deployment |
+| **Helia** | JS | **v1 only** (v2 package exists but unused) | v1's monotonic counters avoid oscillation; no v2 benefits |
+| **Substrate** | Rust | **Disabled entirely** | Operators must set `--external-address` manually |
+
+This matters because:
+
+- **rust-libp2p v2 has a critical bug** (Finding #3: ephemeral port
+  probing) that was likely never caught because no consumer uses it.
+  Avail's decision to disable autonat entirely (#58 was likely related to v1 issues and the UDP
+  black hole problem, but even if they upgraded to v2, the ephemeral
+  port bug would produce 100% false negatives.
+
+- **js-libp2p v2 emits no events** (Finding #7), but this hasn't been
+  noticed because Helia uses v1. Notably, js-libp2p's v1 implementation
+  is **better designed** than go-libp2p's v1 for oscillation resistance
+  — its monotonic counters with TTL-based re-evaluation avoid the
+  sliding window problem that causes go-libp2p v1 to oscillate
+  (Finding #2).
+
+- **The protocol itself works** when the implementation is correct
+  (go-libp2p: 0% FNR/FPR). The cross-implementation issues are in the
+  surrounding infrastructure (address management, event model), not in
+  the AutoNAT v2 protocol logic.
 
 ---
 
