@@ -307,7 +307,7 @@ configurable parameters:
 | `nat_type` | none, full-cone, address-restricted, port-restricted, symmetric | NAT filtering/mapping behavior |
 | `transport` | tcp, quic, both | Client transport protocol |
 | `server_count` | 3, 5, 7 | Number of AutoNAT servers |
-| `latency_ms` | 0, 200, 500 | One-way added latency via `tc netem` (RTT = 2×) |
+| `latency_ms` | 10, 200, 500 | One-way added latency via `tc netem` (RTT = 2×) |
 | `packet_loss` | 0, 1, 5, 10 (%) | Packet loss via `tc netem` on router |
 | `port_forward` | true/false | Static DNAT from router public IP to client |
 | `upnp` | true/false | miniupnpd on router for dynamic port mapping |
@@ -519,8 +519,11 @@ AutoNAT v2 exists as a library in all three libp2p implementations, but
 **rust-libp2p v2** has a critical address selection bug (Finding #3)
 that produces 100% false negatives. This was likely never caught because
 Substrate — rust-libp2p's primary consumer — does not enable autonat at
-all. Avail disabled autonat entirely in v1.13.2 after persistent errors;
-even upgrading to v2 would not help due to the ephemeral port bug.
+all. Avail disabled autonat v1 entirely in v1.13.2 after persistent
+"autonat-over-quic" errors — these were v1-specific issues, not related
+to the v2 ephemeral port bug. However, upgrading to v2 would not have
+helped either, since the ephemeral port bug would produce 100% false
+negatives.
 
 **js-libp2p v2** exists (`@libp2p/autonat-v2` package) but no project
 has adopted it. Helia uses v1 only. The v2 package lacks direct
