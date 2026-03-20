@@ -18,8 +18,7 @@ cross-implementation comparison, and recommendations.
 
 Key results:
 - **0% FNR / 0% FPR** for standard NAT types with ~6s convergence
-- **v1/v2 integration gap**: v2 results ignored by DHT and relay (High)
-- **v1 oscillation**: 60% of runs flip under unreliable peers (High)
+- **v1/v2 gap and DHT oscillation**: v2 results ignored by DHT and relay; v1 still controls and oscillates in 60% of runs with unreliable peers (High)
 - **ADF false positive**: 100% FPR for address-restricted NAT (Medium)
 - **Symmetric NAT silent failure**: no reachability signal produced (Medium)
 - **UDP black hole**: blocks QUIC dial-back on fresh servers (Medium)
