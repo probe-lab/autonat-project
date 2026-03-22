@@ -358,7 +358,7 @@ def fig_detection_correctness():
     for nat in nat_order:
         row = []
         for t in transports:
-            fname = f"{nat}-{t}-7.json"
+            fname = f"{nat}-{t}-7-lat10.json"
             path = os.path.join(result_dir, fname)
             if not os.path.exists(path):
                 row.append(None)
@@ -381,7 +381,7 @@ def fig_detection_correctness():
         matrix.append(row)
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    mat = np.array(matrix)
+    mat = np.array(matrix, dtype=float)
     cmap = plt.cm.RdYlGn
     im = ax.imshow(mat, cmap=cmap, vmin=0, vmax=1, aspect="auto")
 
