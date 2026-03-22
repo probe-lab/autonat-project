@@ -76,22 +76,22 @@ scenarios:
         extract: elapsed_ms
         label: time_to_first_reachable_ms
 
+  # Symmetric NAT + port forwarding: v2 never runs because no observed
+  # address reaches ActivationThresh (each connection uses a different
+  # external port). Port forwarding creates a DNAT rule but the client
+  # never discovers its forwarded address via Identify. This is a known
+  # limitation (Finding #5). Assertion: NOT reachable.
+
   - name: port-forward-symmetric-tcp
     nat_type: symmetric
     transport: tcp
     port_forward: true
     measurements: [false_negative_rate, time_to_confidence]
     assertions:
-      - type: has_event
+      - type: no_event
         event: reachable_addrs_changed
         filter: {not_empty: reachable}
-        message: "TCP should be reachable with port forwarding through symmetric NAT"
-      - type: info
-        event: reachable_addrs_changed
-        filter: {not_empty: reachable}
-        select: first
-        extract: elapsed_ms
-        label: time_to_first_reachable_ms
+        message: "Symmetric NAT: port forwarding does NOT help — v2 never runs (Finding #5)"
 
   - name: port-forward-symmetric-quic
     nat_type: symmetric
@@ -99,16 +99,10 @@ scenarios:
     port_forward: true
     measurements: [false_negative_rate, time_to_confidence]
     assertions:
-      - type: has_event
+      - type: no_event
         event: reachable_addrs_changed
         filter: {not_empty: reachable}
-        message: "QUIC should be reachable with port forwarding through symmetric NAT"
-      - type: info
-        event: reachable_addrs_changed
-        filter: {not_empty: reachable}
-        select: first
-        extract: elapsed_ms
-        label: time_to_first_reachable_ms
+        message: "Symmetric NAT: port forwarding does NOT help — v2 never runs (Finding #5)"
 
   - name: port-forward-symmetric-both
     nat_type: symmetric
@@ -116,16 +110,10 @@ scenarios:
     port_forward: true
     measurements: [false_negative_rate, time_to_confidence]
     assertions:
-      - type: has_event
+      - type: no_event
         event: reachable_addrs_changed
         filter: {not_empty: reachable}
-        message: "Should be reachable with port forwarding through symmetric NAT"
-      - type: info
-        event: reachable_addrs_changed
-        filter: {not_empty: reachable}
-        select: first
-        extract: elapsed_ms
-        label: time_to_first_reachable_ms
+        message: "Symmetric NAT: port forwarding does NOT help — v2 never runs (Finding #5)"
 
   - name: port-forward-address-restricted-both
     nat_type: address-restricted

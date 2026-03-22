@@ -232,7 +232,7 @@ if [[ -n "$UPNP" && "$UPNP" != "false" ]]; then
     mkdir -p /etc/miniupnpd
     cat > /etc/miniupnpd/miniupnpd.conf <<EOF
 ext_ifname=$PUB_IFACE
-listening_ip=$ROUTER_PRIVATE_IP/24
+listening_ip=$PRIV_IFACE
 port=2189
 system_uptime=yes
 secure_mode=no
@@ -240,7 +240,7 @@ enable_natpmp=yes
 clean_ruleset_interval=600
 EOF
     miniupnpd -f /etc/miniupnpd/miniupnpd.conf
-    echo "miniupnpd started"
+    echo "miniupnpd started on $PRIV_IFACE (ext: $PUB_IFACE)"
 fi
 
 # Apply network degradation if configured.
