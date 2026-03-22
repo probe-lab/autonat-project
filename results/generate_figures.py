@@ -240,7 +240,7 @@ def fig_latency_impact():
         return
 
     nat_order = ["full-cone", "address-restricted", "port-restricted", "symmetric"]
-    latencies = [0, 200, 500]
+    latencies = [10, 200, 500]
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
 
@@ -249,9 +249,9 @@ def fig_latency_impact():
         for nat in nat_order:
             vals = []
             for lat in latencies:
-                if lat == 0:
-                    # baseline
-                    fname = f"{nat}-{transport}-7.json"
+                if lat == 10:
+                    # baseline (10ms default latency)
+                    fname = f"{nat}-{transport}-7-lat10.json"
                     path = os.path.join(baseline_dir, fname)
                 else:
                     fname = f"{nat}-{transport}-7-lat{lat}.json"
@@ -304,10 +304,10 @@ def fig_packet_loss_impact():
             vals = []
             for loss in losses:
                 if loss == 0:
-                    fname = f"{nat}-{transport}-7.json"
+                    fname = f"{nat}-{transport}-7-lat10.json"
                     path = os.path.join(baseline_dir, fname)
                 else:
-                    fname = f"{nat}-{transport}-7-loss{loss}.json"
+                    fname = f"{nat}-{transport}-7-loss{loss}-lat10.json"
                     path = os.path.join(result_dir, fname)
 
                 if os.path.exists(path):
@@ -759,10 +759,10 @@ def fig_convergence_heatmap():
             for cond_name, cond_dir, cond_filter in conditions:
                 if not cond_filter:
                     # baseline
-                    fname = f"{nat}-{transport}-7.json"
+                    fname = f"{nat}-{transport}-7-lat10.json"
                     path = os.path.join(cond_dir, fname)
                 elif "loss_pct" in cond_filter:
-                    fname = f"{nat}-{transport}-7-loss{cond_filter['loss_pct']}.json"
+                    fname = f"{nat}-{transport}-7-loss{cond_filter['loss_pct']}-lat10.json"
                     path = os.path.join(cond_dir, fname)
                 else:
                     fname = f"{nat}-{transport}-7-lat{cond_filter['latency_ms']}.json"
