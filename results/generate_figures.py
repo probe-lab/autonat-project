@@ -157,7 +157,7 @@ def parse_scenario_name(fname):
 # ---------- Figure 1: v1 vs v2 convergence by NAT type (TCP + QUIC) ----------
 
 def fig_convergence():
-    result_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    result_dir = os.path.join(TESTBED, "full-matrix-20260320T090848Z")
     if not os.path.exists(result_dir):
         print("  Skipping: no baseline data")
         return
@@ -233,8 +233,8 @@ def fig_convergence():
 # ---------- Figure 3: Latency impact on convergence ----------
 
 def fig_latency_impact():
-    result_dir = os.path.join(TESTBED, "high-latency-20260313T085635Z")
-    baseline_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    result_dir = os.path.join(TESTBED, "high-latency-20260320T134357Z")
+    baseline_dir = os.path.join(TESTBED, "full-matrix-20260320T090848Z")
     if not os.path.exists(result_dir):
         print("  Skipping: no latency data")
         return
@@ -287,8 +287,8 @@ def fig_latency_impact():
 # ---------- Figure 4: Packet loss impact on convergence ----------
 
 def fig_packet_loss_impact():
-    result_dir = os.path.join(TESTBED, "packet-loss-20260313T093822Z")
-    baseline_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    result_dir = os.path.join(TESTBED, "packet-loss-20260320T140258Z")
+    baseline_dir = os.path.join(TESTBED, "full-matrix-20260320T090848Z")
     if not os.path.exists(result_dir):
         print("  Skipping: no packet-loss data")
         return
@@ -340,7 +340,7 @@ def fig_packet_loss_impact():
 
 def fig_detection_correctness():
     """Heatmap: expected vs actual reachability across all scenarios."""
-    result_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    result_dir = os.path.join(TESTBED, "full-matrix-20260320T090848Z")
     if not os.path.exists(result_dir):
         return
 
@@ -649,12 +649,12 @@ def fig_fnr_fpr_summary():
     reachable_nats = {"none", "full-cone"}
 
     experiments = {
-        "Baseline\n(local)": os.path.join(TESTBED, "full-matrix-20260312T223319Z"),
-        "High Latency\n200ms": os.path.join(TESTBED, "high-latency-20260313T085635Z"),
-        "High Latency\n500ms": os.path.join(TESTBED, "high-latency-20260313T085635Z"),
-        "Packet Loss\n1%": os.path.join(TESTBED, "packet-loss-20260313T093822Z"),
-        "Packet Loss\n5%": os.path.join(TESTBED, "packet-loss-20260313T093822Z"),
-        "Packet Loss\n10%": os.path.join(TESTBED, "packet-loss-20260313T093822Z"),
+        "Baseline\n(local)": os.path.join(TESTBED, "full-matrix-20260320T090848Z"),
+        "High Latency\n200ms": os.path.join(TESTBED, "high-latency-20260320T134357Z"),
+        "High Latency\n500ms": os.path.join(TESTBED, "high-latency-20260320T134357Z"),
+        "Packet Loss\n1%": os.path.join(TESTBED, "packet-loss-20260320T140258Z"),
+        "Packet Loss\n5%": os.path.join(TESTBED, "packet-loss-20260320T140258Z"),
+        "Packet Loss\n10%": os.path.join(TESTBED, "packet-loss-20260320T140258Z"),
     }
 
     v1_fnr_vals, v1_fpr_vals = [], []
@@ -737,9 +737,9 @@ def fig_fnr_fpr_summary():
 
 def fig_convergence_heatmap():
     """Heatmap of convergence times: NAT type × condition."""
-    baseline_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
-    latency_dir = os.path.join(TESTBED, "high-latency-20260313T085635Z")
-    loss_dir = os.path.join(TESTBED, "packet-loss-20260313T093822Z")
+    baseline_dir = os.path.join(TESTBED, "full-matrix-20260320T090848Z")
+    latency_dir = os.path.join(TESTBED, "high-latency-20260320T134357Z")
+    loss_dir = os.path.join(TESTBED, "packet-loss-20260320T140258Z")
 
     nat_order = ["full-cone", "address-restricted", "port-restricted", "symmetric"]
     conditions = [
@@ -1023,7 +1023,7 @@ def _probe_byte_estimate(attrs, events):
 
 def fig_protocol_overhead():
     """Two-panel figure: byte overhead per session (left) and probe count (right)."""
-    result_dir = os.path.join(TESTBED, "full-matrix-20260312T223319Z")
+    result_dir = os.path.join(TESTBED, "full-matrix-20260320T090848Z")
     if not os.path.exists(result_dir):
         print("  Skipping: no baseline data")
         return
