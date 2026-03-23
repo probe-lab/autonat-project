@@ -360,9 +360,15 @@ def fig_detection_correctness():
         row = []
         label_row = []
         for t in transports:
-            fname = f"{nat}-{t}-7-lat10.json"
-            path = os.path.join(result_dir, fname)
-            if not os.path.exists(path):
+            # Try server counts 7, 5, 3 — use first available
+            path = None
+            for sc in [7, 5, 3]:
+                fname = f"{nat}-{t}-{sc}-lat10.json"
+                candidate = os.path.join(result_dir, fname)
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
+            if path is None:
                 row.append(0.5)
                 label_row.append("NO DATA")
                 continue
