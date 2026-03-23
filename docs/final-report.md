@@ -513,7 +513,7 @@ directly. See [#89](https://github.com/probe-lab/autonat-project/issues/89).
 **Cross-implementation status:**
 | | go-libp2p | rust-libp2p | js-libp2p |
 |-|-----------|-------------|-----------|
-| Affected? | **Yes** — NO SIGNAL (threshold blocks, despite detecting symmetric NAT) | **No** — no threshold, produces UNREACHABLE directly | **No** (expected) — v2 has no threshold, would produce UNREACHABLE like rust; not tested in testbed |
+| Affected? | **Yes** — NO SIGNAL (threshold blocks, despite detecting symmetric NAT) | **No** — no threshold, produces UNREACHABLE directly | **Yes** — NO SIGNAL (tested: no public address promoted despite no threshold; different root cause than go) |
 
 See [measurement-results.md](measurement-results.md) for full TTU data.
 
