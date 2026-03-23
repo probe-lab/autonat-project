@@ -352,16 +352,25 @@ def fig_detection_correctness():
     transports = ["tcp", "quic"]
 
     # Build matrix: rows=NAT, cols=transport, value=detected reachability
+    # Values: 1.0=correct, 0.0=wrong, 0.5=unknown/not triggered
     matrix = []
-    labels = []
+    cell_labels = []
 
     for nat in nat_order:
         row = []
+        label_row = []
         for t in transports:
-            fname = f"{nat}-{t}-7-lat10.json"
-            path = os.path.join(result_dir, fname)
-            if not os.path.exists(path):
-                row.append(None)
+            # Try server counts 7, 5, 3 — use first available
+            path = None
+            for sc in [7, 5, 3]:
+                fname = f"{nat}-{t}-{sc}-lat10.json"
+                candidate = os.path.join(result_dir, fname)
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
+            if path is None:
+                row.append(0.5)
+                label_row.append("NO DATA")
                 continue
             spans = parse_spans(path)
             v1_evts, v2_evts = get_convergence(spans)
@@ -371,17 +380,26 @@ def fig_detection_correctness():
             if v1_evts:
                 detected = v1_evts[0]["reachability"]
 
-            expected = "public" if nat in reachable_nats else "private"
+            expected_reachable = nat in reachable_nats
+            expected = "public" if expected_reachable else "private"
             if detected is None:
                 row.append(0.5)  # unknown
+                label_row.append("NOT TRIGGERED\n(v2 never ran)")
             elif detected == expected:
                 row.append(1.0)  # correct
+                label_row.append(f"CORRECT\n({'reachable' if expected_reachable else 'unreachable'})")
             else:
                 row.append(0.0)  # wrong
+                if not expected_reachable:
+                    label_row.append("FALSE POSITIVE\n(detected reachable)")
+                else:
+                    label_row.append("FALSE NEGATIVE\n(detected unreachable)")
         matrix.append(row)
+        cell_labels.append(label_row)
 
     fig, ax = plt.subplots(figsize=(6, 5))
     mat = np.array(matrix, dtype=float)
+    # Custom colormap: red(0)=wrong, yellow(0.5)=unknown, green(1)=correct
     cmap = plt.cm.RdYlGn
     im = ax.imshow(mat, cmap=cmap, vmin=0, vmax=1, aspect="auto")
 
@@ -391,22 +409,11 @@ def fig_detection_correctness():
     ax.set_yticklabels([NAT_LABELS.get(n, n) for n in nat_order])
 
     # Annotate cells
-    for i, nat in enumerate(nat_order):
-        expected_reachable = nat in reachable_nats
-        expected = "reachable" if expected_reachable else "unreachable"
-        for j, t in enumerate(transports):
+    for i in range(len(nat_order)):
+        for j in range(len(transports)):
             val = mat[i, j]
-            if val == 1.0:
-                txt = f"CORRECT\n({expected})"
-            elif val == 0.0:
-                if not expected_reachable:
-                    txt = f"FALSE POSITIVE\n(detected reachable)"
-                else:
-                    txt = f"FALSE NEGATIVE\n(detected unreachable)"
-            else:
-                txt = "NO EVENT"
             color = "black" if val > 0.3 else "white"
-            ax.text(j, i, txt, ha="center", va="center", fontsize=8, color=color)
+            ax.text(j, i, cell_labels[i][j], ha="center", va="center", fontsize=8, color=color)
 
     ax.set_title("Detection Correctness: v1 Reachability (Local Testbed)")
     fig.tight_layout()
