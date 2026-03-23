@@ -3,7 +3,7 @@ import { tcp } from '@libp2p/tcp'
 import { noise } from '@libp2p/noise'
 import { yamux } from '@libp2p/yamux'
 import { identify } from '@libp2p/identify'
-import { autoNAT } from '@libp2p/autonat'
+import { autoNATv2 } from '@libp2p/autonat-v2'
 import { multiaddr } from '@multiformats/multiaddr'
 import { peerIdFromString } from '@libp2p/peer-id'
 import * as fs from 'node:fs'
@@ -156,7 +156,7 @@ async function main(): Promise<void> {
     streamMuxers: [yamux()],
     services: {
       identify: identify(),
-      autonat: autoNAT(),
+      autonat: autoNATv2(),
     },
     connectionManager: {
       maxConnections: 100,
