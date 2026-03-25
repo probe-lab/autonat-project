@@ -656,29 +656,37 @@ From 178 testbed runs:
 | v2 oscillation rate | **0%** |
 | TTU: port forward added | ~30s |
 | TTU: port forward removed | ~69s |
-| QUIC TTC increase at 10% loss | **+1%** |
-| TCP TTC increase at 10% loss | +147% |
 | UPnP TTC (local, port-restricted NAT) | ~22s (v2) vs ~106s (v1) |
 
-### Transport Resilience
+### Transport Resilience Under Packet Loss
 
-QUIC shows dramatically better convergence stability under packet loss
-than TCP: at 10% loss, TCP TTC increases by +147% while QUIC increases
-by only +1%. Under latency, the gap is smaller but consistent (TCP
-+432% vs QUIC +233% at 500ms). Correctness (0% FNR/FPR) is unaffected
-in all conditions for both transports.
+Both TCP and QUIC maintain **0% FNR/FPR** under all tested packet loss
+conditions — correctness is unaffected. Convergence time increases for
+both transports as loss increases, but **neither shows a consistent
+advantage over the other**.
 
-The magnitude of the QUIC advantage under packet loss (+1% vs +147%)
-is larger than expected and not fully explained. Contributing factors
-likely include TCP's longer retransmission timeout (1s initial RTO with
-exponential backoff) and the 3-way handshake exposing more packets to
-loss. However, a testbed artifact (e.g., `tc netem` treating new TCP
-connections differently from existing UDP flows) cannot be ruled out.
-**This observation requires further revision and confirmation** before
-drawing conclusions about transport choice for AutoNAT. See
-[#87](https://github.com/probe-lab/autonat-project/issues/87) and
-[measurement-results.md](measurement-results.md) for full analysis
-and suggested verification tests.
+Initial single-run data suggested a dramatic QUIC advantage (+1% vs
++147% TTC increase at 10% loss). A follow-up investigation with 3 runs
+per scenario across 7 loss levels (2-15%) showed this was a
+**statistical artifact from insufficient runs**:
+
+| Loss % | TCP avg (ms) | QUIC avg (ms) | Difference |
+|--------|-------------|---------------|------------|
+| 2% | 5,010 | 5,010 | None |
+| 5% | 8,052 | 9,408 | QUIC slightly slower |
+| 10% | 10,014 | 13,757 | QUIC slower |
+| 15% | 16,813 | 9,734 | TCP slower |
+
+Convergence times are quantized to ~5s intervals (the probe refresh
+cycle). A lost probe retries on the next cycle regardless of transport.
+The variance is dominated by **which probe cycle gets hit by loss**,
+not by transport-level retransmission differences. With only 3 runs
+per scenario, neither transport shows a statistically significant
+advantage. Under latency (no loss), the gap is also within noise
+(TCP +432% vs QUIC +233% at 500ms, single runs).
+
+See [#87](https://github.com/probe-lab/autonat-project/issues/87)
+for full investigation data.
 
 ### Convergence Heatmaps
 
