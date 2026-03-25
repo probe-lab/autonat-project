@@ -205,32 +205,154 @@ not probe them — correctly reporting the node as unreachable.
 | Scenario | TCP (v2) | QUIC (v2) | v1 global flag | Notes |
 |----------|----------|-----------|---------------|-------|
 | No UPnP, EIM router | ✗ | ✓ | public → private (decay) | QUIC reachable; v1 decays from DHT churn |
-| No UPnP, APDF router | ✗ | ✗ | private | Port-restricted, no inbound |
+| No UPnP, APDF router | ✗ | ✗ | private | Port-restricted, no inbound (confirmed locally) |
 | UPnP, same port | ✓ | ✓ | public | Full reachability, v1 agrees |
-| UPnP, port remapped | ✓ | ✓ | **private (stuck)** | v2 correct; v1 never recovers (Issue #3) |
+| UPnP, port remapped | ✓ | ✓ | **private → public (84s delay)** | v2 at ~22s; v1 needs >100s to catch up |
 | UPnP, router ignores | ✗ | ✗ | private | No mapping created |
 | CGNAT | ✗ | ✗ | private | Filtered by IsPublicAddr() |
 
-## Testbed Reproduction
+## Local Test Results: Home Router (2026-03-24)
 
-The testbed supports UPnP emulation via `miniupnpd` on the router container.
-Set `upnp: true` in a scenario to enable it:
+### Setup
 
-```yaml
-scenarios:
-  - name: port-restricted-upnp
-    nat_type: port-restricted
-    transport: both
-    server_count: 7
-    upnp: true
-    assertions:
-      - type: has_event
-        event: reachable_addrs_changed
-        filter: {not_empty: reachable}
-        message: "Node should be reachable via UPnP mapping"
-```
+- **Router:** Residential ISP router (port-restricted NAT)
+- **Public IP:** 79.153.197.240 / 79.153.199.168 (dynamic, varies across sessions)
+- **Private IP:** 192.168.1.38
+- **Binary:** go-libp2p testbed node with `NATPortMap()` enabled, bootstrapping to IPFS DHT
+- **Duration:** 80–300s per run
+- **6 test runs** with varying UPnP/port-forwarding configurations
 
-Run with:
-```bash
-./testbed/run.sh testbed/scenarios/your-scenario.yaml
-```
+### Results Summary
+
+| Trace | UPnP enabled | IPv4 QUIC bound | v2 result | v1 result |
+|-------|-------------|-----------------|-----------|-----------|
+| `go-upnp-debug` | Yes | Yes | **REACHABLE** (ports 27232, 57302, 57021, 38700) | PRIVATE (stuck) |
+| `go-no-forwards` | Yes | Yes | **REACHABLE** (ports 35155, 17249, 51955, etc.) | PRIVATE → PUBLIC at 106s |
+| `go-no-kubo` | No | Yes | UNREACHABLE (port 4001 only) | PRIVATE |
+| `go-5min` | No | Yes | UNREACHABLE (port 4001 only) | PRIVATE |
+| `go-upnp-working` | Yes | **No (port conflict)** | UNREACHABLE (all ephemeral) | PRIVATE |
+
+### UPnP Working: `go-upnp-debug` (representative)
+
+When UPnP is enabled and transports bind correctly, the NAT manager creates
+explicit DNAT mappings on the router. These UPnP-mapped ports are reachable
+from any source (unlike NAT-assigned ephemeral ports).
+
+**Timeline:**
+
+| Time | Event |
+|------|-------|
+| 5s | Identify observes `/tcp/4001` and `/udp/4001/quic-v1` (port reuse) |
+| 15s | UPnP-mapped addresses appear: `/tcp/27232`, `/udp/27232/quic-v1` |
+| 16s | v2: port 4001 UNREACHABLE (no UPnP mapping for listen port) |
+| 17s | v1: PRIVATE (based on port 4001 failure) |
+| ~22s | v2: port 27232 REACHABLE (both TCP and QUIC) |
+| ~31s | v2: port 57302 also REACHABLE |
+| ~38s | Accumulates 5 reachable addresses across TCP and QUIC |
+
+**Probe results:**
+
+| Address | Result | Source |
+|---------|--------|--------|
+| `/tcp/4001` | UNREACHABLE | Identify observation (listen port) |
+| `/udp/4001/quic-v1` | UNREACHABLE | Identify observation (listen port) |
+| `/tcp/27232` | **REACHABLE** | UPnP mapping |
+| `/udp/27232/quic-v1` | **REACHABLE** | UPnP mapping |
+| `/tcp/57302` | **REACHABLE** | UPnP mapping |
+| `/udp/57302/quic-v1` | **REACHABLE** | UPnP mapping |
+
+The router assigns **random external ports** for UPnP mappings (not the requested
+port 4001). This is the port-remapping scenario from Case 3 above.
+
+### UPnP Disabled: `go-no-kubo` (representative)
+
+Without UPnP, only identify-observed addresses are available. With the home
+router's port-restricted NAT, all addresses are UNREACHABLE:
+
+- Port 4001 (listen port via port reuse): NAT blocks inbound from non-contacted peers
+- No UPnP-mapped addresses available
+
+### Port Conflict: `go-upnp-working` (anomalous)
+
+In this run, IPv4 QUIC failed to bind (UDP port 4001 held by a previous process).
+Only IPv6 QUIC was available (`/ip6/::1/udp/4001/quic-v1`). Without IPv4 listeners
+for both TCP and QUIC, UPnP had limited transport surface. Additionally, identify-
+observed ephemeral ports rotated every ~20s (33080 → 13165 → 25282 → ...) — all
+UNREACHABLE due to port-restricted filtering.
+
+### v1/v2 Gap with UPnP
+
+The tests confirm the v1/v2 gap (Finding #1) in a real-world UPnP scenario:
+
+| Trace | v2 first REACHABLE | v1 first PUBLIC | Gap |
+|-------|-------------------|-----------------|-----|
+| `go-upnp-debug` (80s run) | 22s | never | v1 stuck in PRIVATE |
+| `go-no-forwards` (120s run) | 22s | 106s | **84s gap** |
+
+v2 confirms reachability via UPnP-mapped ports at ~22s. v1 independently detects
+reachability only after ~106s (if the run is long enough). In shorter runs, v1
+stays PRIVATE — triggering unnecessary relay activation and DHT client mode even
+though the node is reachable.
+
+---
+
+## Docker Testbed UPnP: Why It Doesn't Work
+
+The testbed includes UPnP emulation via `miniupnpd` on the router container
+(`upnp: true` in scenario YAML). However, UPnP scenarios **fail consistently**
+(0/20 for port-restricted and symmetric NAT). Three independent root causes
+prevent UPnP from working in the Docker testbed:
+
+### 1. SSDP multicast not forwarded in Docker bridge networks
+
+UPnP discovery uses SSDP — a multicast protocol where clients send M-SEARCH
+to `239.255.255.250:1900`. Docker bridge networks **do not forward multicast
+traffic** between containers. The client's SSDP discovery packets never reach
+the router container's miniupnpd.
+
+This is a fundamental Docker bridge limitation. Workarounds (macvlan, ipvlan
+network drivers) would require significant testbed restructuring.
+
+### 2. iptables-legacy vs nftables backend mismatch
+
+The router container's NAT rules use `iptables` (nft backend, the default on
+modern Alpine/Debian). miniupnpd creates its port forwarding rules using
+`iptables-legacy` (the older backend). The two backends maintain **separate
+rule tables** — miniupnpd's DNAT rules are invisible to the nft-based rules,
+so port mappings created by miniupnpd have no effect on actual packet
+forwarding.
+
+Even when miniupnpd accepts a UPnP AddPortMapping SOAP request, the resulting
+iptables-legacy rule doesn't interact with the nft NAT rules that control
+actual traffic flow.
+
+### 3. NAT-PMP unicast should work but doesn't
+
+go-libp2p's `go-nat` library supports NAT-PMP (unicast to gateway, no
+multicast needed). miniupnpd is configured with `enable_natpmp=yes`.
+Direct UDP testing confirms the router responds to NAT-PMP requests on
+port 5351. However, `go-nat`'s discovery sequence (SSDP first, then
+NAT-PMP fallback) does not reliably reach the NAT-PMP path — possibly
+due to timeout handling or the SSDP failure mode not triggering the
+fallback correctly. This needs further investigation.
+
+### Testbed Results
+
+| Scenario | Result | Explanation |
+|----------|--------|-------------|
+| `upnp-port-restricted` | 0/20 FAIL | UPnP not discovered |
+| `upnp-symmetric` | 0/20 FAIL | UPnP not discovered |
+| `upnp-address-restricted` | 20/20 PASS | **False positive** — ADF allows dial-back from contacted IPs regardless of UPnP |
+
+### Conclusion
+
+UPnP cannot be reliably tested in the Docker testbed due to Docker bridge
+networking limitations and iptables backend conflicts. **Local testing on a
+real home router** (see [above](#local-test-results-home-router-2026-03-24))
+provides the necessary evidence for UPnP behavior. Static port forwarding
+(`port_forward: true`) works correctly in the testbed for all NAT types
+(140/140 PASS) and tests the same AutoNAT detection path that UPnP uses
+once a mapping exists.
+
+See [#92](https://github.com/probe-lab/autonat-project/issues/92) for
+tracking.
