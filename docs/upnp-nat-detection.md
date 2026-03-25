@@ -296,30 +296,63 @@ though the node is reachable.
 
 ---
 
-## Testbed Reproduction
+## Docker Testbed UPnP: Why It Doesn't Work
 
-The testbed supports UPnP emulation via `miniupnpd` on the router container.
-Set `upnp: true` in a scenario to enable it:
+The testbed includes UPnP emulation via `miniupnpd` on the router container
+(`upnp: true` in scenario YAML). However, UPnP scenarios **fail consistently**
+(0/20 for port-restricted and symmetric NAT). Three independent root causes
+prevent UPnP from working in the Docker testbed:
 
-```yaml
-scenarios:
-  - name: port-restricted-upnp
-    nat_type: port-restricted
-    transport: both
-    server_count: 7
-    upnp: true
-    assertions:
-      - type: has_event
-        event: reachable_addrs_changed
-        filter: {not_empty: reachable}
-        message: "Node should be reachable via UPnP mapping"
-```
+### 1. SSDP multicast not forwarded in Docker bridge networks
 
-Run with:
-```bash
-./testbed/run.sh testbed/scenarios/your-scenario.yaml
-```
+UPnP discovery uses SSDP — a multicast protocol where clients send M-SEARCH
+to `239.255.255.250:1900`. Docker bridge networks **do not forward multicast
+traffic** between containers. The client's SSDP discovery packets never reach
+the router container's miniupnpd.
 
-**Note:** Docker testbed UPnP is currently broken (#92) due to iptables-legacy vs
-nftables backend mismatch causing miniupnpd SOAP 501 errors. SSDP multicast
-discovery also doesn't work reliably across Docker bridge networks.
+This is a fundamental Docker bridge limitation. Workarounds (macvlan, ipvlan
+network drivers) would require significant testbed restructuring.
+
+### 2. iptables-legacy vs nftables backend mismatch
+
+The router container's NAT rules use `iptables` (nft backend, the default on
+modern Alpine/Debian). miniupnpd creates its port forwarding rules using
+`iptables-legacy` (the older backend). The two backends maintain **separate
+rule tables** — miniupnpd's DNAT rules are invisible to the nft-based rules,
+so port mappings created by miniupnpd have no effect on actual packet
+forwarding.
+
+Even when miniupnpd accepts a UPnP AddPortMapping SOAP request, the resulting
+iptables-legacy rule doesn't interact with the nft NAT rules that control
+actual traffic flow.
+
+### 3. NAT-PMP unicast should work but doesn't
+
+go-libp2p's `go-nat` library supports NAT-PMP (unicast to gateway, no
+multicast needed). miniupnpd is configured with `enable_natpmp=yes`.
+Direct UDP testing confirms the router responds to NAT-PMP requests on
+port 5351. However, `go-nat`'s discovery sequence (SSDP first, then
+NAT-PMP fallback) does not reliably reach the NAT-PMP path — possibly
+due to timeout handling or the SSDP failure mode not triggering the
+fallback correctly. This needs further investigation.
+
+### Testbed Results
+
+| Scenario | Result | Explanation |
+|----------|--------|-------------|
+| `upnp-port-restricted` | 0/20 FAIL | UPnP not discovered |
+| `upnp-symmetric` | 0/20 FAIL | UPnP not discovered |
+| `upnp-address-restricted` | 20/20 PASS | **False positive** — ADF allows dial-back from contacted IPs regardless of UPnP |
+
+### Conclusion
+
+UPnP cannot be reliably tested in the Docker testbed due to Docker bridge
+networking limitations and iptables backend conflicts. **Local testing on a
+real home router** (see [above](#local-test-results-home-router-2026-03-24))
+provides the necessary evidence for UPnP behavior. Static port forwarding
+(`port_forward: true`) works correctly in the testbed for all NAT types
+(140/140 PASS) and tests the same AutoNAT detection path that UPnP uses
+once a mapping exists.
+
+See [#92](https://github.com/probe-lab/autonat-project/issues/92) for
+tracking.
