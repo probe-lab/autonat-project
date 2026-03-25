@@ -399,8 +399,11 @@ Best trace (`v1v2-gap-fullcone-tcp`, run 2):
 
 v2 reached reachable at 6s and **never changed**. v1 oscillated.
 
+![v1/v2 Gap Timeline](../results/figures/09_v1_v2_gap_timeline.png)
+*Figure 1: v1/v2 event timeline — v2 converges once and stays stable while v1 flips between Public and Private.*
+
 ![v1/v2 Gap Comparison](../results/figures/10_v1_v2_gap_comparison.png)
-*Figure 1: v1 oscillates (red segments) while v2 stays stable (green). Three unreliable server ratios.*
+*Figure 2: v1 oscillates (red segments) while v2 stays stable (green). Three unreliable server ratios.*
 
 | Metric | v1 | v2 |
 |--------|----|----|
@@ -437,7 +440,7 @@ design guarantees this outcome for ADF NATs.
 default to APDF). But no measurement data exists to quantify prevalence.
 
 ![Detection Correctness](../results/figures/05_detection_correctness.png)
-*Figure 2: Detection correctness heatmap — address-restricted reports reachable (false positive).*
+*Figure 3: Detection correctness heatmap — address-restricted reports reachable (false positive), symmetric shows no signal.*
 
 **Cross-implementation status:**
 | | go-libp2p | rust-libp2p | js-libp2p |
@@ -660,6 +663,12 @@ From 178 testbed runs:
 | TCP TTC increase at 10% loss | +147% |
 | UPnP TTC (local, port-restricted NAT) | ~22s (v2) vs ~106s (v1) |
 
+![v1 vs v2 Convergence](../results/figures/01_convergence.png)
+*Figure 4: Time to first convergence event by NAT type — v1 and v2 across TCP and QUIC.*
+
+![FNR/FPR Summary](../results/figures/07_fnr_fpr_summary.png)
+*Figure 5: False Negative and False Positive rates across all conditions — 0% for v2 in standard scenarios.*
+
 ### Transport Resilience
 
 QUIC shows dramatically better convergence stability under packet loss
@@ -680,13 +689,29 @@ drawing conclusions about transport choice for AutoNAT. See
 [measurement-results.md](measurement-results.md) for full analysis
 and suggested verification tests.
 
+![Latency Impact](../results/figures/03_latency_impact.png)
+*Figure 6: Convergence time under increasing network latency — both transports scale linearly, QUIC more resilient.*
+
+![Packet Loss Impact](../results/figures/04_packet_loss_impact.png)
+*Figure 7: Convergence time under packet loss — QUIC flat vs TCP steep increase at 10% loss.*
+
 ### Convergence Heatmaps
 
 ![Convergence Heatmap TCP](../results/figures/08_convergence_heatmap_tcp.png)
-*Figure 3: Convergence time heatmap (TCP) across NAT types and network conditions.*
+*Figure 8: Convergence time heatmap (TCP) across NAT types and network conditions.*
 
 ![Convergence Heatmap QUIC](../results/figures/08_convergence_heatmap_quic.png)
-*Figure 4: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
+*Figure 9: Convergence time heatmap (QUIC) — more resilient to degradation than TCP.*
+
+### Time-to-Update
+
+![Time to Update](../results/figures/06_time_to_update.png)
+*Figure 10: Time-to-Update timeline — 30s to detect added port forward, 69s to detect removal.*
+
+### Protocol Overhead
+
+![Protocol Overhead](../results/figures/11_protocol_overhead.png)
+*Figure 11: Estimated byte overhead and probe count per session by NAT type.*
 
 For complete per-scenario data and additional figures, see
 [measurement-results.md](measurement-results.md).
