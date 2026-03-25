@@ -1,0 +1,18 @@
+name: packet-loss-investigation
+description: >
+  Fine-grained packet loss sweep to find TCP inflection point and
+  compare TCP vs QUIC convergence behavior under loss.
+  Issue #87: QUIC vs TCP convergence gap under packet loss.
+
+  Run with tcpdump on router for packet capture analysis:
+    docker exec <router> tcpdump -i any -w /tmp/capture.pcap -s 128 port 4001
+
+defaults:
+  timeout_s: 180
+  runs: 3
+  server_count: 7
+
+matrix:
+  nat_type: [port-restricted]
+  transport: [tcp, quic]
+  packet_loss: [2, 3, 4, 5, 7, 10, 15]
