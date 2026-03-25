@@ -425,8 +425,8 @@ def fig_detection_correctness():
 # ---------- Figure 6: Time-to-Update timeline ----------
 
 def fig_time_to_update():
-    ttu_dir = os.path.join(TESTBED, "time-to-update-20260312T214716Z")
-    toggles_file = os.path.join(ttu_dir, "ttu-port-restricted-tcp.toggles.json")
+    ttu_dir = os.path.join(TESTBED, "reachable-forwarded-20260322T160744Z")
+    toggles_file = os.path.join(ttu_dir, "toggle-port-restricted-tcp-lat10.toggles.json")
     if not os.path.exists(toggles_file):
         print("  Skipping: no TTU data")
         return
