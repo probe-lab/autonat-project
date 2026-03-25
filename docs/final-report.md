@@ -373,6 +373,11 @@ reports Private — triggering unnecessary relay usage and DHT client mode.
 |-|-----------|-------------|-----------|
 | Affected? | **Yes** — DHT/relay consume v1 only | No — DHT uses `ExternalAddrConfirmed` (v2 path) | No — DHT uses `self:peer:update` (address-level) |
 
+**Local UPnP confirmation:** On a residential router with UPnP enabled,
+v2 detected reachability at ~22s while v1 took ~106s independently — an
+84s gap during which DHT/relay would operate in PRIVATE mode despite the
+node being reachable. See [upnp-nat-detection.md](upnp-nat-detection.md#v1v2-gap-with-upnp).
+
 **Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md)
 
 ### Finding 2: v1 Oscillation → DHT Oscillation
@@ -493,8 +498,18 @@ However, **UPnP-mapped addresses bypass the threshold entirely**. In
 go-libp2p, UPnP-discovered mappings enter the reachability tracker
 through `NATManager.GetMapping()` → `appendNATAddrs()` — a separate
 path from the `ObservedAddrManager`. This means nodes with UPnP-capable
-routers should still get probed even behind symmetric NAT. This has not
-been verified in the testbed yet (see [#90](https://github.com/probe-lab/autonat-project/issues/90)).
+routers should still get probed even behind symmetric NAT.
+
+**Local testing confirmed this:** On a residential router with UPnP
+enabled (port-restricted NAT), AutoNAT v2 correctly detected
+reachability through UPnP-mapped ports within ~22s — the router assigns
+random external ports (e.g., 27232, 35155) via UPnP DNAT rules, and v2
+probes them successfully for both TCP and QUIC. Without UPnP, all
+addresses are correctly reported UNREACHABLE. v1 takes ~106s to
+independently confirm reachability (84s gap vs v2), and in shorter runs
+stays PRIVATE — another instance of Finding #1. See
+[upnp-nat-detection.md](upnp-nat-detection.md#local-test-results-home-router-2026-03-24)
+for full trace analysis.
 
 **Toggle scenarios:** Port forwarding changes are NOT detected for
 symmetric NAT (autonat v2 never runs, so it can't detect changes).
@@ -643,6 +658,7 @@ From 178 testbed runs:
 | TTU: port forward removed | ~69s |
 | QUIC TTC increase at 10% loss | **+1%** |
 | TCP TTC increase at 10% loss | +147% |
+| UPnP TTC (local, port-restricted NAT) | ~22s (v2) vs ~106s (v1) |
 
 ### Transport Resilience
 
@@ -786,6 +802,8 @@ Despite the issues found, AutoNAT v2 is a substantial improvement:
 - **Confidence system** (targetConfidence=3) provides stable results
 - **0% FNR/FPR** in all non-edge-case scenarios
 - **~6s convergence** — fast enough for interactive use
+- **UPnP integration** — correctly detects reachability through UPnP-mapped
+  ports (both TCP and QUIC), confirmed on a real home router
 
 The protocol design is sound. The issues are in how implementations
 integrate v2 into their broader subsystems, and in edge cases (ADF,
@@ -807,6 +825,7 @@ symmetric) that the protocol doesn't handle.
 | [go-libp2p-autonat-implementation.md](go-libp2p-autonat-implementation.md) | go-libp2p internals |
 | [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md) | rust-libp2p analysis |
 | [js-libp2p-autonat-implementation.md](js-libp2p-autonat-implementation.md) | js-libp2p analysis |
+| [upnp-nat-detection.md](upnp-nat-detection.md) | UPnP interaction with AutoNAT v2 + local test results |
 | [future-work-nat-monitoring.md](future-work-nat-monitoring.md) | NAT monitoring proposal |
 | [measurement-results.md](measurement-results.md) | Complete testbed results (all 178 runs) |
 | [testbed.md](testbed.md) | Testbed architecture |
