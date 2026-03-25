@@ -296,12 +296,20 @@ though the node is reachable.
 
 ---
 
-## Docker Testbed UPnP: Why It Doesn't Work
+## Docker Testbed UPnP: Testbed-Only Failure
 
 The testbed includes UPnP emulation via `miniupnpd` on the router container
 (`upnp: true` in scenario YAML). However, UPnP scenarios **fail consistently**
-(0/20 for port-restricted and symmetric NAT). Three independent root causes
-prevent UPnP from working in the Docker testbed:
+(0/20 for port-restricted and symmetric NAT).
+
+**This is a testbed infrastructure issue, not a go-libp2p bug.** Local testing
+on a real home router confirms that go-libp2p's UPnP/NAT-PMP implementation
+works correctly end-to-end (see [local test results](#local-test-results-home-router-2026-03-24)).
+The NAT manager discovers the gateway, creates port mappings, and AutoNAT v2
+confirms reachability through them — both TCP and QUIC.
+
+The Docker testbed fails due to two root causes in how we emulate UPnP with
+`miniupnpd` inside Docker containers:
 
 ### 1. SSDP multicast not forwarded in Docker bridge networks
 
@@ -322,37 +330,41 @@ rule tables** — miniupnpd's DNAT rules are invisible to the nft-based rules,
 so port mappings created by miniupnpd have no effect on actual packet
 forwarding.
 
-Even when miniupnpd accepts a UPnP AddPortMapping SOAP request, the resulting
-iptables-legacy rule doesn't interact with the nft NAT rules that control
-actual traffic flow.
+This affects both UPnP and NAT-PMP: even when miniupnpd successfully accepts
+a port mapping request (via either protocol), the resulting iptables-legacy
+DNAT rule doesn't interact with the nft NAT rules that control actual traffic.
 
-### 3. NAT-PMP unicast should work but doesn't
-
-go-libp2p's `go-nat` library supports NAT-PMP (unicast to gateway, no
-multicast needed). miniupnpd is configured with `enable_natpmp=yes`.
-Direct UDP testing confirms the router responds to NAT-PMP requests on
-port 5351. However, `go-nat`'s discovery sequence (SSDP first, then
-NAT-PMP fallback) does not reliably reach the NAT-PMP path — possibly
-due to timeout handling or the SSDP failure mode not triggering the
-fallback correctly. This needs further investigation.
+**Note on NAT-PMP:** go-libp2p's NAT manager runs UPnP (SSDP) and NAT-PMP
+discovery **in parallel** (not as a fallback) within a shared 10-second
+timeout. NAT-PMP uses unicast to the gateway IP (no multicast needed), so
+Docker bridge networking does not block it — miniupnpd responds correctly to
+NAT-PMP requests on port 5351. However, even when NAT-PMP discovery succeeds
+and a mapping is created, the mapping is written to iptables-legacy — the
+same backend mismatch as UPnP. The mapping exists but has no effect on
+traffic forwarding.
 
 ### Testbed Results
 
 | Scenario | Result | Explanation |
 |----------|--------|-------------|
-| `upnp-port-restricted` | 0/20 FAIL | UPnP not discovered |
-| `upnp-symmetric` | 0/20 FAIL | UPnP not discovered |
+| `upnp-port-restricted` | 0/20 FAIL | Mapping created but ineffective (iptables backend mismatch) |
+| `upnp-symmetric` | 0/20 FAIL | Mapping created but ineffective (iptables backend mismatch) |
 | `upnp-address-restricted` | 20/20 PASS | **False positive** — ADF allows dial-back from contacted IPs regardless of UPnP |
 
 ### Conclusion
 
-UPnP cannot be reliably tested in the Docker testbed due to Docker bridge
-networking limitations and iptables backend conflicts. **Local testing on a
-real home router** (see [above](#local-test-results-home-router-2026-03-24))
-provides the necessary evidence for UPnP behavior. Static port forwarding
-(`port_forward: true`) works correctly in the testbed for all NAT types
-(140/140 PASS) and tests the same AutoNAT detection path that UPnP uses
-once a mapping exists.
+**go-libp2p's UPnP/NAT-PMP implementation is correct.** The failure is
+entirely in our Docker testbed's UPnP emulation:
+
+- On a real home router: UPnP works, port mappings are created, AutoNAT v2
+  confirms reachability (~22s for both TCP and QUIC)
+- In Docker testbed: miniupnpd's iptables-legacy rules don't interact with
+  the nftables-based NAT rules that control actual traffic
+
+Static port forwarding (`port_forward: true`) works correctly in the testbed
+for all NAT types (140/140 PASS) and tests the same AutoNAT detection path
+that UPnP uses once a mapping exists — confirming that the issue is solely
+in the UPnP emulation layer, not in AutoNAT's handling of mapped addresses.
 
 See [#92](https://github.com/probe-lab/autonat-project/issues/92) for
 tracking.
