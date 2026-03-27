@@ -103,7 +103,7 @@ Helia uses v1 only).
 | 1 | [v1/v2 reachability gap](#finding-1-v1v2-reachability-gap) | go-libp2p | High |
 | 2 | [v1 oscillation → DHT oscillation](#finding-2-v1-oscillation--dht-oscillation) | go-libp2p | High |
 | 3 | [ADF false positive (100% FPR)](#finding-3-address-restricted-nat-false-positive) | Protocol | Medium |
-| 4 | [Symmetric NAT silent failure](#finding-4-symmetric-nat-silent-failure) | Protocol | Medium |
+| 4 | [Symmetric NAT missing signal](#finding-4-symmetric-nat-missing-signal) | Cross-impl | Medium |
 | 5 | [UDP black hole blocks QUIC dial-back](#finding-5-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
 | 6 | [Rust: TCP port reuse safety net](#finding-6-rust-libp2p-tcp-port-reuse-and-address-translation) | Cross-impl | Low |
 | 7 | [v2 adoption gap](#finding-7-v2-adoption-gap) | Cross-impl | Info |
@@ -456,7 +456,7 @@ implementations identically.
 
 **Full analysis:** [adf-false-positive.md](adf-false-positive.md)
 
-### Finding 4: Symmetric NAT Silent Failure
+### Finding 4: Symmetric NAT Missing Signal
 
 **Category:** Cross-implementation | **Severity:** Medium
 
@@ -726,7 +726,7 @@ For complete per-scenario data and additional figures, see
    See [Future Work](#future-work).
 
 > **Note:** Recommendations for the AutoNAT v2 specification (addressing
-> ADF blind spot and symmetric NAT silent failure) are under
+> ADF blind spot and symmetric NAT missing signal) are under
 > investigation — see [#89](https://github.com/probe-lab/autonat-project/issues/89).
 > go-libp2p already detects symmetric NAT via `getNATType()` but how to
 > act on it (and whether this is a spec or implementation concern)
