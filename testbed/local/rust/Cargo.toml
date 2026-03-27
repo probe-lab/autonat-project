@@ -1,0 +1,32 @@
+[package]
+name = "autonat-local-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "tcp",
+    "quic",
+    "noise",
+    "yamux",
+    "identify",
+    "autonat",
+    "dns",
+    "macros",
+    "upnp",
+    "kad",
+] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+multiaddr = "0.18"
+futures = "0.3"
+rand = "0.8"
+
+[profile.release]
+lto = true
+strip = true
