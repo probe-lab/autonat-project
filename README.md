@@ -20,7 +20,7 @@ Key results:
 - **0% FNR / 0% FPR** for standard NAT types with ~6s convergence
 - **v1/v2 gap and DHT oscillation**: v2 results ignored by DHT and relay; v1 still controls and oscillates in 60% of runs with unreliable peers (High)
 - **ADF false positive**: 100% FPR for address-restricted NAT (Medium)
-- **Symmetric NAT silent failure**: no reachability signal produced (Medium)
+- **Symmetric NAT missing signal**: no explicit UNREACHABLE emitted, but node is definitively unreachable — impact is operational (no relay activation, no observability) (Medium)
 - **UDP black hole**: blocks QUIC dial-back on fresh servers (Medium)
 - **QUIC convergence advantage**: more stable under packet loss (observed, under investigation)
 
@@ -56,6 +56,7 @@ for requirements.
 | [v1 vs v2 Performance](docs/v1-vs-v2-performance.md) | Quantitative comparison |
 | [v1/v2 Reachability Gap](docs/v1-v2-reachability-gap.md) | Event model gap analysis |
 | [ADF False Positive](docs/adf-false-positive.md) | Protocol design issue with testbed evidence |
+| [Symmetric NAT Missing Signal](docs/symmetric-nat-silent-failure.md) | Cross-implementation root cause analysis |
 | [UDP Black Hole Detector](docs/udp-black-hole-detector.md) | QUIC dial-back issue + fix options |
 | [Future Work: NAT Monitoring](docs/future-work-nat-monitoring.md) | Nebula + ants-watch proposal |
 
