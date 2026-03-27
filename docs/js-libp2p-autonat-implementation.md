@@ -360,6 +360,63 @@ Since no AutoNAT events are emitted, the testbed uses `self:peer:update`
 as a proxy. This may produce `reachable_addrs_changed` spans that don't
 precisely reflect the AutoNAT v2 probe results.
 
+### 7. TCP Observed Address Exclusion (Node.js Platform Limitation)
+
+js-libp2p's Identify protocol unconditionally drops all TCP observed
+addresses. This is not a bug — it's a deliberate workaround for a
+Node.js platform limitation.
+
+**Root cause:** Node.js TCP sockets (`net.createConnection()`) do not
+support `SO_REUSEPORT`. When a libp2p node dials out over TCP, the OS
+assigns a random ephemeral source port instead of reusing the listener
+port (4001). The remote peer then sees a different port for every
+connection:
+
+```
+Go/Rust (port reuse works):
+  Dial to peer A → source port 4001 → peer A sees 79.x.x.x:4001
+  Dial to peer B → source port 4001 → peer B sees 79.x.x.x:4001
+  → consistent observed address → feeds into AutoNAT v2
+
+Node.js (no port reuse):
+  Dial to peer A → source port 52341 → peer A sees 79.x.x.x:52341
+  Dial to peer B → source port 38712 → peer B sees 79.x.x.x:38712
+  → flood of unique addresses → looks like symmetric NAT
+```
+
+**Workaround in js-libp2p:** The Identify protocol drops all TCP
+observed addresses to prevent this noise from polluting the address
+manager:
+
+```typescript
+// packages/protocol-identify/src/identify.ts
+if (TCP.exactMatch(cleanObservedAddr)) {
+  // TODO: because socket dials can't use the same local port as the TCP
+  // listener, many unique observed addresses are reported so ignore all
+  // TCP addresses until https://github.com/libp2p/js-libp2p/issues/2620
+  // is resolved
+  return
+}
+```
+
+**Consequence:** TCP reachability can never be discovered through the
+Identify → AutoNAT v2 pipeline. The only way for a js-libp2p node to
+learn its TCP external address is through UPnP (`@libp2p/upnp-nat`) or
+explicit configuration. This affects all NAT types, not just symmetric
+NAT.
+
+QUIC is not affected — `@chainsafe/libp2p-quic` uses UDP sockets which
+support port reuse in Node.js. QUIC observed addresses pass through
+Identify normally.
+
+| Transport | Port reuse | Identify passes observed addr? | AutoNAT v2 can verify? |
+|-----------|-----------|-------------------------------|----------------------|
+| TCP | No (Node.js limitation) | No (dropped) | Only via UPnP or manual config |
+| QUIC | Yes (UDP supports it) | Yes | Yes |
+
+**Upstream tracking:**
+[js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620)
+
 ---
 
 ## Testbed Integration

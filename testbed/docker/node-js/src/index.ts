@@ -4,6 +4,9 @@ import { noise } from '@libp2p/noise'
 import { yamux } from '@libp2p/yamux'
 import { identify } from '@libp2p/identify'
 import { autoNATv2 } from '@libp2p/autonat-v2'
+import { uPnPNAT } from '@libp2p/upnp-nat'
+import { kadDHT } from '@libp2p/kad-dht'
+import { bootstrap } from '@libp2p/bootstrap'
 import { multiaddr } from '@multiformats/multiaddr'
 import { peerIdFromString } from '@libp2p/peer-id'
 import * as fs from 'node:fs'
@@ -20,6 +23,7 @@ import { trace } from '@opentelemetry/api'
 // Parse CLI args (same interface as Go client)
 const argv = parseArgs(process.argv.slice(2), {
   string: ['role', 'transport', 'peer-dir', 'peers', 'otlp-endpoint', 'trace-file'],
+  boolean: ['upnp', 'bootstrap'],
   default: {
     role: 'client',
     transport: 'both',
@@ -29,6 +33,8 @@ const argv = parseArgs(process.argv.slice(2), {
     'otlp-endpoint': '',
     'trace-file': '',
     'obs-addr-thresh': 0,
+    upnp: false,
+    bootstrap: false,
   },
 })
 
@@ -39,6 +45,8 @@ const peerDir = argv['peer-dir'] as string
 const peersStr = argv['peers'] as string
 const otlpEndpoint = argv['otlp-endpoint'] as string
 const traceFile = argv['trace-file'] as string
+const useUpnp = argv['upnp'] as boolean
+const useBootstrap = argv['bootstrap'] as boolean
 
 // JSONL span format compatible with analyze.py
 interface JsonlSpan {
@@ -149,15 +157,41 @@ async function main(): Promise<void> {
     }
   }
 
+  // Build services — UPnP and DHT are optional (for local testing)
+  const services: Record<string, any> = {
+    identify: identify(),
+    autonat: autoNATv2(),
+  }
+
+  if (useUpnp) {
+    services.upnpNAT = uPnPNAT()
+    console.error('UPnP: enabled')
+  }
+
+  if (useBootstrap) {
+    services.dht = kadDHT()
+    console.error('DHT: enabled (bootstrap mode)')
+  }
+
+  const peerDiscovery: any[] = []
+  if (useBootstrap) {
+    peerDiscovery.push(bootstrap({
+      list: [
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt',
+      ],
+    }))
+  }
+
   const node = await createLibp2p({
     addresses: { listen: listenAddrs },
     transports,
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
-    services: {
-      identify: identify(),
-      autonat: autoNATv2(),
-    },
+    services,
+    peerDiscovery: peerDiscovery.length > 0 ? peerDiscovery : undefined,
     connectionManager: {
       maxConnections: 100,
     },
@@ -179,28 +213,50 @@ async function main(): Promise<void> {
   const unreachableAddrs = new Set<string>()
 
   // Listen for reachability events
-  // js-libp2p emits 'self:peer:update' when peer info changes
+  // js-libp2p emits 'self:peer:update' when peer info changes.
+  // We only track addresses with public/external IPs — local/private addresses
+  // (127.x, 192.168.x, 10.x, 169.254.x) are not externally reachable.
+  const isExternalAddr = (addr: string): boolean => {
+    const match = addr.match(/\/ip4\/(\d+\.\d+\.\d+\.\d+)\//)
+    if (!match) return false
+    const ip = match[1]
+    return !ip.startsWith('127.') &&
+           !ip.startsWith('10.') &&
+           !ip.startsWith('192.168.') &&
+           !ip.startsWith('169.254.') &&
+           !ip.startsWith('0.')
+  }
+
+  let previousExternalAddrs = new Set<string>()
+
   node.addEventListener('self:peer:update', (evt: any) => {
-    const addresses = node.getMultiaddrs().map(ma => ma.toString())
-    console.error(`Peer update: ${addresses.length} addresses`)
+    const allAddrs = node.getMultiaddrs().map(ma => ma.toString())
+    const externalAddrs = new Set(allAddrs.filter(isExternalAddr))
 
-    // Check which addresses are confirmed reachable via AutoNAT
-    const currentAddrs = node.getMultiaddrs()
-    for (const addr of currentAddrs) {
-      const addrStr = addr.toString()
-      if (!reachableAddrs.has(addrStr)) {
-        reachableAddrs.add(addrStr)
-        unreachableAddrs.delete(addrStr)
-      }
+    // Detect changes — only emit when external address set changes
+    const added = [...externalAddrs].filter(a => !previousExternalAddrs.has(a))
+    const removed = [...previousExternalAddrs].filter(a => !externalAddrs.has(a))
+
+    if (added.length === 0 && removed.length === 0) return
+
+    console.error(`Peer update: ${allAddrs.length} total, ${externalAddrs.size} external (added=${added.length} removed=${removed.length})`)
+
+    for (const addr of added) {
+      reachableAddrs.add(addr)
+      unreachableAddrs.delete(addr)
+    }
+    for (const addr of removed) {
+      reachableAddrs.delete(addr)
+      unreachableAddrs.add(addr)
     }
 
-    if (reachableAddrs.size > 0 || unreachableAddrs.size > 0) {
-      emitSpan('reachable_addrs_changed', {
-        reachable: Array.from(reachableAddrs),
-        unreachable: Array.from(unreachableAddrs),
-        unknown: [],
-      })
-    }
+    previousExternalAddrs = externalAddrs
+
+    emitSpan('reachable_addrs_changed', {
+      reachable: Array.from(reachableAddrs),
+      unreachable: Array.from(unreachableAddrs),
+      unknown: [],
+    })
   })
 
   // Connect to peers from --peer-dir or --peers

@@ -168,7 +168,7 @@ js-libp2p has no activation threshold like go-libp2p and no NAT type
 detection. The failure under symmetric NAT comes from two different
 mechanisms depending on transport.
 
-### TCP: Total exclusion in Identify (all NAT types)
+### TCP: Total exclusion in Identify (Node.js platform limitation)
 
 In `packages/protocol-identify/src/identify.ts`, the
 `maybeAddObservedAddress()` method unconditionally drops all TCP
@@ -184,15 +184,16 @@ if (TCP.exactMatch(cleanObservedAddr)) {
 }
 ```
 
-> **Note:** This exclusion affects **all NAT types**, not just symmetric.
-> The underlying issue is that JS TCP socket dials cannot reuse the same
-> local port as the TCP listener, so every outbound connection uses an
-> ephemeral port — producing many unique observed addresses regardless
-> of NAT mapping behavior. The effect is similar to symmetric NAT but
-> caused by the transport layer. For cone NAT, other address sources
-> (UPnP, explicit configuration) can compensate. For symmetric NAT with
-> TCP-only transport, there is **zero signal** and no alternative source
-> can help (UPnP-mapped addresses are still tested via QUIC, not TCP).
+> **Important:** This is a **Node.js platform limitation**, not a
+> symmetric NAT issue. Node.js TCP sockets lack `SO_REUSEPORT` support,
+> so every outbound TCP dial uses an ephemeral source port — producing
+> many unique observed addresses regardless of NAT type. The js-libp2p
+> team disabled TCP observed addresses entirely as a workaround. This
+> affects all NAT types equally, but makes the symmetric NAT situation
+> worse because there is no alternative path (UPnP can help for cone
+> NATs but not symmetric). See
+> [js-libp2p-autonat-implementation.md § Known Issue #7](js-libp2p-autonat-implementation.md#7-tcp-observed-address-exclusion-nodejs-platform-limitation)
+> for the full analysis.
 
 ### QUIC: Addresses enter but verification is structurally impossible
 

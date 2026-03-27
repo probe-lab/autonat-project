@@ -2,11 +2,11 @@ use clap::Parser;
 use futures::StreamExt;
 use libp2p::{
     autonat,
-    identify,
+    identify, kad,
     multiaddr::Protocol,
     noise,
     swarm::SwarmEvent,
-    tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
+    tcp, upnp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use opentelemetry::{global, trace::Tracer, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
@@ -48,7 +48,21 @@ struct Args {
 
     #[arg(long, default_value = "false")]
     no_port_reuse: bool,
+
+    #[arg(long, default_value = "false")]
+    upnp: bool,
+
+    #[arg(long, default_value = "false")]
+    bootstrap: bool,
 }
+
+// IPFS DHT bootstrap peers (for --bootstrap local mode)
+const BOOTSTRAP_PEERS: &[&str] = &[
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+    "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+];
 
 // ---------------------------------------------------------------------------
 // JSONL span format compatible with analyze.py
@@ -244,6 +258,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
     // Build swarm with TCP + QUIC + Noise + Yamux + Identify + AutoNAT v2
+    //   + optional UPnP (--upnp) and Kademlia DHT (--bootstrap)
+    let use_upnp = args.upnp;
+    let use_bootstrap = args.bootstrap;
+
     let mut swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_tcp(
@@ -252,9 +270,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             yamux::Config::default,
         )?
         .with_quic()
+        .with_dns()?
         .with_behaviour(|key| {
             let identify_config =
                 identify::Config::new("/ipfs/id/1.0.0".to_string(), key.public());
+
+            let peer_id = key.public().to_peer_id();
+            let store = kad::store::MemoryStore::new(peer_id);
+            let mut kad_config = kad::Config::default();
+            kad_config.set_protocol_names(vec![
+                libp2p::StreamProtocol::new("/ipfs/kad/1.0.0"),
+            ]);
 
             Ok(NodeBehaviour {
                 identify: identify::Behaviour::new(identify_config),
@@ -263,6 +289,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     autonat::v2::client::Config::default(),
                 ),
                 autonat_server: autonat::v2::server::Behaviour::new(rand::rngs::OsRng),
+                upnp: upnp::tokio::Behaviour::default(),
+                kademlia: kad::Behaviour::with_config(peer_id, store, kad_config),
             })
         })?
         .with_swarm_config(|cfg| {
@@ -329,6 +357,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Port reuse DISABLED (--no-port-reuse)");
     }
 
+    if use_upnp {
+        eprintln!("UPnP: enabled");
+    }
+
+    // Bootstrap to IPFS DHT (local mode)
+    if use_bootstrap {
+        eprintln!("Bootstrapping to IPFS DHT...");
+        for addr_str in BOOTSTRAP_PEERS {
+            if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                if let Some(pid) = peer_id_from_multiaddr(&addr) {
+                    swarm.behaviour_mut().kademlia.add_address(&pid, strip_p2p(&addr));
+                    let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(pid)
+                        .addresses(vec![strip_p2p(&addr)])
+                        .build();
+                    if let Err(e) = swarm.dial(dial_opts) {
+                        eprintln!("Failed to dial bootstrap {}: {}", pid, e);
+                    }
+                }
+            }
+        }
+        if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+            eprintln!("Kademlia bootstrap failed: {}", e);
+        }
+    }
+
     // Connect to peers from --peer-dir or --peers
     if let Some(ref peer_dir) = args.peer_dir {
         connect_from_dir(&mut swarm, peer_dir, start_time, &jsonl_writer, args.no_port_reuse).await;
@@ -372,6 +425,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     SwarmEvent::Behaviour(NodeBehaviourEvent::AutonatServer(_)) => {}
+
+                    SwarmEvent::Behaviour(NodeBehaviourEvent::Upnp(upnp::Event::NewExternalAddr(addr))) => {
+                        let elapsed_ms = start_time.elapsed().as_millis() as i64;
+                        eprintln!("[{:>6}ms] UPnP: new external address {}", elapsed_ms, addr);
+                    }
+
+                    SwarmEvent::Behaviour(NodeBehaviourEvent::Upnp(upnp::Event::GatewayNotFound)) => {
+                        eprintln!("UPnP: gateway not found");
+                    }
+
+                    SwarmEvent::Behaviour(NodeBehaviourEvent::Upnp(upnp::Event::NonRoutableGateway)) => {
+                        eprintln!("UPnP: non-routable gateway");
+                    }
+
+                    SwarmEvent::Behaviour(NodeBehaviourEvent::Kademlia(_)) => {}
 
                     SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                         let elapsed_ms = start_time.elapsed().as_millis() as i64;
@@ -501,6 +569,8 @@ struct NodeBehaviour {
     identify: identify::Behaviour,
     autonat_client: autonat::v2::client::Behaviour,
     autonat_server: autonat::v2::server::Behaviour,
+    upnp: upnp::tokio::Behaviour,
+    kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
 
 fn build_listen_addrs(ip: &str, port: u16, transport: &str) -> Vec<String> {
