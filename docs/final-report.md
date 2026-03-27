@@ -106,7 +106,7 @@ Helia uses v1 only).
 | 4 | [Symmetric NAT missing signal](#finding-4-symmetric-nat-missing-signal) | Cross-impl | Medium |
 | 5 | [UDP black hole blocks QUIC dial-back](#finding-5-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
 | 6 | [Rust: TCP port reuse safety net](#finding-6-rust-libp2p-tcp-port-reuse-and-address-translation) | Cross-impl | Low |
-| 7 | [v2 adoption gap](#finding-7-v2-adoption-gap) | Cross-impl | Info |
+| 7 | [Cross-implementation differences and adoption](#finding-7-cross-implementation-differences-and-adoption) | Cross-impl | Info |
 
 ---
 
@@ -580,16 +580,63 @@ corrects ports independently). rust-libp2p has no equivalent safety net.
 
 **Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
 
-### Finding 7: v2 Adoption Gap
+### Finding 7: Cross-Implementation Differences and Adoption
 
 **Category:** Cross-implementation | **Severity:** Info
 
-AutoNAT v2 exists in all three libp2p implementations but **only Kubo
-deploys it in production**. Across the broader ecosystem (~25 projects
-using libp2p), only Kubo and Pactus use v2. Most projects either use
-v1, use UPnP instead, or skip AutoNAT entirely. See
-[libp2p-autonat-ecosystem.md](libp2p-autonat-ecosystem.md) for the full
-survey.
+The AutoNAT v2 protocol works correctly when the implementation is
+right (go-libp2p: 0% FNR/FPR in testbed). However, each implementation
+has distinct limitations in the surrounding infrastructure — address
+management, event model, platform constraints, and production readiness.
+These differences mean that real-world reachability behavior varies
+significantly depending on which libp2p implementation a node runs.
+
+#### Findings Matrix
+
+| Issue | go-libp2p | rust-libp2p | js-libp2p |
+|-------|-----------|-------------|-----------|
+| **v1/v2 reachability gap** (F1) | **Yes** — v2 results not consumed by DHT/relay; v1 drives reachability | Not affected — no v1, v2 feeds DHT directly via `ExternalAddrConfirmed` | Not affected — v2 not deployed (Helia uses v1) |
+| **v1 oscillation → DHT oscillation** (F2) | **Yes** — 60% of runs with unreliable servers | Not affected — no v1 | Possible — Helia uses v1 with same architecture |
+| **ADF false positive** (F3) | **Yes** — 100% FPR | **Yes** — 100% FPR | **Yes** — 100% FPR |
+| **Symmetric NAT missing signal** (F4) | **Yes** — activation threshold blocks v2; `getNATType()` detects but unwired | Not affected — no threshold, produces UNREACHABLE | **Yes** — TCP excluded, QUIC fails silently, no events emitted |
+| **UDP black hole blocks QUIC** (F5) | **Yes** — `dialerHost` shares counter, blocks fresh servers | Not affected — no black hole detector | Not affected — no black hole detector |
+| **TCP port reuse failure** (F6) | Not affected — `ObservedAddrManager` corrects ports | **Yes** — silent fallback to ephemeral port, probes wrong address | Not applicable — TCP observed addrs dropped entirely |
+| **TCP observed addr exclusion** | Not affected — port reuse works | Not affected — port reuse works | **Yes** — Node.js lacks `SO_REUSEPORT`; all TCP observations dropped in Identify ([#2620](https://github.com/libp2p/js-libp2p/issues/2620)) |
+| **UPnP → AutoNAT → DHT chain** | Works but unstable (v1 oscillation) | **Best architecture** — v2 feeds DHT directly, no oscillation | UPnP library fails on some routers; browser-first design |
+| **Reachability events for consumers** | `EvtHostReachableAddrsChanged` (v2), `EvtLocalReachabilityChanged` (v1) | Per-probe `Event` struct | **None** — no events emitted |
+| **Bootstrap connectivity (IPFS DHT)** | 3/4 peers reachable | 1/4 peers (needs `rsa` feature, no WSS, QUIC cert issues) | Not tested |
+
+#### Local UPnP Test Results (Home Router, 2026-03-27)
+
+Cross-implementation testing on a real residential router (port-restricted
+NAT, UPnP enabled) with 3 runs per implementation:
+
+| Metric | go-libp2p | rust-libp2p | js-libp2p |
+|--------|-----------|-------------|-----------|
+| UPnP port mapping | OK | OK | **FAIL** (`Service not found`) |
+| UPnP library | `go-nat` | `igd-next` | `@achingbrain/nat-port-mapper` |
+| Time to first reachable (median) | 14.3s | 5.7s | N/A (timeout) |
+| TCP reachable | Yes (3/3) | Yes (3/3) | No |
+| QUIC reachable | No (router bug) | No (router bug) | No |
+| v2 → DHT mode | Unstable (v1 oscillation) | Stable Server mode | N/A |
+
+The same router, same NAT, same UPnP — three different outcomes.
+rust-libp2p has the cleanest architecture (v2 feeds DHT directly, no
+oscillation), but go-libp2p is the only one proven in production.
+js-libp2p's UPnP failure is expected given its browser-first design.
+
+Full analysis: [upnp-nat-detection.md](upnp-nat-detection.md#cross-implementation-local-upnp-tests-2026-03-27)
+
+#### Platform Limitations
+
+| Limitation | Cause | Impact |
+|-----------|-------|--------|
+| js-libp2p: no TCP reachability via Identify | Node.js `net.createConnection()` lacks `SO_REUSEPORT` | TCP address discovery depends entirely on UPnP or manual config |
+| js-libp2p: UPnP incompatible with some routers | `@achingbrain/nat-port-mapper` service discovery failure | No external address learned; node stays unreachable |
+| js-libp2p: browser-first design | No raw TCP/UDP sockets in browsers | UPnP, NAT traversal, port reuse are structurally irrelevant for the primary use case |
+| rust-libp2p: IPFS bootstrap fragility | Missing `rsa` feature, no WSS transport, QUIC cert validation | Delays peer discovery; AutoNAT v2 has fewer probers |
+
+#### Production Deployment
 
 | Project | Language | AutoNAT status | v2 functional? |
 |---------|----------|---------------|----------------|
@@ -598,15 +645,16 @@ survey.
 | **Substrate** | Rust | Disabled entirely | Works when properly configured (Finding #6) |
 | **Avail** | Rust | **Disabled** (v1.13.2) | Broke in production, turned off |
 
-The protocol itself works when the implementation is correct (go-libp2p:
-0% FNR/FPR). The cross-implementation issues are in the surrounding
-infrastructure (address management, event model), not in the AutoNAT v2
-protocol logic.
+Only Kubo and Pactus deploy v2 in production. Across ~25 projects using
+libp2p, most use v1, UPnP, or skip AutoNAT entirely. See
+[libp2p-autonat-ecosystem.md](libp2p-autonat-ecosystem.md) for the full
+survey.
 
 **Full analysis:**
 [rust-libp2p](rust-libp2p-autonat-implementation.md) ·
 [js-libp2p](js-libp2p-autonat-implementation.md) ·
-[go-libp2p](go-libp2p-autonat-implementation.md)
+[go-libp2p](go-libp2p-autonat-implementation.md) ·
+[UPnP cross-impl tests](upnp-nat-detection.md#cross-implementation-local-upnp-tests-2026-03-27)
 
 ---
 

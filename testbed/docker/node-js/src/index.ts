@@ -213,28 +213,50 @@ async function main(): Promise<void> {
   const unreachableAddrs = new Set<string>()
 
   // Listen for reachability events
-  // js-libp2p emits 'self:peer:update' when peer info changes
+  // js-libp2p emits 'self:peer:update' when peer info changes.
+  // We only track addresses with public/external IPs — local/private addresses
+  // (127.x, 192.168.x, 10.x, 169.254.x) are not externally reachable.
+  const isExternalAddr = (addr: string): boolean => {
+    const match = addr.match(/\/ip4\/(\d+\.\d+\.\d+\.\d+)\//)
+    if (!match) return false
+    const ip = match[1]
+    return !ip.startsWith('127.') &&
+           !ip.startsWith('10.') &&
+           !ip.startsWith('192.168.') &&
+           !ip.startsWith('169.254.') &&
+           !ip.startsWith('0.')
+  }
+
+  let previousExternalAddrs = new Set<string>()
+
   node.addEventListener('self:peer:update', (evt: any) => {
-    const addresses = node.getMultiaddrs().map(ma => ma.toString())
-    console.error(`Peer update: ${addresses.length} addresses`)
+    const allAddrs = node.getMultiaddrs().map(ma => ma.toString())
+    const externalAddrs = new Set(allAddrs.filter(isExternalAddr))
 
-    // Check which addresses are confirmed reachable via AutoNAT
-    const currentAddrs = node.getMultiaddrs()
-    for (const addr of currentAddrs) {
-      const addrStr = addr.toString()
-      if (!reachableAddrs.has(addrStr)) {
-        reachableAddrs.add(addrStr)
-        unreachableAddrs.delete(addrStr)
-      }
+    // Detect changes — only emit when external address set changes
+    const added = [...externalAddrs].filter(a => !previousExternalAddrs.has(a))
+    const removed = [...previousExternalAddrs].filter(a => !externalAddrs.has(a))
+
+    if (added.length === 0 && removed.length === 0) return
+
+    console.error(`Peer update: ${allAddrs.length} total, ${externalAddrs.size} external (added=${added.length} removed=${removed.length})`)
+
+    for (const addr of added) {
+      reachableAddrs.add(addr)
+      unreachableAddrs.delete(addr)
+    }
+    for (const addr of removed) {
+      reachableAddrs.delete(addr)
+      unreachableAddrs.add(addr)
     }
 
-    if (reachableAddrs.size > 0 || unreachableAddrs.size > 0) {
-      emitSpan('reachable_addrs_changed', {
-        reachable: Array.from(reachableAddrs),
-        unreachable: Array.from(unreachableAddrs),
-        unknown: [],
-      })
-    }
+    previousExternalAddrs = externalAddrs
+
+    emitSpan('reachable_addrs_changed', {
+      reachable: Array.from(reachableAddrs),
+      unreachable: Array.from(unreachableAddrs),
+      unknown: [],
+    })
   })
 
   // Connect to peers from --peer-dir or --peers

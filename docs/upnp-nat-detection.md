@@ -368,3 +368,233 @@ in the UPnP emulation layer, not in AutoNAT's handling of mapped addresses.
 
 See [#92](https://github.com/probe-lab/autonat-project/issues/92) for
 tracking.
+
+---
+
+## Cross-Implementation Local UPnP Tests (2026-03-27)
+
+### Setup
+
+- **Router:** Residential ISP router (port-restricted NAT, UPnP enabled)
+- **Public IP:** 79.153.197.240
+- **Private IP:** 192.168.1.38
+- **Transports:** TCP + QUIC (both)
+- **Bootstrap:** IPFS DHT (4 bootstrap peers)
+- **Runs:** 3 per implementation, 180s timeout each
+- **Implementations:**
+  - go-libp2p (testbed node with `NATPortMap()`)
+  - rust-libp2p v0.54 (autonat v2 client + `upnp::tokio::Behaviour`)
+  - js-libp2p v3.1.6 (autonat v2 + `@libp2p/upnp-nat` v4.0.13)
+
+### Results Summary
+
+| Impl | Run | Reachable Addrs | First Reachable | UPnP Discovery | AutoNAT v2 Probes |
+|------|-----|-----------------|-----------------|----------------|-------------------|
+| **go-libp2p** | 1 | 1 | 14,372ms | OK (TCP mapped) | OK |
+| | 2 | 3 | 14,290ms | OK (TCP + QUIC mapped) | OK |
+| | 3 | 2 | 13,181ms | OK (TCP + QUIC mapped) | OK |
+| **rust-libp2p** | 1 | 1 | 17,848ms | OK (TCP mapped at 279ms) | OK |
+| | 2 | 2 | 5,733ms | OK | OK |
+| | 3 | 1 | 5,720ms | OK | OK |
+| **js-libp2p** | 1 | 0 | — (timeout) | **FAILED** | No external addrs |
+| | 2 | 0 | — (timeout) | **FAILED** | No external addrs |
+| | 3 | 0 | — (timeout) | **FAILED** | No external addrs |
+
+### Go: Working UPnP with v1/v2 Oscillation
+
+Go consistently discovers UPnP mappings and confirms reachability via AutoNAT v2
+within 13–14 seconds. The reachability timeline shows the expected v1/v2 gap:
+
+1. Bootstrap peers connect within 1s (3/4 bootstrap peers reachable)
+2. UPnP external address discovered at ~5s (`/ip4/79.153.197.240`)
+3. AutoNAT v2 probes begin, first probe returns at ~14s
+4. v1 fires `REACHABILITY CHANGED: public` at ~5s, then flips to `private` at ~19s
+   when port 4001 fails — the oscillation pattern from Finding #2
+
+TCP reachability is confirmed on UPnP-mapped port 4001. QUIC on port 4001 is
+consistently **unreachable** across all 3 runs — the router's UPnP maps TCP but
+not UDP for port 4001.
+
+### Rust: Working UPnP, Slower Bootstrap
+
+Rust discovers UPnP mappings quickly (279ms in run 1), but time-to-first-reachable
+varies (5.7–17.8s). The variance comes from bootstrap connectivity:
+
+- 3 of 4 IPFS bootstrap peers fail for different reasons:
+  - `QmbLHAnMo...`: RSA key required (now fixed with `rsa` feature)
+  - `QmQCU2EcM...`: Only offers WSS transport (not supported by rust-libp2p)
+  - `QmNnooDu7...`: QUIC certificate validation fails (`UnknownIssuer`)
+- Only `QmcZf59bW...` is reachable, and it sometimes times out
+
+Despite bootstrap issues, once connected to DHT peers, AutoNAT v2 probes work
+correctly. Rust confirms TCP reachability and correctly reports QUIC as
+unreachable — matching Go's results on the same router.
+
+**Reachability timeline (run 2, best case):**
+
+| Time | Reachable | Unreachable |
+|------|-----------|-------------|
+| 5,733ms | 1 (TCP/4001) | 0 |
+| 6,671ms | 2 (TCP/4001 confirmed again) | 0 |
+| 10,605ms | 2 | 1 (QUIC/4001) |
+
+**Key fix needed:** The Rust node requires `rsa` feature in libp2p to connect to
+RSA-key bootstrap peers. Without it, 3/4 bootstrap peers are unreachable.
+
+### js-libp2p: UPnP Service Discovery Failure
+
+js-libp2p **fails completely** on this router. The `@libp2p/upnp-nat` service
+discovers the UPnP gateway but cannot interact with it:
+
+```
+libp2p:upnp-nat  gateway search finished, found 1 gateways
+libp2p:upnp-nat:external-address-check:error  could not resolve external address
+  Error: Service not found
+    at Device.getService (.../nat-port-mapper/dist/src/upnp/device.js:42:19)
+```
+
+The underlying library (`@achingbrain/nat-port-mapper`) finds the gateway device
+but fails to locate the UPnP service descriptor it needs. This is a compatibility
+issue between the JS UPnP library and this specific router model.
+
+**Consequences:**
+- No UPnP port mapping is created
+- No external address is learned
+- AutoNAT v2 has no external addresses to probe
+- Node remains in unknown/unreachable state indefinitely
+- All 3 runs timeout at 180s with 0 reachable addresses
+
+The same router works correctly with Go (`go-nat` library using `igd`) and Rust
+(`igd-next` crate), confirming this is a JS library compatibility issue, not a
+router limitation.
+
+### QUIC Unreachability on UPnP-Mapped Ports
+
+Both Go and Rust consistently show **QUIC addresses as unreachable** on
+UPnP-mapped port 4001, while TCP on the same port is reachable:
+
+| Impl | Address | Result | All Runs |
+|------|---------|--------|----------|
+| Go | `/tcp/4001` | REACHABLE | 3/3 |
+| Go | `/udp/4001/quic-v1` | UNREACHABLE | 3/3 |
+| Rust | `/tcp/4001` | REACHABLE | 3/3 |
+| Rust | `/udp/4001/quic-v1` | UNREACHABLE | 3/3 |
+
+This is **not a UPnP protocol limitation** — UPnP supports both TCP and UDP
+mappings, and both Go and Rust correctly request both. The proof is in Go run 2,
+where QUIC on an ephemeral NAT-assigned port (12885) is reachable via the
+router's natural EIM mapping, while QUIC on UPnP-mapped port 4001 is not:
+
+| Address | Source | Result |
+|---------|--------|--------|
+| `/tcp/4001` | UPnP mapping | REACHABLE |
+| `/udp/4001/quic-v1` | UPnP mapping | UNREACHABLE |
+| `/udp/12885/quic-v1` | NAT EIM (ephemeral) | **REACHABLE** |
+
+The router accepts the UPnP `AddPortMapping` request for UDP/4001 without error
+but silently fails to create the DNAT rule for UDP. QUIC works fine via the
+router's natural EIM mapping on ephemeral ports, confirming the issue is in the
+router's UPnP firmware, not in QUIC or the libp2p implementations.
+
+### DHT Integration: Rust's Architectural Advantage
+
+A key difference emerges in how each implementation uses AutoNAT v2 results:
+
+**rust-libp2p: v2 directly drives DHT mode.** When AutoNAT v2 confirms an
+address, it emits `ToSwarm::ExternalAddrConfirmed`, which Kademlia receives and
+uses to switch from Client to Server mode. There is no v1 intermediary — the
+chain is direct:
+
+```
+AutoNAT v2 probe OK → ExternalAddrConfirmed → Kademlia → Server mode
+```
+
+**go-libp2p: v2 results are disconnected from DHT.** The DHT listens to
+`EvtLocalReachabilityChanged`, which only v1 emits. v2 confirms per-address
+reachability but this never reaches the DHT mode decision. The chain is broken:
+
+```
+AutoNAT v2 probe OK → (not consumed by DHT)
+AutoNAT v1 majority vote → EvtLocalReachabilityChanged → Kademlia → mode switch
+```
+
+In our UPnP tests, this difference is visible: Go's v1 oscillates between
+public/private (triggering unnecessary relay activation and DHT client mode)
+even though v2 has confirmed reachability. Rust has no oscillation — once v2
+confirms TCP/4001, Kademlia switches to server mode and stays there.
+
+| Aspect | go-libp2p | rust-libp2p |
+|--------|-----------|-------------|
+| DHT mode trigger | v1 `EvtLocalReachabilityChanged` | v2 `ExternalAddrConfirmed` |
+| v1/v2 gap | Yes — v2 results ignored by DHT | No — v2 feeds DHT directly |
+| Oscillation in UPnP scenario | Yes (public → private → public) | No |
+| DHT mode after UPnP confirmation | Unstable (depends on v1 timing) | Stable Server mode |
+
+Note: rust-libp2p's AutoNAT v2 has no known major production deployment
+(Substrate disables autonat, Avail disabled it after issues). The architecture
+is sound but has not been stress-tested at scale. These local tests are among
+the first to exercise the full UPnP → AutoNAT v2 → DHT chain in rust-libp2p.
+
+### Cross-Implementation Comparison
+
+| Metric | go-libp2p | rust-libp2p | js-libp2p |
+|--------|-----------|-------------|-----------|
+| UPnP gateway discovery | OK | OK | OK |
+| UPnP port mapping | OK | OK | **FAIL** (Service not found) |
+| UPnP library | `go-nat` (igd) | `igd-next` | `@achingbrain/nat-port-mapper` |
+| Bootstrap connectivity | 3/4 peers | 1/4 peers* | N/A |
+| Time to first reachable (median) | 14.3s | 5.7s | N/A |
+| TCP reachable | Yes | Yes | No (no external addr) |
+| QUIC reachable | No (router bug) | No (router bug) | No |
+| AutoNAT v2 probes completed | ~14/run | ~3/run | 0/run |
+| v2 → DHT integration | **No** (v1/v2 gap) | **Yes** (direct) | N/A |
+| DHT mode stability | Oscillates | Stable | N/A |
+
+\* After enabling `rsa` feature. Without it, 0/4 peers reachable.
+
+These results are incorporated into the
+[final report Finding #7](final-report.md#finding-7-cross-implementation-differences-and-adoption)
+cross-implementation matrix.
+
+### Findings
+
+1. **Rust has the best UPnP → AutoNAT v2 → DHT architecture.** AutoNAT v2 results
+   feed directly into Kademlia's mode decision via `ExternalAddrConfirmed`. Once
+   UPnP-mapped TCP is confirmed reachable, the DHT switches to server mode with no
+   oscillation. This is the correct design — and it works in practice on a real home
+   router, though it hasn't been tested at scale in production.
+
+2. **Go's v1/v2 gap causes instability even with working UPnP.** v1 fires `public`
+   early, then drops to `private` when port probing temporarily fails, triggering
+   unnecessary relay activation and DHT client mode — even though v2 has confirmed
+   reachability on the same port. This confirms Finding #1 in a real-world UPnP
+   environment.
+
+3. **js-libp2p UPnP is a non-goal.** The `@achingbrain/nat-port-mapper` library fails
+   on this router (`Service not found`), but js-libp2p is primarily designed for
+   browsers where UPnP is irrelevant (no raw sockets, no port binding). The
+   `@libp2p/upnp-nat` package exists for Node.js use cases but receives less testing
+   than Go/Rust NAT implementations. For browser-first deployments, this is not a
+   practical issue.
+
+4. **Rust IPFS bootstrap connectivity needs work.** Only 1 of 4 IPFS bootstrap peers
+   is reachable from rust-libp2p (RSA key failures, WSS-only addresses, QUIC cert
+   errors). The `rsa` feature must be explicitly enabled. This delays peer discovery
+   and is a practical barrier to AutoNAT v2 functioning in the wild.
+
+### Conclusion
+
+UPnP with AutoNAT v2 works correctly when the full chain is wired together
+properly. Of the three implementations, **rust-libp2p has the cleanest
+architecture** — v2 results flow directly to the DHT with no v1 intermediary and
+no oscillation. However, practical barriers (bootstrap fragility, zero production
+deployments) mean this advantage is theoretical until tested at scale.
+
+**go-libp2p is the only implementation with proven production UPnP + AutoNAT
+behavior**, but it suffers from the v1/v2 gap that causes DHT mode instability.
+The fix is straightforward: derive `EvtLocalReachabilityChanged` from v2
+per-address results instead of v1 majority vote.
+
+**js-libp2p's UPnP failure is expected** given its browser-first design. For
+Node.js server deployments that need NAT traversal, the Go or Rust
+implementations are better suited.

@@ -187,7 +187,7 @@ run_impl() {
 
 if [[ "$IMPL" == "all" || "$IMPL" == "go" ]]; then
     echo "Building Go node..."
-    go build -o ./autonat-node-go ./testbed
+    (cd testbed && go build -o ../autonat-node-go .)
     run_impl "go" "./autonat-node-go" --role=client --bootstrap
     rm -f ./autonat-node-go
 fi
