@@ -4,6 +4,9 @@ import { noise } from '@libp2p/noise'
 import { yamux } from '@libp2p/yamux'
 import { identify } from '@libp2p/identify'
 import { autoNATv2 } from '@libp2p/autonat-v2'
+import { uPnPNAT } from '@libp2p/upnp-nat'
+import { kadDHT } from '@libp2p/kad-dht'
+import { bootstrap } from '@libp2p/bootstrap'
 import { multiaddr } from '@multiformats/multiaddr'
 import { peerIdFromString } from '@libp2p/peer-id'
 import * as fs from 'node:fs'
@@ -20,6 +23,7 @@ import { trace } from '@opentelemetry/api'
 // Parse CLI args (same interface as Go client)
 const argv = parseArgs(process.argv.slice(2), {
   string: ['role', 'transport', 'peer-dir', 'peers', 'otlp-endpoint', 'trace-file'],
+  boolean: ['upnp', 'bootstrap'],
   default: {
     role: 'client',
     transport: 'both',
@@ -29,6 +33,8 @@ const argv = parseArgs(process.argv.slice(2), {
     'otlp-endpoint': '',
     'trace-file': '',
     'obs-addr-thresh': 0,
+    upnp: false,
+    bootstrap: false,
   },
 })
 
@@ -39,6 +45,8 @@ const peerDir = argv['peer-dir'] as string
 const peersStr = argv['peers'] as string
 const otlpEndpoint = argv['otlp-endpoint'] as string
 const traceFile = argv['trace-file'] as string
+const useUpnp = argv['upnp'] as boolean
+const useBootstrap = argv['bootstrap'] as boolean
 
 // JSONL span format compatible with analyze.py
 interface JsonlSpan {
@@ -149,15 +157,41 @@ async function main(): Promise<void> {
     }
   }
 
+  // Build services — UPnP and DHT are optional (for local testing)
+  const services: Record<string, any> = {
+    identify: identify(),
+    autonat: autoNATv2(),
+  }
+
+  if (useUpnp) {
+    services.upnpNAT = uPnPNAT()
+    console.error('UPnP: enabled')
+  }
+
+  if (useBootstrap) {
+    services.dht = kadDHT()
+    console.error('DHT: enabled (bootstrap mode)')
+  }
+
+  const peerDiscovery: any[] = []
+  if (useBootstrap) {
+    peerDiscovery.push(bootstrap({
+      list: [
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
+        '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt',
+      ],
+    }))
+  }
+
   const node = await createLibp2p({
     addresses: { listen: listenAddrs },
     transports,
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
-    services: {
-      identify: identify(),
-      autonat: autoNATv2(),
-    },
+    services,
+    peerDiscovery: peerDiscovery.length > 0 ? peerDiscovery : undefined,
     connectionManager: {
       maxConnections: 100,
     },

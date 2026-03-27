@@ -1,0 +1,68 @@
+name: local-upnp
+description: >
+  Local UPnP tests for all three implementations (go, rust, js).
+  Runs on a real home router — NOT compatible with Docker testbed.
+
+  Each implementation runs with UPnP enabled and bootstraps to the
+  IPFS DHT to discover AutoNAT v2 servers. Measures whether v2 detects
+  reachability through UPnP-mapped ports and how long it takes.
+
+  Usage:
+    ./testbed/run-local-upnp.sh
+    ./testbed/run-local-upnp.sh --impl=go --timeout=300
+    ./testbed/run-local-upnp.sh --impl=all --runs=3
+
+defaults:
+  timeout_s: 120
+  runs: 1
+  transport: both
+  measurements: [time_to_confidence, false_negative_rate]
+
+scenarios:
+  - name: go-upnp
+    implementation: go
+    flags: "--bootstrap --transport=both"
+    description: "go-libp2p with NATPortMap() (always enabled)"
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "v2 should detect reachability via UPnP-mapped ports"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: rust-upnp
+    implementation: rust
+    flags: "--bootstrap --upnp --transport=both"
+    description: "rust-libp2p with UPnP behaviour enabled"
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "v2 should detect reachability via UPnP-mapped ports"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms
+
+  - name: js-upnp
+    implementation: js
+    flags: "--bootstrap --upnp --transport=both"
+    description: "js-libp2p with @libp2p/upnp-nat service enabled"
+    assertions:
+      - type: has_event
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        message: "v2 should detect reachability via UPnP-mapped ports"
+      - type: info
+        event: reachable_addrs_changed
+        filter: {not_empty: reachable}
+        select: first
+        extract: elapsed_ms
+        label: time_to_first_reachable_ms

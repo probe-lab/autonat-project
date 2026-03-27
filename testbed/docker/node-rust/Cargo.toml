@@ -14,6 +14,8 @@ libp2p = { version = "0.54", features = [
     "autonat",
     "dns",
     "macros",
+    "upnp",
+    "kad",
 ] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
