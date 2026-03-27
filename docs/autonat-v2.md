@@ -23,6 +23,20 @@ own — it needs an external peer to dial back and confirm.
 | Cross-IP testing | Forbidden | Allowed (with amplification cost) |
 | Protocol IDs | `/libp2p/autonat/1.0.0` | `/libp2p/autonat/2/dial-request` + `/libp2p/autonat/2/dial-back` |
 
+### Comparison with Traditional NAT Traversal (STUN/ICE)
+
+| Step | Traditional (STUN/ICE) | libp2p |
+|------|----------------------|--------|
+| Discover external address | STUN binding request | Identify protocol (ObservedAddr) |
+| Test reachability | STUN from **multiple IPs** (RFC 5780) | AutoNAT from **same IP** |
+| Direct connection | ICE candidate exchange | DCUtR via relay |
+| Fallback relay | TURN server | Circuit Relay v2 |
+
+The key difference at step 2: STUN tests from multiple IPs, which
+distinguishes full-cone from address-restricted. AutoNAT v2 tests from
+the same IP the client already contacted, making these indistinguishable
+(see Finding 3 in the [final report](final-report.md)).
+
 ---
 
 ## NAT Types Quick Reference

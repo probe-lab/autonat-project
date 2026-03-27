@@ -221,19 +221,6 @@ does NOT evaluate:
 - DHT performance itself (routing, lookup latency)
 - AutoNAT v1 in isolation (only v1/v2 comparison)
 
-### NAT Traversal: libp2p vs Traditional
-
-| Step | Traditional (STUN/ICE) | libp2p |
-|------|----------------------|--------|
-| Discover external address | STUN binding request | Identify protocol (ObservedAddr) |
-| Test reachability | STUN from **multiple IPs** (RFC 5780) | AutoNAT from **same IP** |
-| Direct connection | ICE candidate exchange | DCUtR via relay |
-| Fallback relay | TURN server | Circuit Relay v2 |
-
-The key difference at step 2: STUN tests from multiple IPs, which
-distinguishes full-cone from address-restricted. AutoNAT v2 tests from
-the same IP the client already contacted, making these indistinguishable.
-
 ---
 
 ## Testbed
@@ -541,23 +528,48 @@ router, not a symmetric NAT device.
 
 **Category:** go-libp2p | **Severity:** Medium
 
-**Problem:** The AutoNAT v2 `dialerHost` shares the main host's
-`UDPBlackHoleSuccessCounter`. On fresh servers with zero UDP history,
-the counter enters Blocked state → QUIC dial-backs refused → the server
-actively reports QUIC addresses as unreachable (false negative).
+**Problem:** This is a **server-side** issue in go-libp2p. The UDP
+black hole detector is a performance optimization that tracks UDP
+connection success rates and blocks outbound UDP dials when too few
+succeed — protecting nodes on networks that silently drop UDP traffic.
+The AutoNAT v2 `dialerHost` (the internal host that performs dial-backs)
+shares the main host's `UDPBlackHoleSuccessCounter`. On fresh servers
+with zero UDP history, the counter enters `Blocked` state. When a client
+requests a QUIC address test, the server's `dialerHost` refuses to
+attempt the dial-back and responds with `E_DIAL_REFUSED`. From the
+client's perspective, this is indistinguishable from "the server tried
+and my NAT blocked it" — both count as failures toward the confidence
+target. The result is a **false negative**: a genuinely QUIC-reachable
+address is reported as unreachable.
 
-**Impact:** QUIC addresses are incorrectly reported as unreachable on
-new or restarted AutoNAT servers, until sufficient UDP traffic builds
-the counter history. Affects every go-libp2p node acting as an AutoNAT
-server. rust-libp2p and js-libp2p are not affected — neither implements
-a black hole detector.
+**Impact:** Every go-libp2p AutoNAT v2 server is affected after startup,
+until the main host accumulates enough successful UDP connections for the
+counter to reach `Allowed` state. On long-running Kubo nodes with
+diverse traffic this happens within minutes; on freshly deployed
+infrastructure or isolated testbeds, the counter stays `Blocked`
+indefinitely. TCP addresses are unaffected — the detector only gates
+UDP/QUIC.
+
+rust-libp2p and js-libp2p do not implement a black hole detector, so
+they are not affected by this specific issue. However, they face their
+own QUIC-related AutoNAT problems:
+- **rust-libp2p** — AutoNAT v1 over QUIC produces **false positives**
+  due to connection reuse ([rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900)):
+  the dial-back succeeds through NAT because QUIC reuses the same
+  4-tuple, so NATed nodes are incorrectly reported as publicly reachable.
+  This is the root cause of Avail's "autonat-over-quic" errors (see
+  [avail.md](avail.md)).
+- **js-libp2p** — QUIC transport in js-libp2p is relatively new and
+  AutoNAT v2 has no production consumer; QUIC dial-back behavior has
+  not been tested in production.
 
 **Solution:** Disable the UDP black hole detector on `dialerHost`,
-matching the existing v1 fix ([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)).
-5 fix options analyzed in [udp-black-hole-detector.md](udp-black-hole-detector.md).
-
-**Cross-implementation:** go-libp2p only. rust-libp2p and js-libp2p
-have no black hole detector.
+matching the existing v1 fix
+([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)). The
+`dialerHost` only dials addresses that clients explicitly request to
+test — the dial result itself is the information the client needs, so
+the detector should not suppress it. 5 fix options analyzed in
+[udp-black-hole-detector.md](udp-black-hole-detector.md).
 
 **Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
 

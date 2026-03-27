@@ -32,19 +32,32 @@ Light clients need to determine whether they can receive inbound connections. Th
 
 ## Current State: AutoNAT Disabled by Default
 
-Avail has **disabled AutoNAT by default** for light clients since v1.13.2 (September 2025).
-The changelog history reveals a progressive retreat from AutoNAT v1:
+Avail has **disabled AutoNAT by default** for light clients since
+[v1.13.2](https://github.com/availproject/avail-light/releases/tag/avail-light-client-v1.13.2)
+(September 2025). The changelog history reveals a progressive retreat from AutoNAT:
 
-| Version | Date | Change |
-|---------|------|--------|
-| v1.7.4 | early 2024 | "Bootstrap nodes are now used as primary autonat servers; in order to mitigate existing **autonat-over-quic libp2p errors**, bootstraps TCP listeners are used" |
-| v1.12.12 | 2025-05-12 | Changed `only_global_ips` from `false` to `true`; increased AutoNAT timeouts |
-| v1.12.13 | 2025-05-30 | Exposed additional AutoNAT configurations; increased server throttling |
-| v1.13.0 | 2025-07-21 | Added AutoNAT service mode configs; **disabled DHT puts entirely** |
-| v1.13.2 | 2025-09-15 | **Disabled AutoNAT and automatic server mode by default**; added `--external-address` parameter |
+| Version | Date | Change | Source |
+|---------|------|--------|--------|
+| v1.7.4 | Nov 2023 | "Bootstrap nodes are now used as primary autonat servers; in order to mitigate existing **autonat-over-quic libp2p errors**, bootstraps TCP listeners are used" | [Release notes](https://github.com/availproject/avail-light/releases/tag/v1.7.4) |
+| — | Dec 2023 | Removed QUIC listener entirely "due to ongoing autonat issues" (references upstream [rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900)) | [PR #390](https://github.com/availproject/avail-light/pull/390) |
+| v1.12.12 | 2025-05-12 | Changed `only_global_ips` from `false` to `true`; increased AutoNAT timeouts | [PR #827](https://github.com/availproject/avail-light/pull/827), [core CHANGELOG](https://github.com/availproject/avail-light/blob/main/core/CHANGELOG.md) |
+| v1.12.13 | 2025-05-30 | Exposed additional AutoNAT configurations; reduced throttling (`global_max` 30→10, `peer_max` 3→1) | [PR #835](https://github.com/availproject/avail-light/pull/835) |
+| v1.13.0 | 2025-07-21 | Added AutoNAT service mode configs; **attempted switch to AutoNAT v2** | [PR #887](https://github.com/availproject/avail-light/pull/887) |
+| — | 2025-07-16 | **Reverted AutoNAT v2 after 7 days** | [PR #896](https://github.com/availproject/avail-light/pull/896) |
+| v1.13.2 | 2025-09-15 | **Disabled AutoNAT and automatic server mode by default**; added `--external-address` parameter | [PR #932](https://github.com/availproject/avail-light/pull/932) |
 
-The final step — disabling AutoNAT entirely — indicates that v1 was causing more problems
-than it solved for their network. Operators must now manually set `--external-address` for
+The upstream bug that started the retreat is
+[rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900) — "AutoNAT on QUIC
+falsely reports public NAT status" — where AutoNAT v1 over QUIC incorrectly reports
+`NatStatus::Public` for nodes behind NAT because QUIC hole-punching reuses the same 4-tuple.
+
+The v2 attempt and revert (PRs #887 → #896) is notable: Avail tried switching to AutoNAT
+v2 in July 2025 but reverted within a week, before ultimately disabling AutoNAT entirely
+in September. This suggests v2 also did not solve their production issues — likely due to
+the TCP port reuse problem documented in Finding 6.
+
+The final step — disabling AutoNAT entirely — indicates that neither v1 nor v2 was working
+reliably for their network. Operators must now manually set `--external-address` for
 server-mode nodes.
 
 ## AutoNAT v1 Configuration (When Enabled)
@@ -104,15 +117,28 @@ dial-back passes the NAT's address filter. See `docs/report.md` Issue #1.
 attempt to serve DAS data. Other peers trying to connect from different IPs would fail,
 reducing data availability sampling success rates.
 
-### Issue #16b: QUIC Dial-Back Failure (go-libp2p specific)
+### QUIC AutoNAT False Positive (rust-libp2p#3900)
 
-This issue was found in go-libp2p's `dialerHost` sharing the UDP black hole detector. While
-Avail uses **rust-libp2p**, the same architectural pattern may exist. The v1.7.4 changelog
-explicitly mentions "autonat-over-quic libp2p errors", suggesting QUIC-related AutoNAT
-issues also affect the Rust implementation.
+Avail's "autonat-over-quic libp2p errors" trace back to a known upstream bug:
+[rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900) — "AutoNAT on QUIC
+falsely reports public NAT status." AutoNAT v1 over QUIC incorrectly reports
+`NatStatus::Public` for nodes behind NAT because QUIC connection reuse means the dial-back
+uses the same 4-tuple as the original connection, so the NAT lets it through. This is a
+**false positive** — NATed nodes are told they are publicly reachable when they are not.
 
-**Impact on Avail:** If rust-libp2p has similar QUIC dial-back issues, this could explain
-why Avail switched to TCP-only bootstrap listeners and eventually disabled AutoNAT entirely.
+This is a different issue from go-libp2p's UDP black hole detector problem (Finding 5 in
+the final report), which causes **false negatives** — the server refuses to attempt QUIC
+dial-backs entirely because its black hole counter is in `Blocked` state. rust-libp2p has
+no black hole detector, so that issue does not apply.
+
+Avail's response to rust-libp2p#3900 was progressive:
+1. v1.7.4 (Nov 2023): switched AutoNAT to TCP-only bootstrap listeners as a workaround
+2. Dec 2023: removed the QUIC listener entirely ([PR #390](https://github.com/availproject/avail-light/pull/390))
+3. v1.13.2 (Sep 2025): disabled AutoNAT altogether
+
+**Impact on Avail:** Light clients behind NAT were incorrectly classified as publicly
+reachable, causing them to switch to Kademlia server mode and advertise addresses that
+peers from other IPs could not reach — reducing data availability sampling success rates.
 
 ### Issue #17: Symmetric NAT Bypasses v2
 
@@ -158,14 +184,19 @@ enabling the server mode switch without manual configuration.
    verification could provide the reliability that v1 lacked
 2. **Resolve the Kademlia server mode problem** — confirmed external addresses would enable
    automatic server mode without `--external-address`
-3. **QUIC support** — v2 explicitly supports QUIC dial-back (with the fix from Issue #16b),
-   potentially resolving the "autonat-over-quic errors" that forced TCP-only bootstrapping
+3. **QUIC support** — v2 uses a separate dial-back connection with nonce verification,
+   which avoids the QUIC connection-reuse false positive (rust-libp2p#3900) that forced
+   Avail to TCP-only bootstrapping
 4. **Reduce bootstrap node dependency** — reliable reachability detection would allow more
    nodes to serve as DHT servers, distributing load away from bootstrap nodes
 5. **Enable relay client** — with accurate reachability info, nodes could automatically
    decide whether to use relay infrastructure (currently the relay server exists but clients
    can't use it)
 
-However, Issue #1 (address-restricted false positive) would need to be addressed before Avail
-could rely on v2 for server mode switching — a false positive would be worse than no
-detection at all, as it would cause nodes to advertise unreachable addresses.
+However, two issues would need to be addressed before Avail could rely on v2:
+- The TCP port reuse safety net (Finding 6) — rust-libp2p's v2 produces 100% false
+  negatives when TCP port reuse fails silently, which is likely what caused the v2
+  attempt/revert cycle (PRs #887 → #896).
+- The ADF false positive (Finding 3) — nodes behind address-restricted NAT would be
+  incorrectly classified as globally reachable, causing them to advertise unreachable
+  addresses.
