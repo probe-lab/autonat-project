@@ -678,19 +678,34 @@ Full analysis: [upnp-nat-detection.md](upnp-nat-detection.md#cross-implementatio
 | js-libp2p: browser-first design | No raw TCP/UDP sockets in browsers | UPnP, NAT traversal, port reuse are structurally irrelevant for the primary use case |
 | rust-libp2p: IPFS bootstrap fragility | Missing `rsa` feature, no WSS transport, QUIC cert validation | Delays peer discovery; AutoNAT v2 has fewer probers |
 
-#### Production Deployment
+#### v2 Availability vs. Production Deployment
 
-| Project | Language | AutoNAT status | v2 functional? |
-|---------|----------|---------------|----------------|
+AutoNAT v2 is **implemented in all three libp2p libraries** but
+**deployed in production by only two Go projects:**
+
+| Implementation | v2 available? | How to enable | v2 in production? |
+|---|---|---|---|
+| go-libp2p | Yes | Explicit: `EnableAutoNATv2()` | **Kubo + Pactus** |
+| rust-libp2p | Yes (compiled by default with `autonat` feature) | Wire `v2::client::Behaviour` + `v2::server::Behaviour` into swarm | **No** — projects use v1 re-export |
+| js-libp2p | Yes (separate `@libp2p/autonat-v2` package) | Import and add to services | **No** — Helia uses v1 |
+
+Rust projects that enable `autonat` (Forest, Pathfinder, Ceramic) get
+v2 compiled in (`default = ["v1", "v2"]` in `libp2p-autonat`), but
+none wire v2 behaviours into their swarm. The crate's `pub use v1::*`
+re-export means v1 is what projects get by default.
+
+| Project | Language | AutoNAT status | v2 deployed? |
+|---------|----------|---------------|--------------|
 | **Kubo** | Go | v1 + v2 (both active) | **Yes** — 0% FNR/FPR |
-| **Helia** | JS | v1 only | Untested in production |
-| **Substrate** | Rust | Disabled entirely | Works when properly configured (Finding #6) |
-| **Avail** | Rust | **Disabled** (v1.13.2) | Broke in production, turned off |
+| **Pactus** | Go | v2 (explicit `EnableAutoNATv2()`) | **Yes** |
+| **Lotus/Forest/Venus** | Go/Rust | v1 only | No |
+| **Helia** | JS | v1 only (`@libp2p/autonat`) | No |
+| **Substrate** | Rust | Disabled entirely | No |
+| **Avail** | Rust | **Disabled** (v1.13.2) | No |
+| **Lighthouse** | Rust | No autonat (UPnP only, sigp fork) | No |
 
-Only Kubo and Pactus deploy v2 in production. Across ~25 projects using
-libp2p, most use v1, UPnP, or skip AutoNAT entirely. See
-[libp2p-autonat-ecosystem.md](libp2p-autonat-ecosystem.md) for the full
-survey.
+See [libp2p-autonat-ecosystem.md](libp2p-autonat-ecosystem.md) for the
+full survey of ~25 projects.
 
 **Full analysis:**
 [rust-libp2p](rust-libp2p-autonat-implementation.md) ·

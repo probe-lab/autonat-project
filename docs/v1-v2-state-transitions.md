@@ -365,6 +365,69 @@ errors count as Private evidence. This amplifies oscillation — a
 server that is merely overloaded or restarting is interpreted as "I am
 behind NAT."
 
+**Code evidence (go-libp2p v1):**
+
+The v1 probe sends the request and returns any error through the
+`dialResponses` channel
+([`autonat.go:385-398`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L385-L398)):
+
+```go
+func (as *AmbientAutoNAT) probe(pi *peer.AddrInfo) {
+    cli := NewAutoNATClient(as.host, as.config.addressFunc, as.metricsTracer)
+    ctx, cancel := context.WithTimeout(as.ctx, as.config.requestTimeout)
+    defer cancel()
+    err := cli.DialBack(ctx, pi.ID)
+    select {
+    case as.dialResponses <- err:
+    ...
+```
+
+`handleDialResponse` classifies the error. Only `E_DIAL_ERROR` is
+recognized as a dial error; **all other errors (timeouts, stream
+resets, refusals) fall through to `ReachabilityUnknown`**
+([`autonat.go:299-310`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L299-L310)):
+
+```go
+func (as *AmbientAutoNAT) handleDialResponse(dialErr error) {
+    var observation network.Reachability
+    switch {
+    case dialErr == nil:
+        observation = network.ReachabilityPublic
+    case IsDialError(dialErr):
+        observation = network.ReachabilityPrivate
+    default:
+        observation = network.ReachabilityUnknown
+    }
+    as.recordObservation(observation)
+}
+```
+
+`IsDialError` only returns true for `Message_E_DIAL_ERROR`
+([`client.go:110-112`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/client.go#L110-L112)):
+
+```go
+func (e Error) IsDialError() bool {
+    return e.Status == pb.Message_E_DIAL_ERROR
+}
+```
+
+`recordObservation` then decrements confidence on `ReachabilityUnknown`
+if current status is non-Unknown. This means **server failures erode
+confidence even though they don't directly flip to Private**
+([`autonat.go:357-359`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L357-L359)):
+
+```go
+} else if as.confidence > 0 {
+    // don't just flip to unknown, reduce confidence first
+    as.confidence--
+}
+```
+
+Once confidence hits 0, the next Unknown observation flips the status.
+With `maxConfidence=3`, it takes 4 consecutive Unknown (server failure)
+observations to flip from Public to Unknown — which can happen quickly
+with unreliable servers.
+
 ### v2
 
 | Outcome | go v2 | rust v2 | js v2 |
@@ -375,6 +438,57 @@ behind NAT."
 | `E_DIAL_BACK_ERROR` (stream error after connection) | **Success** (connection proves reachability) | Error → not counted | Error → not counted |
 | `E_INTERNAL_ERROR` | Not recorded | Not counted | Not counted |
 | Server timeout | Triggers backoff (5s→5min) | Not counted | Not counted |
+
+**Code evidence (go-libp2p v2):**
+
+The v2 client maps server responses to reachability in
+[`client.go:191-209`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/protocol/autonatv2/client.go#L191-L209):
+
+```go
+switch resp.DialStatus {
+case pb.DialStatus_OK:
+    // ... nonce verified
+    rch = network.ReachabilityPublic
+case pb.DialStatus_E_DIAL_BACK_ERROR:
+    // connection established → address is reachable
+    rch = network.ReachabilityPublic
+case pb.DialStatus_E_DIAL_ERROR:
+    rch = network.ReachabilityPrivate
+default:
+    return Result{}, fmt.Errorf("invalid response: ...")
+}
+```
+
+When the server returns `E_DIAL_REFUSED`, the client returns a
+`Result{AllAddrsRefused: true}` with no error — this is handled
+specially as a non-result
+([`client.go:141-143`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/protocol/autonatv2/client.go#L141-L143)):
+
+```go
+if resp.GetStatus() == pb.DialResponse_E_DIAL_REFUSED {
+    return Result{AllAddrsRefused: true}, nil
+}
+```
+
+When the client fails to even reach the server (timeout, stream reset,
+connection error), `GetReachability` returns an error. The reachability
+tracker's `CompleteProbe` **discards the result entirely**
+([`addrs_reachability_tracker.go:576`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/basic/addrs_reachability_tracker.go#L576)):
+
+```go
+func (m *probeManager) CompleteProbe(reqs probe, res autonatv2.Result, err error) {
+    ...
+    // nothing to do if the request errored.
+    if err != nil {
+        return
+    }
+    ...
+```
+
+This is the fundamental difference: **v1 treats server failures as NAT
+evidence (eroding confidence); v2 ignores them entirely.** Only actual
+`E_DIAL_ERROR` (server tried and failed to dial back) counts as Private
+in v2.
 
 **go-libp2p v2's `E_DIAL_BACK_ERROR` → Success:** If the server
 reaches the client (TCP/QUIC connection established) but the dial-back
