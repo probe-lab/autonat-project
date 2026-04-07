@@ -13,6 +13,9 @@ dataset. The source table for each chart is:
   04_oscillation.csv           nebula_ipfs_amino_silver.peer_logs_protocols
                                JOIN peer_logs_agent_version  (last 7 days)
   05_dialable_over_time.csv    nebula_ipfs_amino.crawls  (last 30 days)
+  06_oscillation_refined.csv   nebula_ipfs_amino_silver.peer_logs_protocols
+                               JOIN peer_logs_agent_version  (last 7 days)
+                               kad-only vs AutoNAT-driven (kad+autonat v1) by version
 
 Full query text and column documentation are in
 docs/nebula-autonat-analysis.md
@@ -247,10 +250,59 @@ def chart_dialable_over_time():
     print("wrote 05_dialable_over_time.png")
 
 
+# ----------------------------------------------------------------------
+# Chart 6: Refined oscillation — kad-only vs AutoNAT-driven (kad+autonat v1)
+# ----------------------------------------------------------------------
+def chart_oscillation_refined():
+    rows = read_csv("06_oscillation_refined.csv")
+    versions = [r["version"] for r in rows]
+    pct_kad = [float(r["pct_kad"]) for r in rows]
+    pct_autonat = [float(r["pct_autonat"]) for r in rows]
+    totals = [int(r["total"]) for r in rows]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = list(range(len(versions)))
+    width = 0.38
+
+    bars_kad = ax.bar([i - width/2 for i in x], pct_kad, width,
+                      color="#94a3b8", edgecolor="#1f2937", linewidth=0.6,
+                      label="kad protocol toggles (any cause)")
+    bars_aut = ax.bar([i + width/2 for i in x], pct_autonat, width,
+                      color="#ef4444", edgecolor="#1f2937", linewidth=0.6,
+                      label="kad + autonat v1 toggle in lockstep (Public ↔ non-Public)")
+
+    if "0.34" in versions:
+        idx = versions.index("0.34")
+        ax.axvline(idx - 0.5, color="#1f2937", linestyle="--", linewidth=1.2,
+                   label="v2 introduced (Kubo 0.34, May 2024)")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(versions)
+    ax.set_xlabel("Kubo version")
+    ax.set_ylabel("% of stable peers in 7-day window")
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(decimals=0))
+    ax.set_title("Refined: kad toggling vs AutoNAT-driven flip rate by Kubo version\n"
+                 "Most kad toggles ARE AutoNAT-driven (kad and autonat v1 server toggle together)",
+                 loc="left")
+    ax.legend(loc="upper left", frameon=False, fontsize=9)
+
+    for i, (pa, t) in enumerate(zip(pct_autonat, totals)):
+        if pa > 0:
+            ax.text(i + width/2, pa + 0.2, f"{pa:.1f}%", ha="center", fontsize=7)
+        ax.text(i, -0.5, f"n={t}", ha="center", fontsize=7, color="#666")
+
+    ax.set_ylim(-1.5, max(max(pct_kad), max(pct_autonat)) * 1.25)
+    fig.tight_layout()
+    fig.savefig(ROOT / "06_oscillation_refined.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("wrote 06_oscillation_refined.png")
+
+
 if __name__ == "__main__":
     chart_clients()
     chart_autonat_protocols()
     chart_server_mode()
     chart_oscillation()
     chart_dialable_over_time()
+    chart_oscillation_refined()
     print("\nDone. Charts in", ROOT)

@@ -453,6 +453,108 @@ the 7-day window has no rows and is not counted. The vertical line marks
 Kubo 0.34, the version that introduced AutoNAT v2 as an opt-in feature.
 Smaller buckets have larger uncertainty.*
 
+### Finding F: Most kad-protocol toggles are accompanied by autonat v1 server toggles in the same direction
+
+The kad-only metric in Finding E counts any peer whose protocol set
+contained `/ipfs/kad/1.0.0` in some silver-table observations and not in
+others. This is a loose proxy for "DHT mode flip" because in principle a
+peer could toggle the kad protocol for reasons unrelated to AutoNAT
+(operator config changes, custom go-libp2p applications that wire kad
+independently of autonat, partial protocol updates).
+
+To tighten the inference we used a state-pattern check based on Kubo's
+source code (`docs/v1-v2-state-transitions.md`):
+
+- **Public state**: Kubo's DHT registers `/ipfs/kad/1.0.0` AND its
+  `NATService` registers `/libp2p/autonat/1.0.0`
+- **Unknown state**: kad **off**, autonat v1 server **on** (NATService
+  stays enabled in Unknown — see `recordObservation` in
+  `p2p/host/autonat/autonat.go`)
+- **Private state**: kad **off**, autonat v1 server **off**
+  (`service.Disable()` is called only on Private with confidence 0)
+
+So a peer that, within the 7-day silver-table window, has at least one
+row in the **Public** pattern AND at least one row in the **Private** or
+**Unknown** pattern is exhibiting a Public ↔ non-Public state change in
+exactly the way Kubo's `EvtLocalReachabilityChanged` handler would
+produce. We call this an **AutoNAT-driven flip**.
+
+There is also an **inconsistent state** (`kad on`, `autonat v1 off`)
+which would not be produced by Kubo's normal AutoNAT handling. We
+investigated separately and found that 198 peers in the 7-day window
+have this state at some point — the majority are not Kubo at all (they
+are custom go-libp2p applications such as BSV blockchain, licketyspliket,
+nabu, etc., which enable kad without enabling autonat v1). For Kubo
+specifically, the inconsistent state appears in 53 of the 4,003 stable
+Kubo peers (~1.3%); most of those are kubo 0.36/0.37 nodes that also
+advertise the v2 server protocol. These are excluded from the
+"AutoNAT-driven flip" count because they could be operator-customized
+deployments rather than AutoNAT state changes.
+
+Refined per-version results, comparing kad-only toggling (Finding E) to
+the AutoNAT-driven flip pattern:
+
+| Kubo version | Stable peers | kad toggling % | AutoNAT-driven % |
+|---|---|---|---|
+| 0.1x | 493 | 2.03% | 2.03% |
+| 0.2x | 1,322 | 1.89% | 1.89% |
+| 0.30 | 38 | 0% | 0% |
+| 0.31 | 50 | 2.00% | 2.00% |
+| 0.32 | 130 | 4.62% | 4.62% |
+| 0.33 (last v1-only) | 109 | 2.75% | 2.75% |
+| 0.34 (v2 added) | 60 | 10.00% | 10.00% |
+| 0.35 | 67 | 11.94% | 11.94% |
+| 0.36 | 140 | 9.29% | **5.00%** |
+| 0.37 | 564 | 4.61% | 4.61% |
+| 0.38 | 157 | 4.46% | 4.46% |
+| 0.39 | 381 | 4.99% | 4.20% |
+| 0.4x (latest) | 491 | 6.92% | 6.92% |
+
+For **most versions** the two metrics are identical or nearly so —
+meaning the kad toggling we observed is, in fact, the AutoNAT-driven
+Public ↔ non-Public pattern, not configuration drift. The 0.36 column
+shows the largest reduction (9.29% → 5.00%): about half of the 0.36
+"toggling" peers are in the inconsistent (`kad on, autonat off`) state
+that we now exclude.
+
+Aggregated:
+
+| Bucket | Stable Kubo peers | AutoNAT-driven flips | % |
+|---|---|---|---|
+| Kubo < 0.34 (v1-only era) | 2,142 | 44 | **2.05%** |
+| Kubo ≥ 0.34 (v2 available) | 2,000 | 105 | **5.25%** |
+
+After the refinement, post-v2 Kubo still shows ~2.6× more AutoNAT-driven
+flips than pre-v2 Kubo. The version trend is preserved; the absolute
+numbers are slightly lower because some non-AutoNAT-pattern noise was
+removed.
+
+What the data shows:
+- The toggling we observed is dominantly the AutoNAT Public ↔ non-Public
+  pattern, not config drift or unrelated protocol changes
+- The post-v2 vs pre-v2 ratio shrinks slightly (3.3× → 2.6×) but the
+  trend is robust to the refinement
+- Inconsistent states (`kad on, autonat off`) are concentrated in
+  non-Kubo go-libp2p applications, not in Kubo itself
+
+What the data does **not** show:
+- Whether the AutoNAT state changes are "correct" responses to genuine
+  reachability problems or "false" responses to unreliable AutoNAT
+  servers. We can only see the state transitions, not their cause.
+- Direction asymmetry: a peer counted as "AutoNAT-driven" might have
+  flipped Public→Private once, Public→Unknown twice, etc. We do not
+  count transitions, only presence-of-both-states.
+
+![Refined: kad toggling vs AutoNAT-driven flip rate by Kubo version](../results/nebula-analysis/06_oscillation_refined.png)
+*Figure 6: Kad toggling (grey) vs AutoNAT-driven flips (red) per Kubo
+version. AutoNAT-driven flips are peers that have both a Public
+(`kad on AND autonat-v1-server on`) state and a non-Public
+(`kad off AND autonat-v1-server on/off`) state in the 7-day window.
+Source: `nebula_ipfs_amino_silver.peer_logs_protocols` joined to
+`peer_logs_agent_version`. The two bars are nearly identical for most
+versions, indicating the kad toggling is dominantly explained by the
+AutoNAT Public ↔ non-Public state-change pattern.*
+
 ---
 
 ## How This Relates to the Final Report Findings
@@ -462,8 +564,8 @@ What it adds:
 
 | Final report finding | What Nebula data adds |
 |---|---|
-| **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Observed correlation: Kubo versions where v2 *can* be enabled (≥ 0.34) show ~3.3× more toggling than older versions in this 7-day window. Consistent with the gap hypothesis but not proof. |
-| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | ~5% of observed Kubo peers in the 7-day window exhibit `/ipfs/kad/1.0.0` toggling. Confirms that DHT-mode-protocol-toggling occurs in production at a measurable rate, on a population we cannot fully characterize. |
+| **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Observed correlation: Kubo versions where v2 *can* be enabled (≥ 0.34) show ~2.6× more AutoNAT-driven flips than older versions in this 7-day window (5.25% vs 2.05% after the Finding F refinement). Consistent with the gap hypothesis (v2 not fixing oscillation) but not proof of causation. |
+| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | ~3.6% of observed Kubo peers in the 7-day window exhibit the AutoNAT-driven Public ↔ non-Public state pattern (Finding F). Confirms that AutoNAT-driven DHT mode flipping occurs in production at a measurable rate, on a population biased toward dialable peers. |
 
 The fix proposed in Finding #1 (bridging v2 results into
 `EvtLocalReachabilityChanged`) is supported by, but not proven by, this
@@ -534,6 +636,28 @@ details in `docs/future-work-nat-monitoring.md`).
   `undialable_peers`
 - **Method:** Daily averages across the ~12 successful crawls per day. The
   per-crawl numbers are pre-aggregated by Nebula in the `crawls` table.
+
+#### `06_oscillation_refined.png` — kad-only vs AutoNAT-driven flip rate
+
+- **Source tables:**
+  - `nebula_ipfs_amino_silver.peer_logs_protocols`
+  - `nebula_ipfs_amino_silver.peer_logs_agent_version`
+- **Filter:** `updated_at > now() - INTERVAL 7 DAY`, peers with
+  `>= 2` silver-table observations, restricted to `agent_version LIKE 'kubo/%'`
+- **Method:** Per peer, classify each silver-table row into one of four
+  states based on the (kad, autonat-v1-server) protocol pair:
+  - **Public**: kad ON, autonat ON
+  - **Unknown**: kad OFF, autonat ON
+  - **Private**: kad OFF, autonat OFF
+  - **Inconsistent**: kad ON, autonat OFF (excluded; mostly non-Kubo)
+  A peer is "AutoNAT-driven flipping" if it has at least one Public state
+  and at least one non-Public state (Unknown or Private) in the window.
+  Compared side-by-side with the looser kad-only metric from chart 04.
+- **What it shows:** For most Kubo versions the two metrics are
+  identical, indicating the kad toggling we observed is dominantly the
+  AutoNAT Public ↔ non-Public state-change pattern, not unrelated
+  protocol changes. The 0.36 column is the only one where the
+  refinement removes a meaningful fraction.
 
 ---
 
