@@ -460,6 +460,96 @@ the 7-day window has no rows and is not counted. The vertical line marks
 Kubo 0.34, the version that introduced AutoNAT v2 as an opt-in feature.
 Smaller buckets have larger uncertainty.*
 
+### Finding G: Most observed Kubo flips go to Private, not Unknown — and the peers are demonstrably dialable while Private
+
+The (kad, autonat-v1-server) state pattern lets us distinguish two
+different non-Public destinations:
+
+- **Public → Unknown** (kad off, autonat v1 server still on): AutoNAT v1
+  has eroded confidence to 0 via 4 consecutive non-success observations
+  but has not received a definitive `E_DIAL_ERROR`. The DHT switches to
+  Client mode. The autonat v1 server stream handler stays registered
+  because `service.Enable()` is called for both `Public` and `Unknown`.
+- **Public → Private** (kad off, autonat v1 server off): AutoNAT v1
+  received enough negative `E_DIAL_ERROR` responses to flip status to
+  Private. `service.Disable()` is called and the autonat v1 server is
+  removed.
+
+Counting Kubo peers in the 7-day window by which target state(s) they
+visited:
+
+| Pattern | Kubo peers |
+|---|---|
+| Total stable Kubo peers | 4,003 |
+| Always Public (no flip observed) | 3,772 |
+| **Public → Private only** (target was Private) | **133** |
+| **Public → Unknown only** (target was Unknown) | **7** |
+| Public → both (visited both Private AND Unknown) | 9 |
+| Never Public (always Private in window) | 54 |
+| Never Public (always Unknown in window) | 8 |
+
+Of the ~149 Kubo peers showing Public → non-Public flips, **133 (~89%)
+went to Private**, only 7 went to Unknown only, and 9 visited both.
+
+This tells us the dominant failure mode is not "AutoNAT lost confidence
+slowly via timeouts" (which would produce Unknown). It is "AutoNAT
+received explicit `E_DIAL_ERROR` responses from servers" (which produces
+Private). The flip from Public → Private requires actual dial-back
+failure responses, which means the peers chosen as AutoNAT servers
+returned `E_DIAL_ERROR` for these nodes' addresses.
+
+### What makes this striking
+
+Every silver-table row is, by construction, a record of a successful
+visit by Nebula. The silver `peer_logs_protocols` table only inserts
+non-empty protocol lists (we verified: 0 empty-protocol rows in the
+7-day window). So every "Private state" observation we count is a
+moment when:
+
+- Nebula successfully connected to the peer (so the peer is dialable
+  from Nebula's vantage point at that moment)
+- Identify completed successfully and returned a non-empty protocol list
+- The peer's libp2p host had **neither** the kad server protocol **nor**
+  the autonat v1 server protocol registered
+
+The peer is demonstrably reachable from Nebula's vantage point during
+those observations, yet Kubo's AutoNAT v1 has decided the peer is
+Private. **At least at the moment of the observation, AutoNAT v1's
+verdict disagrees with Nebula's ability to connect.**
+
+This is the closest we can get to a "false negative" measurement
+without instrumenting Kubo directly. The 133 peers that visited Private
+in the 7-day window are observed, at least momentarily, in a state
+where AutoNAT thought they were not reachable but Nebula could reach
+them. We cannot say what fraction of the 1,161 kad-off silver rows
+represent a strict false negative (vs a genuine reachability problem
+that resolved between observations), but the existence of this signal
+is itself the result.
+
+### Caveats specific to this finding
+
+1. **Different vantage points.** Nebula's ability to dial a peer does
+   not prove the peer is reachable from arbitrary AutoNAT servers. A
+   peer behind a port-restricted NAT may be dialable from a few
+   pre-contacted networks (like Nebula, if it is in their pre-contacted
+   set) but unreachable from the AutoNAT servers that gave it the
+   `E_DIAL_ERROR`. So "Nebula could dial" does not equal "everyone could
+   dial."
+
+2. **Time skew.** The Nebula visit and the AutoNAT decision are not
+   instantaneous. The AutoNAT confidence flip happened minutes or hours
+   before Nebula's observation. The peer might have been temporarily
+   unreachable at the time AutoNAT decided, then become reachable again
+   by the time Nebula visited.
+
+3. **Pattern is necessary but not sufficient evidence.** The
+   (kad off, autonat off) state matches Kubo's Private behavior but
+   could also match operator configurations that disable both. We
+   filtered out the 198 inconsistent-state peers (kad on, autonat off)
+   in Finding F, which suggests this kind of customization happens.
+   The 133 Private-target peers may include some operator-driven
+   shutdowns rather than AutoNAT decisions.
+
 ### Finding F: Most kad-protocol toggles are accompanied by autonat v1 server toggles in the same direction
 
 The kad-only metric in Finding E counts any peer whose protocol set
