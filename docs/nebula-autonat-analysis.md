@@ -95,9 +95,31 @@ crawler changes, or other factors.
 ![Dialable peer count and ratio over 30 days](../results/nebula-analysis/05_dialable_over_time.png)
 *Figure 1: Total visible (`crawled_peers`) vs dialable (`dialable_peers`)
 peer counts per crawl, daily average over the last 30 days. Source:
-`nebula_ipfs_amino.crawls`. The percentage line is `dialable / crawled`.*
+`nebula_ipfs_amino.crawls`. **Includes both dialable and undialable peers**
+(visible = both combined). The percentage line is `dialable / crawled`.*
 
 ### Finding B: Within the dialable subset, Kubo and go-ipfs dominate by client share
+
+Cross-tab of `agent_version` (empty vs not) and dialability in one recent crawl:
+
+| `agent_version` | Dialable | Undialable | Total |
+|---|---|---|---|
+| Has agent string | 3,621 | **0** | 3,621 |
+| Empty | 121 | 4,116 | 4,237 |
+| **Total** | 3,742 | 4,116 | 7,858 |
+
+Two relationships are exact:
+1. **Every undialable peer has empty `agent_version`.** Identify requires a
+   successful connection, so undialable peers have no agent string, no
+   protocol list, and no listen-address data Nebula could collect.
+2. **Some peers with empty `agent_version` are dialable** (121 in this crawl).
+   Nebula's connection attempt succeeded but the Identify exchange did not
+   return a useful agent string (e.g., implementations that don't run
+   standard Identify, partial responses, or transient failures during the
+   exchange).
+
+So "empty agent" is a strict superset of "undialable": empty = undialable +
+"dialable but Identify yielded no agent". They are related but not the same.
 
 Of dialable peers in the most recent crawl, grouped by `agent_version`:
 
@@ -113,9 +135,12 @@ Of dialable peers in the most recent crawl, grouped by `agent_version`:
 | `rust-libp2p/...` | 2 | <0.1% |
 | `js-libp2p/...` | 1 | <0.1% |
 
+(Counts are from a slightly earlier crawl than the cross-tab above, so the
+exact numbers differ. The relationships hold in both crawls.)
+
 This describes only the dialable subset. We have no agent_version data for
-peers Nebula could not Identify, which (per Finding A) is more than half of
-the visible peer IDs.
+the ~4,100 undialable peers per crawl, which Nebula learned about via
+`FIND_NODE` walking but could not Identify.
 
 Within the dialable subset, rust-libp2p and js-libp2p combined account for
 3 nodes. **For dialable peers in the IPFS Amino DHT, the population is
@@ -130,10 +155,11 @@ re-deployments, name reuse, or some other origin.
 
 ![Client distribution from a single recent IPFS DHT crawl](../results/nebula-analysis/01_clients.png)
 *Figure 2: Client distribution by `agent_version` (single recent crawl).
-Source: `nebula_ipfs_amino.visits` filtered to one `crawl_id`. The grey bars
-show all visited peers; the blue bars show the dialable subset. The
-"(empty)" category is peer IDs Nebula could not Identify (no `agent_version`
-returned). Most "(empty)" peers were also not dialable.*
+Source: `nebula_ipfs_amino.visits` filtered to one `crawl_id`. **Includes
+both dialable and undialable peers**: grey bars are total visited (dialable
++ undialable); blue bars are the dialable subset. The "(empty)" category is
+peer IDs where Identify did not return an agent string. Almost all undialable
+peers fall in "(empty)", because Identify requires a successful connection.*
 
 ### Finding C: Of the dialable Kubo subset, ~50% advertise both AutoNAT v1 and v2 server protocols
 
@@ -158,7 +184,8 @@ node advertises v2 without v1 (9 out of ~1,609 v2-server-advertising nodes).
 ![AutoNAT v1/v2 server adoption among dialable Kubo nodes](../results/nebula-analysis/02_autonat_protocols.png)
 *Figure 3: AutoNAT server protocols advertised by dialable Kubo nodes in
 one recent crawl. Source: `nebula_ipfs_amino.visits` filtered to
-`agent_version LIKE 'kubo/%'` and `connect_maddr IS NOT NULL`.*
+`agent_version LIKE 'kubo/%'` and `connect_maddr IS NOT NULL`. **Excludes
+undialable peers and non-Kubo clients.***
 
 ### Finding D: In a single snapshot, ~99% of dialable Kubo advertise the DHT server protocol
 
@@ -195,9 +222,11 @@ prove it.
 ![DHT server mode by Kubo version (snapshot)](../results/nebula-analysis/03_server_mode.png)
 *Figure 4: Percentage of dialable Kubo nodes advertising `/ipfs/kad/1.0.0`,
 per version bucket, in a single recent crawl. Source:
-`nebula_ipfs_amino.visits`. This is a snapshot view that does not capture
-state changes between crawls. The number of dialable nodes per bucket
-(`n=`) varies; smaller buckets have noisier percentages.*
+`nebula_ipfs_amino.visits` filtered to `agent_version LIKE 'kubo/%'` and
+`connect_maddr IS NOT NULL`. **Excludes undialable peers and non-Kubo
+clients.** This is a snapshot view that does not capture state changes
+between crawls. The number of dialable nodes per bucket (`n=`) varies;
+smaller buckets have noisier percentages.*
 
 ### Finding E: Kubo versions ≥ 0.34 show a higher rate of DHT-server-protocol toggling than older versions
 
@@ -295,9 +324,13 @@ shows reduced oscillation in production.
 *Figure 5: Percentage of observed Kubo peers (in the last 7 days) whose
 protocol set toggled to/from including `/ipfs/kad/1.0.0`. Source:
 `nebula_ipfs_amino_silver.peer_logs_protocols` joined to
-`peer_logs_agent_version`. The vertical line marks Kubo 0.34, the version
-that introduced AutoNAT v2 as an opt-in feature. Smaller buckets have
-larger uncertainty.*
+`peer_logs_agent_version`. **Implicitly excludes peers that were undialable
+throughout the 7-day window**: the silver `peer_logs_*` tables only insert
+rows when a peer's state is observed via Identify, which requires a
+successful connection. A peer that was never successfully Identified in
+the 7-day window has no rows and is not counted. The vertical line marks
+Kubo 0.34, the version that introduced AutoNAT v2 as an opt-in feature.
+Smaller buckets have larger uncertainty.*
 
 ---
 
