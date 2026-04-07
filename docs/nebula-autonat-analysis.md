@@ -684,31 +684,74 @@ need to either restart constantly or remain in `Unknown` for ~2.3 days
 out of 7. Neither is consistent with stable production deployments
 showing a single agent version.
 
-### 3. 24 toggling peers had stable listen addresses for the entire window
+### 3. Listen-address stability is suggestive but not conclusive
 
 We counted, per toggling peer, the number of distinct listen-address
 sets observed in the 7-day window (from
-`nebula_ipfs_amino_silver.peer_logs_listen_maddrs`). A node that
-restarts almost always re-binds listen sockets — even with deterministic
-ports, transient port assignment, observed-address discovery, and
-relay-reservation rotation produce address-set changes.
+`nebula_ipfs_amino_silver.peer_logs_listen_maddrs`).
 
 | Distinct listen-address sets in 7 days | Toggling peers |
 |---|---|
-| Exactly 1 (no address changes) | **24** |
+| Exactly 1 (no observed change) | 24 |
 | 2 | 19 |
 | 3 | 16 |
-| ≤3 (subtotal) | **59** |
+| ≤3 (subtotal) | 59 |
 | More than 3 | 99 |
 | Median across all toggling peers | 5 |
 
-**24 toggling peers had only one distinct listen-address set across
-the entire week.** Their addresses never changed once. These cannot be
-restart cases — even a perfectly deterministic restart would change
-*something* in the address set (initialization order, transient
-mappings, identify observations re-collected). A peer toggling kad
-on/off with completely stable addresses is the cleanest evidence we
-have that the kad changes are not driven by restarts.
+24 toggling peers had only one distinct listen-address set across the
+entire week. Spot-checking these, several are large pinning-service
+deployments with fully deterministic configurations:
+
+```
+listen_maddr: /dns4/pinning-pinbyhash-1.ipfs-swarm.use1.pinata.cloud/tcp/4001
+```
+
+A static-config Kubo deployment (fixed `Addresses.Swarm`, no UPnP, no
+relay reservations, stable host) **can** restart and come back with
+exactly the same listen address set. So stable addresses do not by
+themselves rule out restarts. This signal is suggestive — restart
+patterns usually change *something* in the address set even with
+deterministic configuration — but it is not conclusive on its own.
+
+### 4. Multi-transition peers are not restart-explained
+
+This is the strongest single signal. We computed the number of actual
+kad-state transitions per peer in the 7-day window (transitions =
+points where the kad-on/off state changed between consecutive silver
+rows in chronological order):
+
+| Transitions in 7 days | Toggling peers |
+|---|---|
+| 1 | 29 |
+| 2 | 57 |
+| 3 | 10 |
+| **4 or more** | **62** |
+| Median | 2 |
+| Mean | 4.77 |
+| Max | 28 |
+
+A peer with **1 transition** could be a single restart caught at one
+side. A peer with **2 transitions** is consistent with one restart
+cycle (off → on, or briefly off → on → off depending on what Nebula
+caught). A peer with **3 transitions** is ambiguous.
+
+A peer with **4 or more transitions** in 7 days cannot be explained by
+a single restart. **62 of 158 toggling Kubo peers** showed 4+
+transitions. The peer at the maximum had **28 transitions** in 7 days
+— roughly one state change every 6 hours for a week. No production
+deployment restarts that frequently.
+
+These 62 multi-transition peers are the cleanest "definitely not a
+single restart" cases. They give us a lower bound: **at least ~1.5%
+of stable Kubo peers in the 7-day window** (62 out of ~4,000) exhibit
+oscillation that cannot be restart-explained.
+
+The remaining 96 toggling peers (with 1-3 transitions) are
+restart-compatible. We cannot distinguish "single restart caught at
+both sides" from "single AutoNAT flip and recovery" without more
+information. So the 158 number is an upper bound and 62 is a lower
+bound for AutoNAT-driven flipping in this sample.
 
 ### 4. The kad-off observations come from successful Identify exchanges
 
@@ -723,19 +766,35 @@ and `/ipfs/kad/1.0.0` was not in it" events.
 
 | Hypothesis | Status |
 |---|---|
-| All toggling is restarts | **Ruled out** by the 24 stable-address peers, the 1.01 distinct-versions average, and the 33% kad-off-time-share |
-| All toggling is AutoNAT oscillation | Not proven, but consistent with the data |
-| Some toggling is restarts, some is AutoNAT | Plausible |
-| Toggling is something else (deliberate config changes, custom Kubo builds) | Possible for a small fraction; the 198 inconsistent-state peers in Finding F suggest this happens |
+| All toggling is restarts | **Ruled out** by the 62 multi-transition peers and the 33% kad-off-time-share. A single restart cannot produce 4+ state changes; production nodes do not restart every 6 hours for a week. |
+| All toggling is AutoNAT oscillation | Not proven. Some single- or two-transition peers are likely restart-caught. |
+| Some toggling is restarts, some is AutoNAT | Most consistent with the data. The two are not distinguishable from the silver table alone for the ~96 peers with ≤3 transitions. |
+| Toggling is something else (deliberate config changes, custom Kubo builds) | Possible for a small fraction; the inconsistent-state peers in Finding F suggest this happens for non-Kubo applications, and the kubo 0.36/0.37 cohort with v2-only configurations may also fall here. |
 
-The strongest single statement we can make is: **at least 24 of the
-158 toggling Kubo peers cannot be explained by restart**, because their
-listen addresses were stable throughout the window. Combined with the
-33% kad-off-time-share and the absence of version changes, the bulk
-evidence points to genuine AutoNAT-driven DHT mode flipping rather
-than restart artifacts. We do not claim every toggling peer is an
-AutoNAT case, only that the toggling we observe is dominated by
-AutoNAT-pattern transitions.
+**Bounds we can defend:**
+
+- **Lower bound on AutoNAT-driven oscillation:** the 62 Kubo peers
+  with 4+ kad-state transitions in 7 days. This is ~1.5% of the ~4,000
+  stable Kubo peers in the window, or ~39% of the 158 toggling peers.
+  These cannot be single-restart artifacts.
+
+- **Upper bound on AutoNAT-driven oscillation:** the 158 Kubo peers
+  with any kad toggling. This is ~3.95% of stable Kubo peers in the
+  window (matching the kad-only Finding E rate). Some of these are
+  likely restart cases that we cannot exclude.
+
+The truth is somewhere between 1.5% and 4%. The version-by-version
+trend (Finding E/F) is robust to the restart confound only insofar as
+restart frequency is independent of Kubo version. We did not verify
+this assumption — newer Kubo deployments could plausibly restart more
+often (more frequent updates, more ephemeral cloud deployments), which
+would inflate the post-v2 toggling rate via restart contamination.
+
+We do not claim every toggling peer is an AutoNAT case. We claim that
+**at least 1.5% of stable Kubo peers in the window exhibit oscillation
+that cannot be explained by restarts**, and the version trend in
+Finding E is consistent with the AutoNAT wiring-gap hypothesis but
+not proven by it.
 
 ---
 
