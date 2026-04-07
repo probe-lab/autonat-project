@@ -646,6 +646,99 @@ practice.
 
 ---
 
+## Could the toggling be node restarts rather than AutoNAT oscillation?
+
+A reasonable alternative explanation: when a Kubo node restarts, it
+boots in `Unknown` reachability state, the DHT defaults to client mode
+(no `/ipfs/kad/1.0.0` advertisement), and only enters Server mode after
+AutoNAT v1 confirms Public. So a restart looks like a kad-off → kad-on
+transition in the silver table, exactly the pattern we count as
+toggling.
+
+We checked several signals against this hypothesis.
+
+### 1. Toggling peers are not being upgraded
+
+For the 158 toggling Kubo peers in the 7-day window:
+
+| Metric | Value |
+|---|---|
+| Toggling Kubo peers | 158 |
+| Average distinct agent versions per peer in window | **1.01** |
+| Peers with more than one agent version | **1** |
+
+Only 1 of 158 toggling peers changed its `agent_version` string during
+the window. The rest are stable installations. So the toggling is not
+caused by Kubo upgrades / rebuilds.
+
+### 2. The fraction of time spent in kad-off is too large for restart-only
+
+The mean fraction of silver-table observations in kad-off for toggling
+peers is **33.5%** (median 32.3%, IQR 17.5%–50%). A typical Kubo
+restart resolves to Public within seconds to minutes once AutoNAT
+contacts servers (~6-15 seconds in our testbed measurements; even on
+slow networks, less than a few minutes).
+
+For 33% of a 7-day window to come from restarts alone, a peer would
+need to either restart constantly or remain in `Unknown` for ~2.3 days
+out of 7. Neither is consistent with stable production deployments
+showing a single agent version.
+
+### 3. 24 toggling peers had stable listen addresses for the entire window
+
+We counted, per toggling peer, the number of distinct listen-address
+sets observed in the 7-day window (from
+`nebula_ipfs_amino_silver.peer_logs_listen_maddrs`). A node that
+restarts almost always re-binds listen sockets — even with deterministic
+ports, transient port assignment, observed-address discovery, and
+relay-reservation rotation produce address-set changes.
+
+| Distinct listen-address sets in 7 days | Toggling peers |
+|---|---|
+| Exactly 1 (no address changes) | **24** |
+| 2 | 19 |
+| 3 | 16 |
+| ≤3 (subtotal) | **59** |
+| More than 3 | 99 |
+| Median across all toggling peers | 5 |
+
+**24 toggling peers had only one distinct listen-address set across
+the entire week.** Their addresses never changed once. These cannot be
+restart cases — even a perfectly deterministic restart would change
+*something* in the address set (initialization order, transient
+mappings, identify observations re-collected). A peer toggling kad
+on/off with completely stable addresses is the cleanest evidence we
+have that the kad changes are not driven by restarts.
+
+### 4. The kad-off observations come from successful Identify exchanges
+
+By construction (see "How Nebula Crawls"), a row in the silver
+`peer_logs_protocols` table only exists when Nebula successfully
+connected and Identify returned a non-empty protocol list. The kad-off
+observations are not Identify timeouts or connection failures — they
+are real "this peer's libp2p host returned its current protocol set,
+and `/ipfs/kad/1.0.0` was not in it" events.
+
+### What we can and cannot conclude
+
+| Hypothesis | Status |
+|---|---|
+| All toggling is restarts | **Ruled out** by the 24 stable-address peers, the 1.01 distinct-versions average, and the 33% kad-off-time-share |
+| All toggling is AutoNAT oscillation | Not proven, but consistent with the data |
+| Some toggling is restarts, some is AutoNAT | Plausible |
+| Toggling is something else (deliberate config changes, custom Kubo builds) | Possible for a small fraction; the 198 inconsistent-state peers in Finding F suggest this happens |
+
+The strongest single statement we can make is: **at least 24 of the
+158 toggling Kubo peers cannot be explained by restart**, because their
+listen addresses were stable throughout the window. Combined with the
+33% kad-off-time-share and the absence of version changes, the bulk
+evidence points to genuine AutoNAT-driven DHT mode flipping rather
+than restart artifacts. We do not claim every toggling peer is an
+AutoNAT case, only that the toggling we observe is dominated by
+AutoNAT-pattern transitions.
+
+---
+
 ## How This Relates to the Final Report Findings
 
 The Nebula data does not by itself prove any of the final report findings.
@@ -792,3 +885,15 @@ details in `docs/future-work-nat-monitoring.md`).
    or Celestia (other go-libp2p networks). Doing so would help isolate
    whether the version trend in Finding E is specific to Kubo's v2 rollout
    or to go-libp2p version changes generally.
+
+9. **Restart vs AutoNAT-driven flipping.** A Kubo restart briefly puts
+   the DHT in client mode (Unknown reachability) until AutoNAT runs its
+   first probes — this looks identical to an AutoNAT-driven Public →
+   Unknown transition in the silver table. We checked several signals
+   against this confound (toggling peers do not change agent versions
+   during the window; the kad-off time share is too large for restart
+   recovery alone; 24 toggling peers have completely stable listen
+   addresses). The bulk of toggling cannot be explained by restarts, but
+   we do not assert that every individual toggling peer is an AutoNAT
+   case. See "Could the toggling be node restarts rather than AutoNAT
+   oscillation?" above.
