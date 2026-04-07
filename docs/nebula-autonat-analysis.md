@@ -57,7 +57,9 @@ The historical average (May 2025 - April 2026) was higher (~20,500 visible,
 months. After the FBI takedown propagated through DHT routing tables, the
 visible network shrank by ~12,000 peers per crawl.
 
-See `01_clients.png` and `05_dialable_over_time.png`.
+![Dialable peer count and ratio over 30 days](../results/nebula-analysis/05_dialable_over_time.png)
+*Figure 1: Total visible vs dialable peer counts over the last 30 days. Source:
+`nebula_ipfs_amino.crawls`. ~46% of visible peer IDs are dialable.*
 
 ### Finding B: Kubo dominates the dialable population
 
@@ -82,7 +84,10 @@ The IPStorm botnet — supposedly dismantled by the FBI in November 2023 —
 still has 39 dialable nodes running the `storm` agent_version. The takedown
 was incomplete or the codebase is still being deployed by other actors.
 
-See `01_clients.png`.
+![Client distribution from a single recent IPFS DHT crawl](../results/nebula-analysis/01_clients.png)
+*Figure 2: Client distribution by `agent_version`. Source: `nebula_ipfs_amino.visits`,
+single recent crawl. Kubo accounts for ~84% of dialable nodes; rust-libp2p and
+js-libp2p combined have only 3 dialable nodes.*
 
 ### Finding C: AutoNAT v2 server adoption is meaningful but not majority
 
@@ -103,7 +108,11 @@ optionally on top.
 This means the v2 dial-back capacity exists in the network (~1,609 servers)
 but the protocol is **additive, not migratory**. Every node still runs v1.
 
-See `02_autonat_protocols.png`.
+![AutoNAT v1/v2 server adoption among dialable Kubo nodes](../results/nebula-analysis/02_autonat_protocols.png)
+*Figure 3: AutoNAT server protocols advertised by dialable Kubo nodes. Source:
+`nebula_ipfs_amino.visits`, filtered to `agent_version LIKE 'kubo/%'` and
+`connect_maddr IS NOT NULL`. About half of Kubo deployments enable v2; almost
+none run v2 without v1.*
 
 ### Finding D: Almost all reachable Kubo nodes advertise as DHT servers
 
@@ -132,7 +141,12 @@ advertising as DHT server) is ~0.5-3% depending on version. The single-snapshot
 **false positive rate** (peer advertises as DHT server but is not dialable) is
 **0%** — when AutoNAT says Public, it is correct.
 
-See `03_server_mode.png`.
+![DHT server mode by Kubo version (snapshot)](../results/nebula-analysis/03_server_mode.png)
+*Figure 4: Percentage of dialable Kubo nodes advertising `/ipfs/kad/1.0.0` per
+version. Source: `nebula_ipfs_amino.visits`, single recent crawl. Snapshot view
+shows AutoNAT is correctly tracking reachability at the moment of measurement
+(~99% across all versions). Oscillation is invisible at this granularity — see
+Figure 5.*
 
 ### Finding E: v2 introduction correlates with ~3x increase in DHT mode oscillation
 
@@ -169,7 +183,14 @@ oscillation rate at the v0.34 boundary, and the sustained higher rate in all
 post-v2 versions, is the first external evidence that v2 did not fix the
 oscillation problem in production — and may have made it worse.
 
-See `04_oscillation.png`.
+![Oscillation rate by Kubo version (key chart)](../results/nebula-analysis/04_oscillation.png)
+*Figure 5 (key chart): Percentage of stable peers exhibiting `/ipfs/kad/1.0.0`
+toggling over the last 7 days, by Kubo version. Source:
+`nebula_ipfs_amino_silver.peer_logs_protocols` joined to `peer_logs_agent_version`.
+The visible jump at the v0.34 boundary (where v2 was introduced) shows v2 did
+not fix oscillation; the latest 0.4x stays at ~7%, while v1-only versions
+average ~2%. This is the first external production evidence for Finding #1
+(v1/v2 reachability gap).*
 
 ### Why does v2 correlate with more oscillation?
 
