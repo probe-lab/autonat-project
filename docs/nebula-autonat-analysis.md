@@ -550,6 +550,110 @@ is itself the result.
    The 133 Private-target peers may include some operator-driven
    shutdowns rather than AutoNAT decisions.
 
+### What can cause `E_DIAL_ERROR` for a node that is actually reachable?
+
+The Public → Private transition in Kubo's AutoNAT v1 requires the
+client to receive `E_DIAL_ERROR` responses from at least some AutoNAT
+servers. If the peer is actually reachable (as Nebula's successful
+dial demonstrates), why would servers report dial-back failures?
+Several mechanisms can produce this divergence:
+
+1. **Wrong observed address (TCP port reuse failure).** If the libp2p
+   host's outbound TCP connections do not reuse the listener's port,
+   peers see the node coming from an ephemeral source port. That
+   ephemeral port becomes an "observed address" in the host's address
+   list. The AutoNAT v1 client announces this address to servers, who
+   then dial back to the closed ephemeral port and fail. This is
+   exactly the issue documented in Finding #6 of the final report
+   (rust-libp2p TCP port reuse safety net) — and Kubo can be affected
+   by similar misconfigurations.
+
+2. **Stale or expired UPnP mapping in the address list.** If
+   `NATPortMap()` registered an external port that has since expired
+   or been remapped by the router, the host still announces the old
+   port until the next UPnP refresh. AutoNAT servers dial it and fail.
+
+3. **NAT mapping expiry between announcement and dial-back.** The
+   AutoNAT exchange has latency (the server has to attempt the dial
+   asynchronously). If the peer's NAT mapping expires between the
+   client announcement and the server dial-back attempt — common with
+   aggressive NATs, mobile carrier NAT, and CGNAT — the dial-back
+   fails for transport reasons, not because the peer is unreachable.
+
+4. **Server-side connection issues.** The dial-back is made from the
+   server's libp2p host. If that host has hit connection limits,
+   resource manager throttling, transient outbound connectivity issues,
+   or its own NAT problems, the dial fails for reasons unrelated to
+   the client's reachability.
+
+5. **`E_DIAL_ERROR` returned without an actual dial attempt.** From the
+   v1 client source code (`p2p/host/autonat/client.go`):
+   > A returned error Message_E_DIAL_ERROR does not imply that the
+   > server actually performed a dial attempt. Servers that run a
+   > version < v0.20.0 also return Message_E_DIAL_ERROR if the dial
+   > was skipped due to the dialPolicy.
+
+   On older Kubo / go-libp2p versions, dial policy skips (e.g., for
+   private addresses, relay addresses, or rate-limited peers) returned
+   `E_DIAL_ERROR` instead of `E_DIAL_REFUSED`. The client cannot
+   distinguish "dialed and failed" from "skipped without trying." In
+   the IPFS DHT, where ~26% of dialable Kubo nodes still run versions
+   ≤ 0.30 and another large fraction run go-ipfs legacy (per the
+   client distribution in Finding B), this is a real source of false
+   `E_DIAL_ERROR` responses.
+
+6. **CGNAT / multi-layer NAT.** A peer might be reachable through one
+   layer of NAT (the inner NAT, where Nebula happens to have a route
+   in) but not through the outer CGNAT layer. The peer announces the
+   wrong external address (e.g., its CGNAT-internal IP), and AutoNAT
+   servers cannot dial it.
+
+### Empirical check: are these Private-state peers on standard or ephemeral ports?
+
+If the wrong-port hypothesis (#1) were the dominant cause, we would
+expect Private-state peers to be running on non-default ports (because
+the port-reuse failure is what makes the announced address wrong).
+
+For 277 Kubo peers that visited the Private state at some point in
+the 7-day window AND were dialed by Nebula at some point, we checked
+which port Nebula's most recent successful connection used:
+
+| Connect address | Peers |
+|---|---|
+| Standard port (`/tcp/4001` or `/udp/4001`) | **226** (~82%) |
+| Non-standard port | 51 (~18%) |
+
+The majority of Kubo peers in the Private-state population are running
+on the default port 4001. They have a stable, well-known listen port.
+Their AutoNAT v1 client would announce port 4001, AutoNAT servers
+would dial back to port 4001, and Nebula can reach them on port 4001
+— yet they spent some fraction of the 7-day window in the Private
+state.
+
+This means the wrong-port hypothesis (#1) is **not the dominant cause**
+for these peers. It may explain some of the 51 non-default-port peers,
+but the majority must be experiencing one of the other failure modes:
+- Server-side dial failures (#4)
+- `E_DIAL_ERROR` returned without dial attempts on older servers (#5)
+- NAT mapping timing issues (#3)
+- Stale UPnP entries (#2)
+- True transient unreachability that Nebula did not catch
+
+**The most likely candidate** in the IPFS production network is #5
+(older servers returning `E_DIAL_ERROR` for skipped dials) combined
+with #4 (server-side issues). These together describe the
+"unreliable AutoNAT servers" scenario from Finding #2 of the final
+report — a fraction of AutoNAT v1 servers in the network return
+negative-looking responses regardless of the client's actual
+reachability, and Kubo's confidence model treats each one as evidence
+toward Private regardless of the source's quality.
+
+This is consistent with what the testbed work showed (5/7 unreliable
+servers cause v1 oscillation) but we cannot directly identify which
+servers are returning the bogus responses. Confirming this would
+require either instrumenting AutoNAT clients to log per-server
+outcomes or running controlled probes against known IPFS DHT peers.
+
 ### Finding F: Most kad-protocol toggles are accompanied by autonat v1 server toggles in the same direction
 
 The kad-only metric in Finding E counts any peer whose protocol set
