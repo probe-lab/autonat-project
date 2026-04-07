@@ -227,15 +227,80 @@ Connection details for the ClickHouse dataset are in
 `docs/future-work-nat-monitoring.md`. The queries used are visible in the
 git history of this branch.
 
-### Charts
+### Charts and data sources
 
-| File | What it shows |
-|---|---|
-| `01_clients.png` | Client distribution by agent_version |
-| `02_autonat_protocols.png` | AutoNAT v1/v2 server adoption among Kubo |
-| `03_server_mode.png` | DHT server mode (kad protocol) by Kubo version |
-| `04_oscillation.png` | Oscillation rate by Kubo version (key chart) |
-| `05_dialable_over_time.png` | Dialable peer count and ratio over 30 days |
+Each chart is generated from a single query against the ClickHouse dataset.
+The query and source table are documented below.
+
+#### `01_clients.png` — Client distribution by agent_version
+
+- **Source table:** `nebula_ipfs_amino.visits` (raw bronze)
+- **Filter:** Single most recent successful crawl from `nebula_ipfs_amino.crawls`
+- **Columns used:** `agent_version`, `connect_maddr` (NULL = not dialable),
+  `crawl_id`
+- **What it shows:** All visited peers grouped by client implementation.
+  Two values per row: total visible (peer ID known to the DHT) and
+  dialable (Nebula could open a connection).
+
+#### `02_autonat_protocols.png` — AutoNAT v1/v2 server adoption (Kubo only)
+
+- **Source table:** `nebula_ipfs_amino.visits`
+- **Filter:** Single most recent successful crawl, `agent_version LIKE 'kubo/%'`,
+  `connect_maddr IS NOT NULL` (dialable Kubo only)
+- **Columns used:** `protocols` (Array), checked for membership of:
+  - `/libp2p/autonat/1.0.0` → v1 server
+  - `/libp2p/autonat/2/dial-request` → v2 server
+- **What it shows:** Categorical breakdown of dialable Kubo nodes by
+  AutoNAT server protocols advertised: v1 only, v1 + v2, v2 only, neither.
+
+#### `03_server_mode.png` — DHT server mode (kad protocol) by Kubo version
+
+- **Source table:** `nebula_ipfs_amino.visits`
+- **Filter:** Single most recent successful crawl, dialable Kubo only
+- **Columns used:** `agent_version` (parsed into version buckets),
+  `protocols` (checked for `/ipfs/kad/1.0.0`)
+- **What it shows:** For each Kubo version bucket, the percentage of
+  dialable nodes that advertise the DHT server protocol — a snapshot
+  measure of "currently in DHT Server mode."
+- **Caveat:** Snapshot only. Does not capture oscillation; that is in
+  chart 04.
+
+#### `04_oscillation.png` — Oscillation rate by Kubo version (key chart)
+
+- **Source tables:**
+  - `nebula_ipfs_amino_silver.peer_logs_protocols` (deduplicated change log
+    of protocol sets per peer)
+  - `nebula_ipfs_amino_silver.peer_logs_agent_version` (agent version
+    history per peer)
+- **Filter:** `updated_at > now() - INTERVAL 7 DAY`, peers with
+  `>= 2` protocol log entries
+- **Method:** For each peer, count rows in `peer_logs_protocols` where
+  `/ipfs/kad/1.0.0` is in `protocols` versus rows where it is not.
+  A peer is "oscillating" if it has both states present (toggled at
+  least once during the 7-day window). Joined to `peer_logs_agent_version`
+  to bucket by Kubo version.
+- **What it shows:** For each Kubo version bucket, the percentage of
+  observed peers whose `/ipfs/kad/1.0.0` advertisement toggled on/off
+  during the 7-day window. The `peer_logs_protocols` silver table only
+  inserts a row when the protocol set changes, so this is a direct
+  measure of state changes — independent of crawl frequency.
+- **Why it matters:** Each toggle corresponds to a Kubo node flipping
+  between DHT Server and Client mode, which only happens when AutoNAT v1
+  changes the local reachability state. This is a direct external
+  observation of Finding #2 (v1 oscillation) and Finding #1 (v2 not
+  fixing it).
+
+#### `05_dialable_over_time.png` — Dialable peer count and ratio over 30 days
+
+- **Source table:** `nebula_ipfs_amino.crawls` (per-crawl summary stats)
+- **Filter:** `state = 'succeeded' AND created_at > now() - INTERVAL 30 DAY`
+- **Columns used:** `created_at`, `crawled_peers`, `dialable_peers`,
+  `undialable_peers`
+- **Method:** Daily averages across the ~12 crawls per day.
+- **What it shows:** Total visible peer count vs dialable peer count over
+  the last 30 days, plus the percentage that is dialable. Pre-aggregated
+  in the `crawls` table by Nebula itself; we don't recompute it from
+  individual visits.
 
 ### Caveats
 

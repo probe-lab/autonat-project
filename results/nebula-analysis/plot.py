@@ -3,6 +3,19 @@
 Generate AutoNAT analysis charts from Nebula crawl data of the IPFS Amino DHT.
 
 Reads CSVs in ./data/ and produces PNGs in this directory.
+
+Each CSV is the output of one ClickHouse query against the public Nebula
+dataset. The source table for each chart is:
+
+  01_clients.csv               nebula_ipfs_amino.visits  (latest crawl)
+  02_autonat_protocols.csv     nebula_ipfs_amino.visits  (latest crawl, kubo)
+  03_server_mode.csv           nebula_ipfs_amino.visits  (latest crawl, kubo)
+  04_oscillation.csv           nebula_ipfs_amino_silver.peer_logs_protocols
+                               JOIN peer_logs_agent_version  (last 7 days)
+  05_dialable_over_time.csv    nebula_ipfs_amino.crawls  (last 30 days)
+
+Full query text and column documentation are in
+docs/nebula-autonat-analysis.md
 """
 
 import csv
