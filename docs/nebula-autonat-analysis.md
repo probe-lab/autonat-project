@@ -15,6 +15,126 @@ period (from `nebula_ipfs_amino.crawls`).
 
 ---
 
+## How Nebula Crawls (Verified from Source)
+
+This section is based on reading the Nebula source code at
+[github.com/dennis-tra/nebula](https://github.com/dennis-tra/nebula). File
+references are to that repository.
+
+### Bootstrap
+
+For `--network IPFS` (or `AMINO`), Nebula does **not** maintain its own
+bootstrap list. It uses `kaddht.DefaultBootstrapPeers` from
+`go-libp2p-kad-dht` (the standard Kubo bootstrappers). The list is pushed
+into a task channel at startup; for the libp2p crawl path the channel is
+then closed, so all subsequent peers come from `FIND_NODE` walking.
+(`config/config.go:683-689`, `libp2p/driver_crawler.go:151-154`)
+
+### Per-peer visit lifecycle
+
+`Crawler.Work` at `libp2p/crawler.go:57`. For each peer in the work queue:
+
+1. **Address filtering.** Multiaddrs are filtered by `addr-dial-type`
+   (default: strip private CIDRs). The kept set becomes `dial_maddrs`,
+   the rest becomes `filtered_maddrs`. (`libp2p/crawler.go:73-94`)
+
+2. **Connect.** Calls `host.Network().DialPeer(ctx, peerID)`
+   (`libp2p/crawler_p2p.go:236-239`). This hands the **full address set
+   to libp2p's swarm**, which dials all transports concurrently and
+   returns whichever transport handshake **wins the race first**. Default
+   timeout 15s. Specific transient errors (`connection refused`, gating,
+   relay resource limits) are retried with backoff up to ~1 minute.
+   (`libp2p/crawler_p2p.go:247-283`)
+
+3. **Record `connect_maddr`.** On success this is set to
+   `conn.RemoteMultiaddr()` — i.e., the address of the connection libp2p
+   actually opened. **This is "the transport that won the race", not "the
+   first address Nebula tried."** It is biased toward whichever transport
+   handshakes fastest (often QUIC over TCP on the same IP).
+
+4. **Wait for Identify, with a 5s timeout.** On a successful connection,
+   Nebula registers an Identify listener before connecting and then waits
+   up to 5 seconds for the Identify result. If it arrives, `agent_version`,
+   `listen_maddrs`, and `protocols` are recorded. **If Identify times out,
+   those fields stay empty even though the connection succeeded.**
+   (`libp2p/crawler_p2p.go:111-129`)
+
+5. **Drain buckets via `FIND_NODE`.** After connecting, Nebula spawns 16
+   parallel goroutines, one per common-prefix-length 0–15. Each generates
+   a random Kademlia ID at exactly that distance from the visited peer
+   and sends one `FIND_NODE` RPC for it. The neighbors found across all
+   16 buckets are deduplicated by peer ID and form the visit's
+   `RoutingTable`. Per-bucket failures are encoded as 16 `ErrorBits`.
+   (`libp2p/crawler_p2p.go:289-382`)
+
+### Work queue and termination
+
+Engine state holds `inflight`, `processed`, and a priority queue keyed by
+peer ID (`core/engine.go:121-126`). On enqueue (`engine.go:435-475`):
+- If a peer is inflight or already processed → skip
+- If a peer is already queued → merge multiaddrs with the queued task
+- Peers with no known dialable addresses go to the back (priority 0)
+
+Each peer is visited at most once per crawl. The crawl ends when the
+bootstrap channel is closed (immediate for IPFS), the queue is empty, AND
+no requests are in flight.
+
+### Visit-row fields and how they are populated
+
+| Column | Source | Notes |
+|---|---|---|
+| `connect_maddr` | `conn.RemoteMultiaddr()` on the winning connection | NULL on connection failure. Reflects whichever transport handshake won the parallel dial race. |
+| `dial_errors` | `db.MaddrErrors(dial_maddrs, connect_error)` | Same length as `dial_maddrs`. Per-address error strings reconstructed from libp2p's aggregated error. **Addresses libp2p opportunistically skipped get the literal string `not_dialed`** — absence of an error is not the same as success. |
+| `crawl_error` | Set only when connect succeeded AND every `FIND_NODE` bucket walk failed AND zero neighbors were returned. | (`libp2p/crawler.go:129-136`) Even one neighbor returned → success. **`crawl_error` is rare and conservative**, not the same as "Nebula couldn't connect." |
+| `agent_version` | libp2p Identify response only (no caching from prior crawls in the libp2p path) | Empty when Identify times out within 5s. Stored as NULL in ClickHouse. |
+| `protocols` | libp2p Identify response | Empty when Identify times out. |
+| `listen_maddrs` | libp2p Identify response | Empty when Identify times out. |
+
+### How `dialable_peers` is counted (from the handler, not from SQL)
+
+`PeersDialable = CrawledPeers − sum(ConnErrs)`
+(`core/handler_crawl.go:219-239`)
+
+**Critical:** "undialable" only counts peers with `ConnectError != nil`.
+A peer where the connection succeeded but every `FIND_NODE` failed is
+**still counted as dialable**, even though it has `crawl_error` set.
+The schema invariant is `crawled_peers = dialable_peers + undialable_peers`.
+
+The `crawls` table stores these counts directly; the per-visit computation
+of "dialable" is purely `connect_maddr IS NOT NULL`.
+
+### What Nebula does NOT do
+
+- It does not run AutoNAT v2 client probes against discovered peers
+- It does not cache `agent_version` from previous crawls (in the libp2p path)
+- It does not retry Identify on failure within a single visit
+- It does not crawl from multiple geographic vantage points (single point
+  of view)
+- It does not directly observe AutoNAT internal state on remote peers
+
+### Implications for this analysis
+
+1. **`connect_maddr` is biased toward whichever transport handshakes
+   fastest.** When a peer offers both TCP and QUIC on the same IP, the
+   recorded `connect_maddr` will usually be QUIC. This means the
+   `connect_maddr`-by-transport breakdown does not reflect "what works
+   best" — it reflects "what won the race first." We do not use this
+   breakdown in any of the findings below.
+
+2. **`agent_version IS NULL` does not mean "non-Kubo client"** — it means
+   either the connection failed OR Identify took longer than 5 seconds.
+   Slow nodes can legitimately appear in the empty bucket.
+
+3. **`crawl_error` is not "connection failed"** — it's "connection
+   succeeded but FIND_NODE walk failed completely." We do not use it as
+   a dialability indicator.
+
+4. **Each visit puts up to 16 `FIND_NODE` queries on the visited peer.**
+   This is the workload Nebula imposes regardless of which fields we are
+   actually interested in.
+
+---
+
 ## What This Analysis Measures (and What It Cannot Measure)
 
 This analysis uses **protocol advertisements observed by Nebula** as a proxy
@@ -113,10 +233,11 @@ Two relationships are exact:
    successful connection, so undialable peers have no agent string, no
    protocol list, and no listen-address data Nebula could collect.
 2. **Some peers with empty `agent_version` are dialable** (121 in this crawl).
-   Nebula's connection attempt succeeded but the Identify exchange did not
-   return a useful agent string (e.g., implementations that don't run
-   standard Identify, partial responses, or transient failures during the
-   exchange).
+   The connection succeeded but Identify did not return an agent string
+   within Nebula's **5-second Identify timeout** (`libp2p/crawler_p2p.go:111-129`).
+   This can be a slow Identify response, an implementation that does not
+   run standard Identify, or a transient failure mid-exchange. We cannot
+   distinguish these from the visit data alone.
 
 So "empty agent" is a strict superset of "undialable": empty = undialable +
 "dialable but Identify yielded no agent". They are related but not the same.
