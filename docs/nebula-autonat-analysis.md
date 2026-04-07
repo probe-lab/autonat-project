@@ -1,126 +1,170 @@
 # AutoNAT in Production: Nebula Crawl Analysis of the IPFS Amino DHT
 
-External observation of AutoNAT v1 and v2 behavior using ProbeLab's Nebula
-crawler data, queried from the public ClickHouse dataset.
+External observation of libp2p protocol advertisements in the IPFS Amino DHT
+using ProbeLab's Nebula crawler data. Queried from the public ClickHouse
+dataset.
 
 **Network:** IPFS Amino DHT
-**Data source:** `nebula_ipfs_amino` (raw visits) and
-`nebula_ipfs_amino_silver` (deduped change logs)
-**Time range:** May 2025 – April 2026 (cross-sectional snapshot from latest
-crawl; oscillation analysis from last 7 days)
-**Crawl frequency:** ~12 crawls/day (every 2 hours)
+**Data source:** `nebula_ipfs_amino` (raw `visits`) and
+`nebula_ipfs_amino_silver` (deduplicated change logs)
+**Time range:** All `visits` observations are from a single recent successful
+crawl (April 2026) unless otherwise noted. Time-series data is from the last
+30 days. Oscillation analysis covers the last 7 days.
+**Crawl frequency observed:** ~12 successful crawls per day during the recent
+period (from `nebula_ipfs_amino.crawls`).
 
 ---
 
-## Why External Observation
+## What This Analysis Measures (and What It Cannot Measure)
 
-The testbed analysis (`docs/v1-v2-state-transitions.md`) shows how AutoNAT v1
-and v2 should behave under controlled conditions. This analysis answers a
-different question: **what does the production network actually look like?**
+This analysis uses **protocol advertisements observed by Nebula** as a proxy
+for what each peer's local libp2p host is doing.
 
-Nebula crawls the IPFS DHT continuously and records, for each peer it
-encounters:
+What we directly observe:
 
-- The set of libp2p protocols the peer advertises (via Identify)
-- Whether Nebula could connect to the peer from the open internet
-- The peer's agent_version (Kubo version, etc.)
-- Listen addresses and the address Nebula actually connected on
+- For each peer Nebula visits, the set of libp2p protocols it advertised in
+  Identify at the time of the visit (`visits.protocols`)
+- Whether Nebula's connection attempt succeeded (`visits.connect_maddr` is
+  not NULL)
+- The peer's `agent_version` string
 
-We use the **`/ipfs/kad/1.0.0` protocol advertisement** as a proxy for "the
-node thinks it is publicly reachable." Kubo only registers this stream
-handler when the DHT is in Server mode, which only happens when AutoNAT v1
-reports `Public` (see `docs/v1-v2-state-transitions.md` and the
-`subscriber_notifee.go` analysis).
+What we **infer** (and these inferences are imperfect):
 
-Tracking this advertisement across crawls lets us detect AutoNAT-driven
-state changes **from outside the node**, without instrumenting Kubo.
+- **"This Kubo node currently has its DHT in Server mode"** is inferred from
+  the presence of `/ipfs/kad/1.0.0` in the peer's protocol list. In Kubo, the
+  DHT registers this stream handler when it enters Server mode and removes
+  it when it enters Client mode (verified in the source-code analysis in
+  `docs/v1-v2-state-transitions.md`). This proxy is reasonable but not
+  identical to the underlying state.
+- **"AutoNAT v1 currently considers this node Public"** is inferred from the
+  same kad advertisement, because Kubo's DHT mode switching is driven by
+  `EvtLocalReachabilityChanged` (v1's event). Same caveat: it is a proxy.
+- **"This Kubo node has v2 server enabled"** is inferred from the presence
+  of `/libp2p/autonat/2/dial-request`. v2's server stream handler is
+  registered when v2 is enabled (whether by `EnableAutoNATv2()` or any
+  other configuration mechanism).
+
+What we **cannot observe**:
+
+- AutoNAT v1 or v2 internal state (confidence values, server selection,
+  individual probe outcomes)
+- Whether a peer's behavior is changing because of AutoNAT or for some
+  other reason (transient errors, restarts, configuration changes)
+- Peers that Nebula cannot dial — they appear in routing tables (via
+  `FIND_NODE` responses) but Nebula cannot run Identify against them, so
+  we have no protocol or agent_version data for them
+
+This selection bias is significant: **the analysis below describes the
+subset of peers that Nebula can dial and Identify**. It is silent about
+behind-NAT or transient peers.
 
 ---
 
 ## Findings
 
-### Finding A: The IPFS DHT is much smaller than the raw peer count suggests
+### Finding A: About half of visible peer IDs in the IPFS DHT cannot be dialed by Nebula
+
+From the recent 30-day window (`nebula_ipfs_amino.crawls`):
 
 | Metric | Value |
 |---|---|
-| Total peer IDs visible per crawl | ~8,100 |
-| Dialable peers per crawl | ~3,750 (~46%) |
-| Stale routing-table entries (no Identify response) | ~4,300 (~54%) |
-| Active running nodes | ~3,750 |
+| Successful crawls per day (recent) | ~12 |
+| Avg `crawled_peers` per crawl | ~8,100 |
+| Avg `dialable_peers` per crawl | ~3,750 (~46%) |
+| Avg `undialable_peers` per crawl | ~4,300 (~54%) |
 
-About half of the "peers" in the DHT are stale routing-table entries —
-peer IDs Nebula learned from another peer's records but cannot reach. The
-real active network is approximately 3,500-4,000 nodes at any moment.
+`crawled_peers` is the count of peer IDs Nebula attempted to visit during
+the crawl (peer IDs are discovered via `FIND_NODE` walking). `dialable_peers`
+is the count where the connection attempt succeeded. The remaining ~54%
+were peer IDs Nebula learned about but could not connect to within that
+crawl.
 
-The historical average (May 2025 - April 2026) was higher (~20,500 visible,
-~32% dialable) because the IPStorm botnet was still active in earlier
-months. After the FBI takedown propagated through DHT routing tables, the
-visible network shrank by ~12,000 peers per crawl.
+Possible reasons for being undialable, which we did not separate:
+
+- The peer is offline or unreachable from Nebula's vantage point
+- The peer is behind NAT and only running in DHT client mode
+- The peer's connection was filtered, rate-limited, or transiently failed
+- The peer ID is from an old session and the host has since changed key
+- Network errors during the crawl
+
+The historical (May 2025 – April 2026) average we measured was higher
+(~20,500 visible per crawl, ~32% dialable). The recent value (~8,100) is
+lower. We did not investigate whether this drop reflects network changes,
+crawler changes, or other factors.
 
 ![Dialable peer count and ratio over 30 days](../results/nebula-analysis/05_dialable_over_time.png)
-*Figure 1: Total visible vs dialable peer counts over the last 30 days. Source:
-`nebula_ipfs_amino.crawls`. ~46% of visible peer IDs are dialable.*
+*Figure 1: Total visible (`crawled_peers`) vs dialable (`dialable_peers`)
+peer counts per crawl, daily average over the last 30 days. Source:
+`nebula_ipfs_amino.crawls`. The percentage line is `dialable / crawled`.*
 
-### Finding B: Kubo dominates the dialable population
+### Finding B: Within the dialable subset, Kubo and go-ipfs dominate by client share
 
-| Implementation | Dialable nodes | % of dialable |
+Of dialable peers in the most recent crawl, grouped by `agent_version`:
+
+| Implementation (`agent_version` pattern) | Dialable nodes | % of dialable |
 |---|---|---|
-| **kubo (modern)** | 3,170 | ~84% |
-| go-ipfs (legacy, pre-Kubo rename) | 273 | ~7% |
-| harmony | 41 | ~1% |
-| storm (botnet remnants) | 39 | ~1% |
-| other | 70 | ~2% |
-| edgevpn | 3 | <1% |
-| **rust-libp2p** | 2 | <0.1% |
-| **js-libp2p / Helia** | 1 | <0.1% |
+| `kubo/...` | 3,170 | ~84% |
+| `go-ipfs/...` (legacy, pre-Kubo rename) | 273 | ~7% |
+| (empty `agent_version`, dialable) | 145 | ~4% |
+| `harmony` | 41 | ~1% |
+| `storm...` | 39 | ~1% |
+| `other` | 70 | ~2% |
+| `edgevpn` | 3 | <1% |
+| `rust-libp2p/...` | 2 | <0.1% |
+| `js-libp2p/...` | 1 | <0.1% |
 
-The IPFS DHT is essentially a Kubo-only network. rust-libp2p and js-libp2p
-combined account for **3 nodes out of ~3,750** dialable peers. This
-validates the "go-libp2p dominance" claim from the ecosystem survey
-(`docs/libp2p-autonat-ecosystem.md`) and means the analysis below is
-effectively a study of go-libp2p production behavior.
+This describes only the dialable subset. We have no agent_version data for
+peers Nebula could not Identify, which (per Finding A) is more than half of
+the visible peer IDs.
 
-The IPStorm botnet — supposedly dismantled by the FBI in November 2023 —
-still has 39 dialable nodes running the `storm` agent_version. The takedown
-was incomplete or the codebase is still being deployed by other actors.
+Within the dialable subset, rust-libp2p and js-libp2p combined account for
+3 nodes. **For dialable peers in the IPFS Amino DHT, the population is
+overwhelmingly Kubo + legacy go-ipfs.** We cannot make claims about the
+non-dialable population.
+
+The `storm` agent_version corresponds to the IPStorm botnet client. Public
+sources (e.g., DOJ press release, November 2023) describe an FBI dismantling
+operation. We observe 39 dialable nodes still advertising this agent_version
+in April 2026. We did not investigate whether these are surviving infections,
+re-deployments, name reuse, or some other origin.
 
 ![Client distribution from a single recent IPFS DHT crawl](../results/nebula-analysis/01_clients.png)
-*Figure 2: Client distribution by `agent_version`. Source: `nebula_ipfs_amino.visits`,
-single recent crawl. Kubo accounts for ~84% of dialable nodes; rust-libp2p and
-js-libp2p combined have only 3 dialable nodes.*
+*Figure 2: Client distribution by `agent_version` (single recent crawl).
+Source: `nebula_ipfs_amino.visits` filtered to one `crawl_id`. The grey bars
+show all visited peers; the blue bars show the dialable subset. The
+"(empty)" category is peer IDs Nebula could not Identify (no `agent_version`
+returned). Most "(empty)" peers were also not dialable.*
 
-### Finding C: AutoNAT v2 server adoption is meaningful but not majority
+### Finding C: Of the dialable Kubo subset, ~50% advertise both AutoNAT v1 and v2 server protocols
 
-Of the 3,170 dialable Kubo nodes:
+Filtered to dialable peers with `agent_version LIKE 'kubo/%'` in the same
+recent crawl:
 
-| AutoNAT protocols advertised | Count | % |
+| AutoNAT server protocols advertised | Count | % |
 |---|---|---|
-| **v1 + v2 (both)** | 1,600 | **50.5%** |
-| **v1 only** | 1,531 | **48.3%** |
-| **v2 only** | 9 | 0.3% |
-| **neither** | 30 | 0.9% |
+| v1 + v2 (both `/libp2p/autonat/1.0.0` and `/libp2p/autonat/2/dial-request`) | 1,600 | 50.5% |
+| v1 only (`/libp2p/autonat/1.0.0`) | 1,531 | 48.3% |
+| v2 only (`/libp2p/autonat/2/dial-request`) | 9 | 0.3% |
+| neither | 30 | 0.9% |
 
-Half of dialable Kubo nodes have `EnableAutoNATv2()` enabled. The other half
-still run v1-only. Almost no node runs v2 without v1 (only 9 v2-only out of
-1,609 v2 servers) — Kubo's default behavior is to keep v1 enabled and add v2
-optionally on top.
+This counts advertisements, not behavior. We do not directly verify that
+nodes advertising the v2 server protocol actually accept and answer dial
+requests.
 
-This means the v2 dial-back capacity exists in the network (~1,609 servers)
-but the protocol is **additive, not migratory**. Every node still runs v1.
+The ~50/50 split between "v1+v2" and "v1 only" is consistent with v2 being
+an additional opt-in protocol rather than a replacement for v1. Almost no
+node advertises v2 without v1 (9 out of ~1,609 v2-server-advertising nodes).
 
 ![AutoNAT v1/v2 server adoption among dialable Kubo nodes](../results/nebula-analysis/02_autonat_protocols.png)
-*Figure 3: AutoNAT server protocols advertised by dialable Kubo nodes. Source:
-`nebula_ipfs_amino.visits`, filtered to `agent_version LIKE 'kubo/%'` and
-`connect_maddr IS NOT NULL`. About half of Kubo deployments enable v2; almost
-none run v2 without v1.*
+*Figure 3: AutoNAT server protocols advertised by dialable Kubo nodes in
+one recent crawl. Source: `nebula_ipfs_amino.visits` filtered to
+`agent_version LIKE 'kubo/%'` and `connect_maddr IS NOT NULL`.*
 
-### Finding D: Almost all reachable Kubo nodes advertise as DHT servers
+### Finding D: In a single snapshot, ~99% of dialable Kubo advertise the DHT server protocol
 
-In a single-snapshot view, ~99% of dialable Kubo nodes (across all versions)
-advertise `/ipfs/kad/1.0.0`. The DHT mode is correctly tracking
-reachability at the moment of measurement.
+Per Kubo version bucket, in the same recent crawl:
 
-| Kubo version | Dialable nodes | % advertising kad |
+| Kubo version | Dialable nodes | % advertising `/ipfs/kad/1.0.0` |
 |---|---|---|
 | 0.1x | 412 | 99.8% |
 | 0.2x | 1,119 | 99.8% |
@@ -136,214 +180,248 @@ reachability at the moment of measurement.
 | 0.39 | 327 | 99.1% |
 | 0.4x | 358 | 99.7% |
 
-The single-snapshot **false negative rate** (peer is dialable but not
-advertising as DHT server) is ~0.5-3% depending on version. The single-snapshot
-**false positive rate** (peer advertises as DHT server but is not dialable) is
-**0%** — when AutoNAT says Public, it is correct.
+Caveat: this is one moment in time. A peer that flips its DHT mode
+frequently will appear in this table as either "advertising kad" or "not
+advertising kad" depending on which side of the flip it was on when Nebula
+visited. The snapshot view does not detect oscillation.
+
+We did not compute "false positive" or "false negative" rates relative to
+AutoNAT's internal state because we cannot observe that state. The
+snapshot consistency above (99% match between "is dialable" and "advertises
+kad" for Kubo) is consistent with the inference that Kubo's DHT mode
+correctly tracks reachability at the moment of measurement, but we do not
+prove it.
 
 ![DHT server mode by Kubo version (snapshot)](../results/nebula-analysis/03_server_mode.png)
-*Figure 4: Percentage of dialable Kubo nodes advertising `/ipfs/kad/1.0.0` per
-version. Source: `nebula_ipfs_amino.visits`, single recent crawl. Snapshot view
-shows AutoNAT is correctly tracking reachability at the moment of measurement
-(~99% across all versions). Oscillation is invisible at this granularity — see
-Figure 5.*
+*Figure 4: Percentage of dialable Kubo nodes advertising `/ipfs/kad/1.0.0`,
+per version bucket, in a single recent crawl. Source:
+`nebula_ipfs_amino.visits`. This is a snapshot view that does not capture
+state changes between crawls. The number of dialable nodes per bucket
+(`n=`) varies; smaller buckets have noisier percentages.*
 
-### Finding E: v2 introduction correlates with ~3x increase in DHT mode oscillation
+### Finding E: Kubo versions ≥ 0.34 show a higher rate of DHT-server-protocol toggling than older versions
 
-**This is the key finding.** Tracking the same peers across multiple crawls
-over 7 days, counting how many flip the `/ipfs/kad/1.0.0` protocol on and
-off (a direct external indicator of AutoNAT v1 state changes):
+Tracking the same peers across multiple crawls over 7 days using the silver
+change-log table. A peer is counted as "toggling" if its protocol set
+contains `/ipfs/kad/1.0.0` in some logged states and not in others within
+the 7-day window.
 
-| Kubo version | Stable peers observed | Oscillating | % |
+| Kubo version | Peers observed | Toggling | % |
 |---|---|---|---|
 | 0.1x | 493 | 10 | 2.03% |
 | 0.2x | 1,326 | 25 | 1.89% |
-| 0.30 | 38 | 0 | **0%** |
+| 0.30 | 38 | 0 | 0% |
 | 0.31 | 50 | 1 | 2.00% |
 | 0.32 | 131 | 6 | 4.58% |
-| **0.33 (last v1-only)** | 109 | 3 | **2.75%** |
-| **0.34 (v2 added)** | 60 | 6 | **10.00%** |
-| 0.35 | 67 | 8 | **11.94%** |
+| 0.33 (last v1-only) | 109 | 3 | 2.75% |
+| 0.34 (v2 added) | 60 | 6 | 10.00% |
+| 0.35 | 67 | 8 | 11.94% |
 | 0.36 | 140 | 13 | 9.29% |
 | 0.37 | 567 | 26 | 4.59% |
 | 0.38 | 157 | 7 | 4.46% |
 | 0.39 | 382 | 20 | 5.24% |
-| **0.4x (latest)** | 496 | 35 | **7.06%** |
+| 0.4x (latest) | 496 | 35 | 7.06% |
 
-Aggregated:
+Aggregated across all observed Kubo peers in the 7-day window:
 
-| Bucket | Total | Oscillating | % |
+| Bucket | Total | Toggling | % |
 |---|---|---|---|
-| Kubo < 0.34 (v1-only) | 2,148 | 45 | **2.09%** |
-| Kubo ≥ 0.34 (v2 available) | 2,048 | 140 | **6.84%** |
+| Kubo < 0.34 | 2,148 | 45 | 2.09% |
+| Kubo ≥ 0.34 | 2,048 | 140 | 6.84% |
 
-**Kubo versions with v2 enabled show ~3.3x higher oscillation than v1-only
-versions.** v2 was introduced in Kubo 0.34 (May 2024). The visible jump in
-oscillation rate at the v0.34 boundary, and the sustained higher rate in all
-post-v2 versions, is the first external evidence that v2 did not fix the
-oscillation problem in production — and may have made it worse.
+What the data shows:
+- The rate of `/ipfs/kad/1.0.0` toggling per peer is approximately 3.3×
+  higher in Kubo ≥ 0.34 than in Kubo < 0.34 in this 7-day window, on this
+  network (IPFS Amino DHT), as observed by this crawler from this vantage
+  point.
+- Kubo 0.34 is the version that introduced AutoNAT v2 as an opt-in feature
+  (`EnableAutoNATv2()`).
 
-![Oscillation rate by Kubo version (key chart)](../results/nebula-analysis/04_oscillation.png)
-*Figure 5 (key chart): Percentage of stable peers exhibiting `/ipfs/kad/1.0.0`
-toggling over the last 7 days, by Kubo version. Source:
-`nebula_ipfs_amino_silver.peer_logs_protocols` joined to `peer_logs_agent_version`.
-The visible jump at the v0.34 boundary (where v2 was introduced) shows v2 did
-not fix oscillation; the latest 0.4x stays at ~7%, while v1-only versions
-average ~2%. This is the first external production evidence for Finding #1
-(v1/v2 reachability gap).*
+What the data does **not** show:
+- We do not directly verify that any individual ≥0.34 peer has v2 enabled.
+  We know from Finding C that ~50% of dialable Kubo run the v2 server
+  protocol; the version-by-version v2-enabled fraction is not measured here.
+- We do not verify that the toggling is caused by AutoNAT v1 state changes
+  rather than restarts, network changes, or other reasons.
+- We do not control for Kubo deployment patterns that may have changed
+  alongside the version bump (Docker, ephemeral instances, default
+  configurations, ResourceManager defaults, etc.).
+- We did not measure toggling rates in Filecoin or Celestia networks (which
+  also use go-libp2p with AutoNAT v1 but typically not v2) — that would
+  help isolate whether the increase is v2-specific or go-libp2p-version-specific.
 
-### Why does v2 correlate with more oscillation?
+### Possible explanations for the increased toggling in newer Kubo versions
 
-This is consistent with **Finding #1** in the final report (the v1/v2
-reachability gap): v2 results are not consumed by Kubo's DHT, AutoRelay, or
-NAT service, all of which still listen to `EvtLocalReachabilityChanged`
-(v1's event). v1 continues to drive DHT mode decisions regardless of what
-v2 reports.
+These are hypotheses, not conclusions:
 
-Several mechanisms could explain the increase:
+1. **The v2 wiring gap is real and observable.** Source-code analysis
+   (`docs/v1-v2-state-transitions.md` and the DHT subscriber notifee
+   discussion) shows that v2's results are not consumed by Kubo's DHT, so
+   v1's behavior continues to drive DHT mode regardless of v2 being
+   enabled. Adding v2 does not address v1's oscillation. This explanation
+   would predict no improvement in oscillation when v2 is added, but does
+   not by itself explain an *increase*.
 
-1. **Additional protocol churn from v2 server lifecycle.** v2 adds dial-back
-   stream handlers that may transition during Identify pushes.
-2. **Additional load on the dialerHost.** v2 servers attempt dial-backs for
-   more peers, increasing the chance of triggering the UDP black hole
-   detector (Finding #5) or other failure modes.
-3. **More v2 traffic = more chances for v1 to see "negative" observations**
-   (timeouts, refusals, errors from v2 server peers) that erode v1's
-   confidence.
-4. **Newer Kubo deployment patterns.** Newer versions may be more likely to
-   run in Docker, ephemeral cloud instances, or behind NATs where v1
-   instability is more pronounced. (Confound — would need cloud-provider
-   cross-tabulation to rule out.)
+2. **Additional protocol churn from v2's lifecycle.** Adding the v2 server
+   stream handlers introduces more protocol-set changes (when v2 is
+   enabled or disabled), which could trigger more Identify pushes and
+   more downstream events. We did not measure this.
 
-The simplest explanation is the architectural one: **v2 was added to Kubo
-without fixing the v1 wiring**, so v1 continues to oscillate while v2 sits
-unused by the consumers that matter. Adding v2 produces more code paths and
-more chances for v1 erosion without providing any stabilizing signal.
+3. **Behavioral changes in Kubo defaults.** Newer Kubo versions may have
+   changed defaults around connection limits, ResourceManager, refresh
+   intervals, or autonat probing schedule that interact with v1 behavior.
+   We did not enumerate these changes.
+
+4. **Confounded with deployment patterns.** Newer Kubo versions are likely
+   correlated with newer deployment environments. If newer versions are
+   more often run in conditions where v1 is more unstable (e.g., Docker
+   on ephemeral cloud, residential broadband behind NAT), the version
+   correlation could reflect deployment correlation rather than code
+   changes. We did not control for this.
+
+5. **Sampling differences.** Smaller buckets (e.g., 0.30 with 38 peers,
+   0.34 with 60 peers) are noisier; the extreme percentages in 0.34/0.35
+   could be partially explained by small-sample variance. The trend in
+   the larger buckets (0.37 with 567 peers, 0.39 with 382 peers, 0.4x
+   with 496 peers) is more reliable.
+
+The data is consistent with the wiring-gap hypothesis but does not prove
+it. To confirm, we would need either (a) the same comparison on networks
+where v2 was never deployed, (b) a controlled deployment experiment, or
+(c) a fork of Kubo that wires v2 into `EvtLocalReachabilityChanged` and
+shows reduced oscillation in production.
+
+![Toggling rate by Kubo version](../results/nebula-analysis/04_oscillation.png)
+*Figure 5: Percentage of observed Kubo peers (in the last 7 days) whose
+protocol set toggled to/from including `/ipfs/kad/1.0.0`. Source:
+`nebula_ipfs_amino_silver.peer_logs_protocols` joined to
+`peer_logs_agent_version`. The vertical line marks Kubo 0.34, the version
+that introduced AutoNAT v2 as an opt-in feature. Smaller buckets have
+larger uncertainty.*
 
 ---
 
-## What This Confirms
+## How This Relates to the Final Report Findings
 
-The Nebula data turns Findings #1 and #2 from theoretical/testbed-only
-results into measurable production phenomena:
+The Nebula data does not by itself prove any of the final report findings.
+What it adds:
 
-| Finding | Status before | Status after Nebula analysis |
-|---|---|---|
-| **#1 v1/v2 reachability gap** | High severity, theoretical impact (DHT ignores v2) | Production data: post-v2 Kubo oscillates 3x more than pre-v2 |
-| **#2 v1 oscillation → DHT oscillation** | Testbed result (60% of unreliable runs) | Production data: ~5% of stable IPFS DHT peers oscillate per 7 days; ~7% for latest Kubo |
+| Final report finding | What Nebula data adds |
+|---|---|
+| **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Observed correlation: Kubo versions where v2 *can* be enabled (≥ 0.34) show ~3.3× more toggling than older versions in this 7-day window. Consistent with the gap hypothesis but not proof. |
+| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | ~5% of observed Kubo peers in the 7-day window exhibit `/ipfs/kad/1.0.0` toggling. Confirms that DHT-mode-protocol-toggling occurs in production at a measurable rate, on a population we cannot fully characterize. |
 
 The fix proposed in Finding #1 (bridging v2 results into
-`EvtLocalReachabilityChanged`) is now backed by quantitative production
-evidence — not just testbed observations.
+`EvtLocalReachabilityChanged`) is supported by, but not proven by, this
+data. A controlled comparison (forked Kubo with the bridge applied,
+deployed alongside upstream Kubo, measured by Nebula in the same way)
+would be the next step.
 
 ---
 
 ## How to Reproduce
 
-The data is in `results/nebula-analysis/data/` (CSVs). The plotting script
-is `results/nebula-analysis/plot.py`. Charts are in
-`results/nebula-analysis/*.png`.
-
-Connection details for the ClickHouse dataset are in
-`docs/future-work-nat-monitoring.md`. The queries used are visible in the
-git history of this branch.
+The plotting script is `results/nebula-analysis/plot.py`. Charts are in
+`results/nebula-analysis/*.png`. Raw CSVs are gitignored
+(`results/*/data/`) and can be regenerated by running the queries
+documented below against the public ClickHouse dataset (connection
+details in `docs/future-work-nat-monitoring.md`).
 
 ### Charts and data sources
 
-Each chart is generated from a single query against the ClickHouse dataset.
-The query and source table are documented below.
-
-#### `01_clients.png` — Client distribution by agent_version
-
-- **Source table:** `nebula_ipfs_amino.visits` (raw bronze)
-- **Filter:** Single most recent successful crawl from `nebula_ipfs_amino.crawls`
-- **Columns used:** `agent_version`, `connect_maddr` (NULL = not dialable),
-  `crawl_id`
-- **What it shows:** All visited peers grouped by client implementation.
-  Two values per row: total visible (peer ID known to the DHT) and
-  dialable (Nebula could open a connection).
-
-#### `02_autonat_protocols.png` — AutoNAT v1/v2 server adoption (Kubo only)
+#### `01_clients.png` — Client distribution
 
 - **Source table:** `nebula_ipfs_amino.visits`
-- **Filter:** Single most recent successful crawl, `agent_version LIKE 'kubo/%'`,
-  `connect_maddr IS NOT NULL` (dialable Kubo only)
-- **Columns used:** `protocols` (Array), checked for membership of:
-  - `/libp2p/autonat/1.0.0` → v1 server
-  - `/libp2p/autonat/2/dial-request` → v2 server
-- **What it shows:** Categorical breakdown of dialable Kubo nodes by
-  AutoNAT server protocols advertised: v1 only, v1 + v2, v2 only, neither.
+- **Filter:** `crawl_id =` the most recent successful crawl from
+  `nebula_ipfs_amino.crawls`
+- **Columns used:** `agent_version`, `connect_maddr` (NULL = not dialable)
+- **Bucketing:** `agent_version` matched against patterns (`kubo/%`,
+  `go-ipfs/%`, `storm%`, etc.); empty agent versions placed in `(empty)`
 
-#### `03_server_mode.png` — DHT server mode (kad protocol) by Kubo version
+#### `02_autonat_protocols.png` — AutoNAT v1/v2 server protocols
 
 - **Source table:** `nebula_ipfs_amino.visits`
-- **Filter:** Single most recent successful crawl, dialable Kubo only
+- **Filter:** Most recent successful crawl, `agent_version LIKE 'kubo/%'`,
+  `connect_maddr IS NOT NULL`
+- **Columns used:** `protocols` (Array), checked for membership of
+  `/libp2p/autonat/1.0.0` and `/libp2p/autonat/2/dial-request`
+
+#### `03_server_mode.png` — DHT kad protocol presence by Kubo version
+
+- **Source table:** `nebula_ipfs_amino.visits`
+- **Filter:** Most recent successful crawl, dialable Kubo only
 - **Columns used:** `agent_version` (parsed into version buckets),
   `protocols` (checked for `/ipfs/kad/1.0.0`)
-- **What it shows:** For each Kubo version bucket, the percentage of
-  dialable nodes that advertise the DHT server protocol — a snapshot
-  measure of "currently in DHT Server mode."
-- **Caveat:** Snapshot only. Does not capture oscillation; that is in
-  chart 04.
+- **Caveat:** Snapshot only; does not reflect changes between crawls.
 
-#### `04_oscillation.png` — Oscillation rate by Kubo version (key chart)
+#### `04_oscillation.png` — DHT kad protocol toggling rate by Kubo version
 
 - **Source tables:**
   - `nebula_ipfs_amino_silver.peer_logs_protocols` (deduplicated change log
-    of protocol sets per peer)
+    of protocol sets per peer; only inserts on change)
   - `nebula_ipfs_amino_silver.peer_logs_agent_version` (agent version
     history per peer)
 - **Filter:** `updated_at > now() - INTERVAL 7 DAY`, peers with
   `>= 2` protocol log entries
-- **Method:** For each peer, count rows in `peer_logs_protocols` where
-  `/ipfs/kad/1.0.0` is in `protocols` versus rows where it is not.
-  A peer is "oscillating" if it has both states present (toggled at
-  least once during the 7-day window). Joined to `peer_logs_agent_version`
+- **Method:** Per peer, count silver-table rows where `/ipfs/kad/1.0.0` is
+  in `protocols` and rows where it is not. A peer is "toggling" if both
+  states appear in the window. Joined to `peer_logs_agent_version` (taking
+  the latest known agent version per peer via `argMax(..., updated_at)`)
   to bucket by Kubo version.
-- **What it shows:** For each Kubo version bucket, the percentage of
-  observed peers whose `/ipfs/kad/1.0.0` advertisement toggled on/off
-  during the 7-day window. The `peer_logs_protocols` silver table only
-  inserts a row when the protocol set changes, so this is a direct
-  measure of state changes — independent of crawl frequency.
-- **Why it matters:** Each toggle corresponds to a Kubo node flipping
-  between DHT Server and Client mode, which only happens when AutoNAT v1
-  changes the local reachability state. This is a direct external
-  observation of Finding #2 (v1 oscillation) and Finding #1 (v2 not
-  fixing it).
+- **Caveat:** The silver table only inserts on change, so peers with no
+  observed changes in the window are excluded by the `>= 2` filter. This
+  biases the population toward peers with at least some change activity.
 
-#### `05_dialable_over_time.png` — Dialable peer count and ratio over 30 days
+#### `05_dialable_over_time.png` — Dialable peer counts over 30 days
 
-- **Source table:** `nebula_ipfs_amino.crawls` (per-crawl summary stats)
+- **Source table:** `nebula_ipfs_amino.crawls`
 - **Filter:** `state = 'succeeded' AND created_at > now() - INTERVAL 30 DAY`
 - **Columns used:** `created_at`, `crawled_peers`, `dialable_peers`,
   `undialable_peers`
-- **Method:** Daily averages across the ~12 crawls per day.
-- **What it shows:** Total visible peer count vs dialable peer count over
-  the last 30 days, plus the percentage that is dialable. Pre-aggregated
-  in the `crawls` table by Nebula itself; we don't recompute it from
-  individual visits.
+- **Method:** Daily averages across the ~12 successful crawls per day. The
+  per-crawl numbers are pre-aggregated by Nebula in the `crawls` table.
 
-### Caveats
+---
 
-1. **Selection bias.** Nebula can only see peers it can reach. Behind-NAT
-   peers in DHT client mode appear as peer IDs in routing tables but are
-   not dialable. Our oscillation analysis is restricted to peers that ARE
-   dialable at least once.
+## Caveats and Limitations
 
-2. **Silver table semantics.** The `peer_logs_protocols` table only inserts
-   a row when a peer's protocol set changes. A truly stable peer has very
-   few rows. Our oscillation filter (`observations >= 2` or `>= 4`) selects
-   for peers that have at least some change history — biasing toward less
-   stable peers but excluding the smallest, most volatile ones.
+1. **Selection bias.** Nebula can only Identify peers it can dial. The
+   non-dialable population (more than half of visible peer IDs) has no
+   agent_version, no protocol list, no listen addresses. All findings
+   above are conditional on being dialable from Nebula's vantage point.
 
-3. **Snapshot effect.** Single-crawl false positive/negative numbers are
-   snapshots; the 7-day window catches more oscillation but may miss
-   shorter cycles.
+2. **Single vantage point.** Nebula crawls from ProbeLab's infrastructure.
+   "Dialable" means "dialable from there." A peer dialable from one vantage
+   point may not be dialable from another (e.g., due to ISP-level filtering,
+   geographic routing, or per-source NAT filtering).
 
-4. **Kubo version distribution.** Smaller version buckets (e.g., 0.30 with
-   38 peers) have noisier percentages. The trend is clearest in the
-   versions with hundreds of peers (0.1x, 0.2x, 0.37, 0.39, 0.4x).
+3. **Protocol advertisement is a proxy, not a direct measurement.** We
+   infer "DHT in Server mode" from `/ipfs/kad/1.0.0` advertisement, and
+   "AutoNAT considers the node Public" from the same. These inferences are
+   based on Kubo's source code (verified in
+   `docs/v1-v2-state-transitions.md`) but are not directly observed.
 
-5. **Possible confounds.** We did not control for cloud provider, geographic
-   location, or hardware class. Newer Kubo versions could correlate with
-   newer deployment patterns that independently produce more oscillation.
+4. **Silver table semantics.** The `peer_logs_*` tables only insert on
+   change. A truly stable peer has very few rows. Our `>= 2` filter
+   selects for peers with at least some observed change history,
+   potentially biasing toward less stable peers.
+
+5. **Snapshot vs window.** The single-crawl numbers (Findings B, C, D) are
+   instantaneous snapshots and do not capture state changes between crawls.
+   The 7-day window (Finding E) catches more changes but may miss cycles
+   shorter than the ~2-hour crawl interval.
+
+6. **Causation vs correlation.** Finding E shows a correlation between
+   Kubo version and toggling rate. It does not establish causation. We did
+   not control for deployment environment, configuration, or other
+   confounds.
+
+7. **Sample sizes.** Some Kubo version buckets contain few peers (e.g.,
+   0.30 with 38, 0.31 with 50, 0.34 with 60). Percentages in small buckets
+   are subject to higher variance. The most reliable comparisons are in
+   the larger buckets (0.1x, 0.2x, 0.37, 0.39, 0.4x).
+
+8. **No comparison network.** We did not run the same analysis on Filecoin
+   or Celestia (other go-libp2p networks). Doing so would help isolate
+   whether the version trend in Finding E is specific to Kubo's v2 rollout
+   or to go-libp2p version changes generally.
