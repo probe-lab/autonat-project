@@ -310,6 +310,13 @@ undialable peers and non-Kubo clients.***
 
 ### Finding D: In a single snapshot, ~99% of dialable Kubo advertise the DHT server protocol
 
+This finding describes a single point-in-time measurement. It does not
+characterize the network's behavior over time — that requires the
+multi-crawl analysis in Findings E and F. The two are not in conflict;
+they measure different things and the apparent stability in this snapshot
+is consistent with the dynamic behavior shown later (see "Reconciling
+Findings D and E" below).
+
 Per Kubo version bucket, in the same recent crawl:
 
 | Kubo version | Dialable nodes | % advertising `/ipfs/kad/1.0.0` |
@@ -335,10 +342,10 @@ visited. The snapshot view does not detect oscillation.
 
 We did not compute "false positive" or "false negative" rates relative to
 AutoNAT's internal state because we cannot observe that state. The
-snapshot consistency above (99% match between "is dialable" and "advertises
-kad" for Kubo) is consistent with the inference that Kubo's DHT mode
-correctly tracks reachability at the moment of measurement, but we do not
-prove it.
+snapshot ~99% number tells us how often Kubo nodes are kad-advertising at
+any given moment — it does not tell us how stable that state is over time.
+Over a window of multiple observations the picture changes substantially:
+see Findings E and F, and "Reconciling Findings D and E" below.
 
 ![DHT server mode by Kubo version (snapshot)](../results/nebula-analysis/03_server_mode.png)
 *Figure 4: Percentage of dialable Kubo nodes advertising `/ipfs/kad/1.0.0`,
@@ -554,6 +561,88 @@ Source: `nebula_ipfs_amino_silver.peer_logs_protocols` joined to
 `peer_logs_agent_version`. The two bars are nearly identical for most
 versions, indicating the kad toggling is dominantly explained by the
 AutoNAT Public ↔ non-Public state-change pattern.*
+
+---
+
+## Reconciling Findings D and E
+
+A reader looking at Findings D and E in sequence might see an apparent
+contradiction:
+
+- **Finding D**: in a single recent crawl, ~99% of dialable Kubo nodes
+  advertise `/ipfs/kad/1.0.0`. The snapshot looks stable.
+- **Finding E**: ~5% of stable Kubo peers in a 7-day window have
+  observations both with kad on AND with kad off. The window looks
+  unstable.
+
+These are not in conflict — they measure different things on different
+populations and time scales.
+
+### How a single peer can appear in both numbers
+
+Consider a Kubo peer that flips Public → Private → Public during the
+7-day window. Each flip is recorded as a separate row in the silver
+`peer_logs_protocols` table (one when kad disappears, one when kad
+reappears).
+
+- In the silver-table view, this peer has both `kad-on` and `kad-off`
+  rows → counted in **Finding E** as toggling.
+- In the bronze `visits` view of any single crawl, the peer is whichever
+  state it happens to be in at that moment. If it spends more time
+  Public than non-Public, it's most likely caught in the kad-on state,
+  contributing to **Finding D's 99%**.
+
+So the snapshot 99% is the time-averaged probability of being in
+kad-on, while the toggling % is the probability of having flipped at
+least once during the window. They are different statistics of the same
+underlying behavior.
+
+### Quantifying time spent in each state
+
+To check whether the two numbers are quantitatively consistent, we
+computed for the 158 Kubo peers that toggle: the fraction of their
+silver-table observations that are in the kad-off state.
+
+| Statistic | Value |
+|---|---|
+| Toggling Kubo peers (7-day window) | 158 |
+| Mean fraction of observations in kad-off | **33.5%** |
+| Median | 32.3% |
+| Interquartile range | 17.5% – 50% |
+
+So toggling peers do not spend most of their time kad-on with brief
+blips off. On average they spend about a third of their observed time
+in kad-off, and the middle half spend between 17% and 50% in kad-off.
+
+This is more substantial DHT mode instability than the snapshot 99%
+number suggests on its own.
+
+### Mathematical consistency check
+
+If 158 Kubo peers (out of ~4,000 stable peers) toggle, and they spend
+~33% of their time in kad-off, then in any single snapshot we should
+expect to catch:
+
+- 158 × 0.335 ≈ 53 peers in kad-off due to toggling
+- Plus a small number of peers that are always-off for other reasons
+- Total expected snapshot fraction in kad-off ≈ 1.5%–2% of the dialable
+  Kubo population
+
+Finding D's snapshot showed roughly 1% of dialable Kubo not advertising
+kad, depending on the version. **The two numbers are roughly consistent
+within the noise of small per-version buckets.**
+
+### What this means for the framing
+
+Finding D (99% snapshot stability) and Finding E/F (5% toggling rate)
+describe the same behavior at different time scales. They are not in
+conflict, but the snapshot view by itself is misleading: "99% of Kubo
+nodes are correctly in DHT server mode right now" obscures "and ~5% of
+them will have flipped to client mode at least once by the end of the
+week, spending on average a third of their observed time in client
+mode." Both statements are true; the second is more relevant for the
+question of whether AutoNAT-driven DHT mode behavior is stable in
+practice.
 
 ---
 
