@@ -456,17 +456,7 @@ where v2 was never deployed, (b) a controlled deployment experiment, or
 (c) a fork of Kubo that wires v2 into `EvtLocalReachabilityChanged` and
 shows reduced oscillation in production.
 
-![Toggling rate by Kubo version](../results/nebula-analysis/04_oscillation.png)
-*Figure 5: Percentage of observed Kubo peers (in the last 7 days) whose
-protocol set toggled to/from including `/ipfs/kad/1.0.0`. Source:
-`nebula_ipfs_amino_silver.peer_logs_protocols` joined to
-`peer_logs_agent_version`. **Implicitly excludes peers that were undialable
-throughout the 7-day window**: the silver `peer_logs_*` tables only insert
-rows when a peer's state is observed via Identify, which requires a
-successful connection. A peer that was never successfully Identified in
-the 7-day window has no rows and is not counted. The vertical line marks
-Kubo 0.34, the version that introduced AutoNAT v2 as an opt-in feature.
-Smaller buckets have larger uncertainty.*
+See Figure 5 below (in Finding F) for the per-version visualization.
 
 ### Finding G: Most observed Kubo flips go to Private, not Unknown — and the peers are demonstrably dialable while Private
 
@@ -846,14 +836,16 @@ What the data does **not** show:
   count transitions, only presence-of-both-states.
 
 ![Refined: kad toggling vs AutoNAT-driven flip rate by Kubo version](../results/nebula-analysis/06_oscillation_refined.png)
-*Figure 6: Kad toggling (grey) vs AutoNAT-driven flips (red) per Kubo
+*Figure 5: Kad toggling (grey) vs AutoNAT-driven flips (red) per Kubo
 version. AutoNAT-driven flips are peers that have both a Public
 (`kad on AND autonat-v1-server on`) state and a non-Public
 (`kad off AND autonat-v1-server on/off`) state in the 7-day window.
 Source: `nebula_ipfs_amino_silver.peer_logs_protocols` joined to
 `peer_logs_agent_version`. The two bars are nearly identical for most
 versions, indicating the kad toggling is dominantly explained by the
-AutoNAT Public ↔ non-Public state-change pattern.*
+AutoNAT Public ↔ non-Public state-change pattern. The grey bars
+represent the looser kad-only metric from Finding E; the red bars
+are the AutoNAT-driven refinement from Finding F.*
 
 ### Finding I: Joint state — dialability × kad pattern × AutoNAT v2 support (the main production view)
 
@@ -945,14 +937,8 @@ Additionally, the "not found" dimension:
    Note that 22 of these also advertise v2 — they run v2 server but
    disable DHT server mode.
 
-![Kubo joint state: dialability × kad pattern × v2](../results/nebula-analysis/07_joint_state.png)
-*Figure 7: Per-peer joint state of Kubo peers visited in the last
-7 days. Horizontal axis groups peers by dialability pattern;
-colored bars stack the kad protocol patterns within each group. The
-dark overlay shows the subset of peers that also advertise
-`/libp2p/autonat/2/dial-request` at some point in the window.
-Sources: `nebula_ipfs_amino.visits` and
-`nebula_ipfs_amino_silver.peer_logs_protocols`.*
+For the visual continuum across dialability and Public-state at finer
+resolution, see Figure 6 in Finding J below.
 
 #### How to read these numbers
 
@@ -1342,7 +1328,7 @@ that are mostly undialable from Nebula's vantage point but, in the
 rare moments Nebula could identify them, were always observed in
 the Public state.
 
-The 2D distribution heatmap (Figure 8) shows the joint
+The 2D distribution heatmap (Figure 6) shows the joint
 distribution of dialability fraction (X-axis, 0%–100% in deciles)
 against Public-state fraction (Y-axis, 0%–100% in deciles), counting
 Kubo peers in each cell. The cells of interest:
@@ -1388,7 +1374,7 @@ points or instrumented Kubo logs. We document the cell exists and
 move on.
 
 ![Dialability × Public-state heatmap](../results/nebula-analysis/08_dialability_vs_public.png)
-*Figure 8: 2D distribution of Kubo peers by dialability fraction
+*Figure 6: 2D distribution of Kubo peers by dialability fraction
 (X-axis) and Public-state fraction (Y-axis) over the 7-day window.
 Both axes are deciles (0% to 100%). Cell value is the number of
 Kubo peers; color is the log10 of that count (lighter = fewer).
@@ -1400,7 +1386,9 @@ peers. The (100% dialable, anything less than 100% Public) cells
 within the dashed-line column are the strict-stable AutoNAT-flipping
 candidates from this finding (8 peers, mostly post-v2). The top-left
 corner shows 493 rarely-dialable but always-Public peers — the
-inverse-failure direction with its survivor-bias caveat.*
+inverse-failure direction with its survivor-bias caveat. The bottom-right
+shows 18 always-dialable but always-non-Public peers — likely
+explicit DHT-client-mode operators.*
 
 #### Summary of Finding J
 
@@ -1794,24 +1782,6 @@ details in `docs/future-work-nat-monitoring.md`).
   `protocols` (checked for `/ipfs/kad/1.0.0`)
 - **Caveat:** Snapshot only; does not reflect changes between crawls.
 
-#### `04_oscillation.png` — DHT kad protocol toggling rate by Kubo version
-
-- **Source tables:**
-  - `nebula_ipfs_amino_silver.peer_logs_protocols` (deduplicated change log
-    of protocol sets per peer; only inserts on change)
-  - `nebula_ipfs_amino_silver.peer_logs_agent_version` (agent version
-    history per peer)
-- **Filter:** `updated_at > now() - INTERVAL 7 DAY`, peers with
-  `>= 2` protocol log entries
-- **Method:** Per peer, count silver-table rows where `/ipfs/kad/1.0.0` is
-  in `protocols` and rows where it is not. A peer is "toggling" if both
-  states appear in the window. Joined to `peer_logs_agent_version` (taking
-  the latest known agent version per peer via `argMax(..., updated_at)`)
-  to bucket by Kubo version.
-- **Caveat:** The silver table only inserts on change, so peers with no
-  observed changes in the window are excluded by the `>= 2` filter. This
-  biases the population toward peers with at least some change activity.
-
 #### `05_dialable_over_time.png` — Dialable peer counts over 30 days
 
 - **Source table:** `nebula_ipfs_amino.crawls`
@@ -1844,24 +1814,6 @@ details in `docs/future-work-nat-monitoring.md`).
   cell (low dialability, always Public) is the inverse-failure
   direction.
 
-#### `07_joint_state.png` — Joint state (dialability × kad pattern × v2)
-
-- **Source tables:**
-  - `nebula_ipfs_amino.visits` (for dialability pattern)
-  - `nebula_ipfs_amino_silver.peer_logs_protocols` (for kad and v2
-    protocol patterns)
-- **Filter:** Visits and silver rows in the last 7 days. Restricted
-  to Kubo peers (`agent_version LIKE 'kubo/%'` from any visit).
-- **Method:** Per peer, classify dialability across visits, kad
-  protocol pattern across silver rows, and presence of
-  `/libp2p/autonat/2/dial-request` in any silver row. Cross-tabulate
-  and count peers in each joint cell.
-- **Why it matters:** This is the main per-peer view of the Kubo
-  population's AutoNAT state. The "always dialable + kad toggles"
-  cell (31 peers, ~0.66% of observed Kubo) is the tightest measurement
-  of AutoNAT v1 oscillation affecting stable peers — isolated from
-  restart and disconnect noise.
-
 #### `06_oscillation_refined.png` — kad-only vs AutoNAT-driven flip rate
 
 - **Source tables:**
@@ -1877,7 +1829,7 @@ details in `docs/future-work-nat-monitoring.md`).
   - **Inconsistent**: kad ON, autonat OFF (excluded; mostly non-Kubo)
   A peer is "AutoNAT-driven flipping" if it has at least one Public state
   and at least one non-Public state (Unknown or Private) in the window.
-  Compared side-by-side with the looser kad-only metric from chart 04.
+  Compared side-by-side with the looser kad-only metric (Finding E).
 - **What it shows:** For most Kubo versions the two metrics are
   identical, indicating the kad toggling we observed is dominantly the
   AutoNAT Public ↔ non-Public state-change pattern, not unrelated
