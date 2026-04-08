@@ -19,6 +19,9 @@ dataset. The source table for each chart is:
   07_joint_state.csv           nebula_ipfs_amino.visits
                                JOIN nebula_ipfs_amino_silver.peer_logs_protocols
                                joint state (dialability × kad pattern) for Kubo peers
+  08_dialability_vs_public.csv nebula_ipfs_amino.visits
+                               JOIN nebula_ipfs_amino_silver.peer_logs_protocols
+                               2D distribution: dialability fraction × Public-state fraction
 
 Full query text and column documentation are in
 docs/nebula-autonat-analysis.md
