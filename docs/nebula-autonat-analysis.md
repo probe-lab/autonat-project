@@ -358,6 +358,14 @@ smaller buckets have noisier percentages.*
 
 ### Finding E: Kubo versions ≥ 0.34 show a higher rate of DHT-server-protocol toggling than older versions
 
+> **Important: this finding measures kad protocol toggling on peers
+> Nebula could Identify at multiple points in the window. It does NOT
+> separate "AutoNAT v1 flipped DHT mode while the peer stayed reachable"
+> from "the peer disappeared and came back" (e.g., restart, transient
+> network problem). See Finding H below for the cleaner subset that
+> rules out dialability changes — the strong-subset numbers are much
+> smaller.**
+
 Tracking the same peers across multiple crawls over 7 days using the silver
 change-log table. A peer is counted as "toggling" if its protocol set
 contains `/ipfs/kad/1.0.0` in some logged states and not in others within
@@ -847,6 +855,145 @@ Source: `nebula_ipfs_amino_silver.peer_logs_protocols` joined to
 versions, indicating the kad toggling is dominantly explained by the
 AutoNAT Public ↔ non-Public state-change pattern.*
 
+### Finding H: Most kad toggling is on peers that also flip in/out of dialability
+
+Findings E and F count peers based on the silver `peer_logs_protocols`
+table, which only contains rows from successful Identify exchanges
+(connection succeeded, Identify completed). What that filter does NOT
+guarantee is that the peer was *consistently* dialable across the
+window — only that it was dialable at the moments where silver rows
+exist.
+
+To separate "Kubo's AutoNAT v1 flipped DHT mode while the peer stayed
+reachable" from "the peer disappeared and came back" (restart, transient
+network problem, intermittent NAT), we cross-tabulated kad toggling
+against per-peer dialability stability across all Nebula visits in the
+same 7-day window.
+
+#### Dialability stability across the network
+
+For all peer IDs Nebula visited 2+ times in the 7-day window:
+
+| Population | Peers | % |
+|---|---|---|
+| Total visited 2+ times | 14,566 | 100% |
+| Always dialable | 2,794 | 19.2% |
+| Always undialable | 8,637 | 59.3% |
+| **Dialability flipping** (sometimes dialable, sometimes not) | **3,135** | **21.5%** |
+
+Restricted to Kubo (peers that returned a `kubo/*` agent string at
+least once):
+
+| Kubo population | Peers | % |
+|---|---|---|
+| Total Kubo visited 2+ times | 4,566 | 100% |
+| Always dialable | 2,366 | 51.8% |
+| Dialability flipping | **2,200** | **48.2%** |
+| Always undialable | 0 | 0% |
+
+**~48% of all observed Kubo peers flip dialability at least once in
+the 7-day window.** This is a much larger population than the 158
+"toggling kad" peers from Finding E. Coming-and-going is the dominant
+behavior, not stable presence.
+
+#### Cross-tabulating dialability with kad state
+
+For Kubo peers visited 2+ times, the joint distribution of dialability
+and kad-state observations:
+
+| Dialability | kad state | Count |
+|---|---|---|
+| **Always dialable** | always kad on | 2,199 |
+| **Always dialable** | **kad toggling** | **32** |
+| Always dialable | always kad off | 3 |
+| Always dialable | (no silver entry — single visit only) | 132 |
+| **Dialability flipping** | always kad on | 1,601 |
+| **Dialability flipping** | **kad toggling** | **135** |
+| Dialability flipping | always kad off | 45 |
+| Dialability flipping | (no silver entry) | 419 |
+
+The 158-ish toggling Kubo peers from Finding E split as **~135
+dialability-flipping** and **~32 always-dialable**. **~80% of the
+toggling peers in Finding E are also flipping dialability**, which
+means restart and transient-disconnect explanations cannot be excluded
+for the bulk of them.
+
+#### The strong subset: per-version AutoNAT-driven flipping among always-dialable Kubo peers
+
+Restricting to Kubo peers that were always dialable in the 7-day window
+AND showed the AutoNAT-driven (kad+autonat-v1) state pattern from
+Finding F:
+
+| Version | Always-dialable Kubo | AutoNAT-driven flips | % |
+|---|---|---|---|
+| 0.1x | 384 | 0 | 0% |
+| 0.2x | 820 | 3 | 0.37% |
+| 0.30 | 20 | 0 | 0% |
+| 0.31 | 25 | 1 | 4.00% |
+| 0.32 | 112 | 1 | 0.89% |
+| 0.33 (last v1-only) | 79 | 0 | 0% |
+| 0.34 (v2 added) | 43 | 2 | 4.65% |
+| 0.35 | 33 | 2 | 6.06% |
+| 0.36 | 69 | 3 | 4.35% |
+| 0.37 | 127 | 0 | 0% |
+| 0.38 | 110 | 1 | 0.91% |
+| 0.39 | 277 | 8 | 2.89% |
+| 0.4x (latest) | 263 | 5 | 1.90% |
+
+Aggregated:
+
+| Bucket | Strong subset | Flips | % |
+|---|---|---|---|
+| Kubo < 0.34 (v1 only) | 1,440 | 5 | **0.35%** |
+| Kubo ≥ 0.34 (v2 available) | 922 | 21 | **2.28%** |
+
+What the strong-subset data shows:
+- The version trend is preserved (post-v2 still higher than pre-v2)
+  but the absolute numbers drop substantially
+- The pre-v2 baseline is essentially **0%** for the largest version
+  buckets (0.1x with 384 peers, 0.33 with 79 peers, 0.30 with 20
+  peers — all zero AutoNAT-driven flips)
+- Post-v2 versions show 0–6% flipping with no clear monotonic trend
+  across versions
+
+What the strong-subset data does **not** show:
+- The absolute counts (5 vs 21) are very small. Statistical noise
+  dominates the per-version percentages.
+- We cannot rule out that the small post-v2 cohort happens to include
+  peers with weird configurations or transient network problems
+  unrelated to AutoNAT.
+- The strong subset itself is biased: it requires successful Nebula
+  dials in every crawl, which selects for peers on stable infrastructure.
+  These are exactly the peers we'd expect to NOT have AutoNAT problems.
+
+#### What this means for the report
+
+Finding E's headline ("3.3× higher toggling in post-v2 Kubo") was
+measuring a population dominated by peers that flip dialability — i.e.,
+peers that come and go, not peers that stay up and oscillate. After
+restricting to the always-dialable subset, the number of confirmed
+AutoNAT-driven flips on stable peers drops to **~32 Kubo peers across
+the entire 7-day window**, or roughly **~1.4% of always-dialable Kubo**.
+
+This is a much weaker signal than the original framing suggested. The
+right way to read it:
+
+- Finding F (kad+autonat-v1 lockstep) is a methodologically sound proxy
+  for "Kubo thinks it is in non-Public state"
+- Finding E's per-version trend is real but **dominated by peers
+  flipping in and out of dialability**, not by stable peers oscillating
+  AutoNAT state
+- The strong subset (always-dialable + AutoNAT pattern) is small enough
+  that per-version trends are not statistically meaningful
+- **Production AutoNAT v1 oscillation, isolated from restart and
+  disconnect noise, affects on the order of 1-2% of stable Kubo peers
+  in this 7-day window — not 5-7%**
+
+The testbed-derived claim that AutoNAT v1 oscillates with unreliable
+servers (Finding #2 in the final report) is still consistent with this
+data. It is just not as quantitatively dramatic in production as the
+naive kad-toggling number suggested.
+
 ---
 
 ## Reconciling Findings D and E
@@ -1162,14 +1309,23 @@ What it adds:
 
 | Final report finding | What Nebula data adds |
 |---|---|
-| **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Observed correlation: Kubo versions where v2 *can* be enabled (≥ 0.34) show ~2.6× more AutoNAT-driven flips than older versions in this 7-day window (5.25% vs 2.05% after the Finding F refinement). Consistent with the gap hypothesis (v2 not fixing oscillation) but not proof of causation. |
-| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | ~3.6% of observed Kubo peers in the 7-day window exhibit the AutoNAT-driven Public ↔ non-Public state pattern (Finding F). Confirms that AutoNAT-driven DHT mode flipping occurs in production at a measurable rate, on a population biased toward dialable peers. |
+| **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Weak observed correlation: Kubo versions where v2 *can* be enabled (≥ 0.34) show a higher AutoNAT-driven flip rate among always-dialable peers (~2.3% vs ~0.35% pre-v2; Finding H). Absolute counts are tiny (5 vs 21 peers across the 7-day window) so per-version trends are at the edge of statistical noise. Consistent with the gap hypothesis but not proof of causation. |
+| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | ~32 always-dialable Kubo peers (~1.4% of the always-dialable Kubo population) exhibit the AutoNAT-driven Public ↔ non-Public state pattern in the 7-day window without any dialability changes (Finding H strong subset). Confirms that AutoNAT-driven DHT mode flipping occurs in production at a measurable but modest rate, on a population that is by construction the most stable subset of the network. |
 
 The fix proposed in Finding #1 (bridging v2 results into
 `EvtLocalReachabilityChanged`) is supported by, but not proven by, this
 data. A controlled comparison (forked Kubo with the bridge applied,
 deployed alongside upstream Kubo, measured by Nebula in the same way)
 would be the next step.
+
+**Important caveat about the size of the production effect:** Earlier
+versions of this analysis presented Finding E's "5-7% kad toggling rate
+in post-v2 Kubo" as the production-evidence number. After the Finding H
+correction, the methodologically defensible number is ~1.4% of
+always-dialable Kubo peers showing AutoNAT-driven flipping. The
+production AutoNAT v1 oscillation problem exists and is observable, but
+it is much smaller in magnitude than the naive kad-toggling metric
+suggested.
 
 ---
 
