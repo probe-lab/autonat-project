@@ -16,6 +16,9 @@ dataset. The source table for each chart is:
   06_oscillation_refined.csv   nebula_ipfs_amino_silver.peer_logs_protocols
                                JOIN peer_logs_agent_version  (last 7 days)
                                kad-only vs AutoNAT-driven (kad+autonat v1) by version
+  07_joint_state.csv           nebula_ipfs_amino.visits
+                               JOIN nebula_ipfs_amino_silver.peer_logs_protocols
+                               joint state (dialability × kad pattern) for Kubo peers
 
 Full query text and column documentation are in
 docs/nebula-autonat-analysis.md
@@ -298,6 +301,70 @@ def chart_oscillation_refined():
     print("wrote 06_oscillation_refined.png")
 
 
+# ----------------------------------------------------------------------
+# Chart 7: Joint state — dialability × kad pattern × v2 advertised
+# ----------------------------------------------------------------------
+def chart_joint_state():
+    rows = read_csv("07_joint_state.csv")
+    # Sort by dial_state then kad_pattern
+    dial_order = ["always dialable", "flipping dialability", "never dialable"]
+    kad_order = [
+        "always kad on (Public)",
+        "kad toggles",
+        "always kad off (Private/Client mode)",
+        "no silver data",
+    ]
+
+    # Build a grid: rows = kad pattern, columns = dial state
+    data = {ks: {ds: (0, 0) for ds in dial_order} for ks in kad_order}
+    for row in rows:
+        ds = row["dial_state"]
+        kp = row["kad_pattern"]
+        peers = int(row["peers"])
+        v2 = int(row["with_v2"])
+        if ds in dial_order and kp in kad_order:
+            data[kp][ds] = (peers, v2)
+
+    fig, ax = plt.subplots(figsize=(11, 7))
+
+    ncols = len(dial_order)
+    nrows = len(kad_order)
+    bar_w = 0.35
+    x = list(range(ncols))
+
+    # Stacked: total peers (light), v2-advertising subset (dark)
+    for row_idx, kp in enumerate(kad_order):
+        totals = [data[kp][ds][0] for ds in dial_order]
+        v2s = [data[kp][ds][1] for ds in dial_order]
+        offset = (row_idx - (nrows - 1) / 2) * bar_w
+        xs = [xi + offset for xi in x]
+        ax.bar(xs, totals, bar_w * 0.9, label=kp, color=["#94a3b8", "#ef4444", "#f59e0b", "#e5e7eb"][row_idx])
+        # Dark overlay for v2-advertising subset
+        ax.bar(xs, v2s, bar_w * 0.9, color="black", alpha=0.35)
+        # Label peers above each bar
+        for xi, t, v in zip(xs, totals, v2s):
+            if t > 0:
+                label = f"{t}"
+                if v > 0:
+                    label += f"\n({v} v2)"
+                ax.text(xi, t + 30, label, ha="center", fontsize=7)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(dial_order)
+    ax.set_xlabel("Dialability in the 7-day window")
+    ax.set_ylabel("Number of Kubo peers")
+    ax.set_title("Kubo peer joint state: dialability × kad protocol pattern\n"
+                 "Dark overlay = subset also advertising AutoNAT v2 server",
+                 loc="left")
+    ax.legend(loc="upper right", frameon=False, fontsize=8, title="kad protocol pattern")
+    ax.yaxis.set_major_formatter(mtick.FuncFormatter(lambda x, _: f"{int(x):,}"))
+
+    fig.tight_layout()
+    fig.savefig(ROOT / "07_joint_state.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("wrote 07_joint_state.png")
+
+
 if __name__ == "__main__":
     chart_clients()
     chart_autonat_protocols()
@@ -305,4 +372,5 @@ if __name__ == "__main__":
     chart_oscillation()
     chart_dialable_over_time()
     chart_oscillation_refined()
+    chart_joint_state()
     print("\nDone. Charts in", ROOT)

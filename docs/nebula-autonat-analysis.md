@@ -855,6 +855,149 @@ Source: `nebula_ipfs_amino_silver.peer_logs_protocols` joined to
 versions, indicating the kad toggling is dominantly explained by the
 AutoNAT Public ↔ non-Public state-change pattern.*
 
+### Finding I: Joint state — dialability × kad pattern × AutoNAT v2 support (the main production view)
+
+Findings A-G measure individual dimensions. This one joins them into a
+single per-peer classification that is the closest we can get to "what
+is the real state of AutoNAT in the IPFS Amino DHT?"
+
+For every peer ID Nebula visited in the last 7 days, we computed:
+
+- **Dialability pattern** (`always dialable`, `flipping dialability`,
+  `never dialable`) — from `nebula_ipfs_amino.visits.connect_maddr`
+  across the window
+- **kad protocol pattern** (`always kad on`, `always kad off`,
+  `kad toggles`, `no silver data`) — from
+  `nebula_ipfs_amino_silver.peer_logs_protocols`
+- **AutoNAT v2 support** (presence of `/libp2p/autonat/2/dial-request`
+  in any silver row for the peer)
+- **Peer "lost" between windows** — peers visited 14–21 days ago but
+  not in the last 7 days
+
+Restricted to Kubo peers only (peers that returned a `kubo/*` agent
+string at any point).
+
+#### Per-peer joint state
+
+| Dialability | kad pattern | Kubo peers | With v2 advertised | % of Kubo observed |
+|---|---|---|---|---|
+| **Always dialable** | always kad on (Public) | **2,372** | 1,181 | **50.5%** |
+| **Flipping dialability** | always kad on (Public) | **1,929** | 1,236 | **41.0%** |
+| Flipping dialability | kad toggles | 137 | 100 | 2.91% |
+| Flipping dialability | always kad off | 100 | 48 | 2.13% |
+| Always dialable | no silver data (single visit) | 48 | 0 | 1.02% |
+| Flipping dialability | no silver data | 45 | 0 | 0.96% |
+| **Always dialable** | always kad off (Client mode) | 39 | 22 | 0.83% |
+| **Always dialable** | kad toggles (AutoNAT-driven) | **31** | 22 | **0.66%** |
+| Total Kubo observed | | **4,701** | **2,609 (55%)** | 100% |
+
+Additionally, the "not found" dimension:
+
+| Category | Kubo peers | % |
+|---|---|---|
+| Visited in the prior 14–21 day window | 4,051 | 100% |
+| **Lost** (not seen at all in the last 7 days) | **727** | **17.95%** |
+| (All 727 lost peers had been dialable at some point before) | | |
+
+#### What the joint state tells us
+
+1. **The healthy Public case dominates.** 2,372 Kubo peers (50.5%) are
+   always dialable and always advertise kad. These nodes are on stable
+   infrastructure, reachable from Nebula every crawl, and consistently
+   in DHT server mode. This is the largest single category and the
+   baseline of "AutoNAT is working as intended."
+
+2. **Dialability flipping is the second-biggest category.** 1,929
+   Kubo peers (41%) flip between dialable and undialable but always
+   advertise kad when Nebula can see them. These are the "comes-and-
+   goes" peers — typical behavior for nodes on residential broadband,
+   behind flaky NATs, on ephemeral cloud instances, or with periodic
+   restarts. When they are up, their DHT is in server mode, which
+   means AutoNAT v1 is correctly concluding Public during their
+   online periods.
+
+3. **The AutoNAT-driven flipping case is small.** Only **31 Kubo
+   peers (0.66%)** exhibit the "always dialable but kad toggles"
+   pattern — the strong case for AutoNAT v1 driving DHT mode changes
+   on peers that are themselves stably reachable. **This is the
+   tightest measurement we can make of "AutoNAT v1 oscillation
+   affects stable peers in production"** in this dataset.
+
+4. **AutoNAT v2 adoption tracks with overall Kubo health.** 2,609 of
+   4,701 observed Kubo peers (55%) advertise the v2 server protocol.
+   v2 adoption is slightly over-represented in the "flipping
+   dialability" category (1,236 of 1,929 ≈ 64%) compared to the
+   always-dialable category (1,181 of 2,372 ≈ 50%). This could
+   suggest newer Kubo versions (which enable v2 by default as of
+   0.30.0) are disproportionately deployed in environments with
+   unstable connectivity — or it could be version-distribution noise.
+
+5. **~18% of previously-known Kubo peers are lost week-over-week.**
+   727 Kubo peers visited in the prior 14–21 day window are absent
+   from the recent 7-day visits. This is the natural churn rate of
+   the network — long-tail operators coming and going.
+
+6. **The "always dialable, always kad off" category (39 peers)
+   represents permanently DHT-client-mode Kubo nodes.** They are
+   reachable from Nebula but intentionally not serving DHT queries.
+   This is likely `Routing.Type = autoclient` or `dhtclient`
+   configuration (explicit operator choice, not AutoNAT decision).
+   Note that 22 of these also advertise v2 — they run v2 server but
+   disable DHT server mode.
+
+![Kubo joint state: dialability × kad pattern × v2](../results/nebula-analysis/07_joint_state.png)
+*Figure 7: Per-peer joint state of Kubo peers visited in the last
+7 days. Horizontal axis groups peers by dialability pattern;
+colored bars stack the kad protocol patterns within each group. The
+dark overlay shows the subset of peers that also advertise
+`/libp2p/autonat/2/dial-request` at some point in the window.
+Sources: `nebula_ipfs_amino.visits` and
+`nebula_ipfs_amino_silver.peer_logs_protocols`.*
+
+#### How to read these numbers
+
+Three categories matter most for the AutoNAT analysis:
+
+- **Always dialable + always kad on** (2,372 peers): the baseline
+  healthy population. AutoNAT is not causing problems here.
+- **Always dialable + kad toggles** (31 peers): the clean signal for
+  AutoNAT v1 oscillation affecting stable peers. This is ~0.66% of
+  Kubo observed, or ~1.3% of always-dialable Kubo.
+- **Flipping dialability** (~2,200 peers total): the noise floor. We
+  cannot attribute their kad changes (if any) to AutoNAT versus
+  restart/disconnect, so their contribution to the per-version
+  oscillation rate must be bracketed.
+
+The right "production AutoNAT oscillation" headline is the second
+category: **a small but measurable minority of stable Kubo peers
+(~1% order of magnitude) show DHT-mode flipping that cannot be
+attributed to restart or disconnect**, which is consistent with the
+testbed-derived claim that AutoNAT v1 is destabilizing under
+unreliable server pools.
+
+#### Caveats
+
+- **Nebula crawls the DHT from bootstrap peers.** Peers in the "never
+  dialable" and "lost" categories are peer IDs Nebula learned via
+  `FIND_NODE` walking but cannot connect to. Their absence or
+  non-dialability does not mean the peer does not exist or is not
+  reachable from other vantage points — only that it is invisible
+  from Nebula's single vantage point.
+
+- **The "always dialable" population is biased toward professional
+  deployments on stable infrastructure.** These are the peers whose
+  AutoNAT problems (if any) are least likely to be caused by real
+  reachability issues. A node on residential broadband that happens
+  to be stably online during our 7-day window would also land here.
+
+- **Agent version attribution is via `anyIf(agent_version != '')`**
+  — we take whatever agent string the peer returned in any successful
+  Identify exchange. Peers whose agent changed during the window are
+  rare (Finding F showed ~0.02% of Kubo peers change agent versions
+  in 7 days) so this is not a significant confound.
+
+---
+
 ### Finding H: Most kad toggling is on peers that also flip in/out of dialability
 
 Findings E and F count peers based on the silver `peer_logs_protocols`
@@ -1310,7 +1453,7 @@ What it adds:
 | Final report finding | What Nebula data adds |
 |---|---|
 | **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Weak observed correlation: Kubo versions where v2 *can* be enabled (≥ 0.34) show a higher AutoNAT-driven flip rate among always-dialable peers (~2.3% vs ~0.35% pre-v2; Finding H). Absolute counts are tiny (5 vs 21 peers across the 7-day window) so per-version trends are at the edge of statistical noise. Consistent with the gap hypothesis but not proof of causation. |
-| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | ~32 always-dialable Kubo peers (~1.4% of the always-dialable Kubo population) exhibit the AutoNAT-driven Public ↔ non-Public state pattern in the 7-day window without any dialability changes (Finding H strong subset). Confirms that AutoNAT-driven DHT mode flipping occurs in production at a measurable but modest rate, on a population that is by construction the most stable subset of the network. |
+| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | The joint-state view (Finding I) shows 31 Kubo peers out of 2,490 always-dialable Kubo (~1.3%) exhibiting kad protocol toggling while remaining continuously reachable. This is the tightest production measurement — it isolates AutoNAT-driven flipping from restart/disconnect confounds. Confirms the phenomenon exists in production at roughly an order of magnitude of ~1% of stable Kubo peers per 7-day window. |
 
 The fix proposed in Finding #1 (bridging v2 results into
 `EvtLocalReachabilityChanged`) is supported by, but not proven by, this
@@ -1390,6 +1533,24 @@ details in `docs/future-work-nat-monitoring.md`).
   `undialable_peers`
 - **Method:** Daily averages across the ~12 successful crawls per day. The
   per-crawl numbers are pre-aggregated by Nebula in the `crawls` table.
+
+#### `07_joint_state.png` — Joint state (dialability × kad pattern × v2)
+
+- **Source tables:**
+  - `nebula_ipfs_amino.visits` (for dialability pattern)
+  - `nebula_ipfs_amino_silver.peer_logs_protocols` (for kad and v2
+    protocol patterns)
+- **Filter:** Visits and silver rows in the last 7 days. Restricted
+  to Kubo peers (`agent_version LIKE 'kubo/%'` from any visit).
+- **Method:** Per peer, classify dialability across visits, kad
+  protocol pattern across silver rows, and presence of
+  `/libp2p/autonat/2/dial-request` in any silver row. Cross-tabulate
+  and count peers in each joint cell.
+- **Why it matters:** This is the main per-peer view of the Kubo
+  population's AutoNAT state. The "always dialable + kad toggles"
+  cell (31 peers, ~0.66% of observed Kubo) is the tightest measurement
+  of AutoNAT v1 oscillation affecting stable peers — isolated from
+  restart and disconnect noise.
 
 #### `06_oscillation_refined.png` — kad-only vs AutoNAT-driven flip rate
 
