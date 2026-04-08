@@ -171,9 +171,12 @@ subset for F4 is much smaller — see Appendix C.2.*
 
 ![Dialability × Public-state heatmap](../results/nebula-analysis/08_dialability_vs_public.png)
 *Figure 6: 2D distribution of Kubo peers by dialability fraction (X)
-and Public-state fraction (Y) over the 7-day window. The dashed blue
-line marks the strict 100%-dialable column. The 8 strict-flipping peers
-sit inside that column at Y < 100%.*
+and Public-state fraction (Y) over the 7-day window. The leftmost X
+column ("1–10%") contains peers dialed in 1 to 8 crawls out of 84;
+peers never dialed by Nebula are excluded entirely (they have no
+silver-table observations). The dashed blue line marks the strict
+100%-dialable column. The 8 strict-flipping peers from F4 sit inside
+that column at Y < 100%.*
 
 **See Appendix C** for the full state-machine reference, the list of
 the 8 peers, the version-by-version breakdown across multiple

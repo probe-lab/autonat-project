@@ -291,15 +291,25 @@ def chart_dialability_vs_public():
                 ax.text(d, p, str(v), ha="center", va="center",
                         fontsize=7, color=color)
 
+    # X-axis: dialability deciles. Decile 0 contains peers dialed in 1 to
+    # 8 successful crawls out of 84 — NOT zero. Peers with zero successful
+    # dials are excluded by the SQL filter (they have no silver observations
+    # to compute Public-state fraction from).
+    dial_labels = [
+        "1–10%", "10–20%", "20–30%", "30–40%", "40–50%",
+        "50–60%", "60–70%", "70–80%", "80–90%", "90–99%", "100%",
+    ]
+    pub_labels = [f"{i*10}%" for i in range(11)]
+
     ax.set_xticks(range(11))
-    ax.set_xticklabels([f"{i*10}%" for i in range(11)])
+    ax.set_xticklabels(dial_labels, rotation=30, ha="right")
     ax.set_yticks(range(11))
-    ax.set_yticklabels([f"{i*10}%" for i in range(11)])
-    ax.set_xlabel("Dialability fraction (% of 84 crawls in window)")
+    ax.set_yticklabels(pub_labels)
+    ax.set_xlabel("Dialability fraction (% of 84 crawls dialed by Nebula in 7-day window)")
     ax.set_ylabel("Public-state fraction (% of silver-table observations)")
     ax.set_title("Kubo peers: dialability × Public-state across 7-day window\n"
-                 "Top-right = healthy stable; top-left = inverse-failure direction;\n"
-                 "bottom-right = AutoNAT-driven flipping despite stable reachability",
+                 "Top-right = stable Public; rightmost column = always dialable.\n"
+                 "Peers never dialed by Nebula are excluded — they have no protocol observations.",
                  loc="left")
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.7, label="log10(peers)")
@@ -309,7 +319,7 @@ def chart_dialability_vs_public():
     ax.add_patch(plt.Rectangle((9.5, -0.5), 1.0, 10.0,
                                 fill=False, edgecolor="#1e40af",
                                 linewidth=1.5, linestyle="--"))
-    ax.text(10.4, 4.5, "100% dialable\n(strict stable)", rotation=90,
+    ax.text(10.4, 4.5, "100% dialable\n(strict-stable column)", rotation=90,
             ha="center", va="center", fontsize=7, color="#1e40af")
 
     fig.tight_layout()
