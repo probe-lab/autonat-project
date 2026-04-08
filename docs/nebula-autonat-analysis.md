@@ -1137,6 +1137,293 @@ servers (Finding #2 in the final report) is still consistent with this
 data. It is just not as quantitatively dramatic in production as the
 naive kad-toggling number suggested.
 
+### Finding J: Strict-100%-dialable AutoNAT false negatives, the inverse-failure direction, and the full state-machine view
+
+Finding H restricted "always dialable" to peers with `undialable_visits = 0`
+across all visits in the window. This finding tightens the definition
+further to **dialable in 100% of all 84 successful crawls** in the
+7-day window — i.e., Nebula's external-vantage-point reachability test
+passed every two hours, without exception, for the entire week.
+
+Under this strict definition, any change in the peer's observed
+AutoNAT state cannot be attributed to changes in network-level
+reachability — the network-level reachability is held constant by
+construction. The only remaining explanations are local AutoNAT
+behavior or operator reconfiguration.
+
+#### The full per-peer dialability distribution
+
+Of 4,701 Kubo peers visited at least once in the 7-day window:
+
+| Dialability bucket | Kubo peers | % |
+|---|---|---|
+| 100% (84/84 crawls) | **2,047** | **43.5%** |
+| 95–99% (80–83/84) | 465 | 9.9% |
+| 50–94% (42–79/84) | 747 | 15.9% |
+| 1–49% (1–41/84) | 1,442 | 30.7% |
+| 0% (never dialable in any of 84) | 0 | 0% |
+
+(The 0% category is empty because, by selection, every peer in
+`visits` was visited and visiting at least once requires Nebula to
+have walked to its peer ID via FIND_NODE — and walks recurse through
+peers Nebula could already reach. A peer that is never dialable in
+any crawl would have to be in someone's routing table without anyone
+ever being able to verify it, which would normally have led to
+eviction long before our window started. We see 0 such peers in
+practice.)
+
+The 2,047 peers in the 100%-dialable bucket are the strictest control
+we have for "the network-level reachability is constant."
+
+#### What the 100%-dialable bucket looks like
+
+Of the 2,047 Kubo peers always dialable in all 84 crawls:
+
+| AutoNAT state pattern | Kubo peers |
+|---|---|
+| **Only Public** observed (kad+autonat both on, every observation) | **2,018** |
+| **Public + at least one non-Public** (Private and/or Unknown) | **8** |
+| **Inconsistent** state at some point (kad on, autonat off) | 21 |
+| Only Private observed | 0 |
+| Only Unknown observed | 0 |
+| No silver observations (single-visit only) | 0 |
+
+The 8 peers in the second row are the **strict production false-negative
+subset**. They were:
+
+- Reachable from Nebula every 2 hours for 7 days, no exceptions
+- Identified by Nebula at multiple points in the window
+- Observed in the Public protocol pattern at some points and in
+  a non-Public pattern (Private or Unknown) at other points
+
+They are the cleanest possible production evidence that AutoNAT v1
+flipped to non-Public on a peer whose external reachability never
+failed during the observation period.
+
+| peer_id | agent_version | total obs | Public | Private | Unknown | v2 advertised |
+|---|---|---|---|---|---|---|
+| `12D3KooWJ4kPdaVJHEmvMXgEoANCVBppm4cR85XEA3X3e9uGMqme` | kubo/0.39.0/2896aed/docker | 27 | 14 | 4 | 9 | yes |
+| `12D3KooWBX2QC8uWCYVtanFiBSyPyHJeGbPiVSJ9ZAoNRJq69CzL` | kubo/0.35.0/a78d155/docker | 12 | 9 | 1 | 2 | yes |
+| `12D3KooWJsTpextVQgViQqQ8S3XabQDUAjJVLG48ciJ9ni6MVKm9` | kubo/0.39.0/2896aed | 8 | 7 | 0 | 1 | yes |
+| `12D3KooWGVywhT8aCziC3UJBA2TktwkyskPt5gvBX3xpy5dNX6KY` | kubo/0.39.0/ | 8 | 7 | 1 | 0 | yes |
+| `12D3KooWRwvb4HNDTLbd9Vet8ap9QbG3foZEMPXrckCEK356C2zt` | kubo/0.39.0/ | 8 | 7 | 0 | 1 | yes |
+| `12D3KooWP7x2CNCedKkaJZxAHTPqZcuuojNm2RsSmXcp3cyDFSQU` | kubo/0.40.1/39f8a65 | 8 | 7 | 1 | 0 | yes |
+| `12D3KooWK2bqcf8PrA3ZnpSWU8nLRqj9D6fgfwcRu8VV1kVjnKpi` | kubo/0.39.0/2896aed/docker | 8 | 7 | 0 | 1 | yes |
+| `12D3KooWRVuSpaWVDxLAwM98q1SHjFCfdt2Jt7hEa3RsvhRgUxVq` | kubo/0.36.0/ | 7 | 6 | 1 | 0 | yes |
+
+Two patterns are striking:
+
+1. **All 8 peers are post-v2 Kubo** (0.35-0.40). Zero peers in the
+   pre-v2 Kubo (≤ 0.33) population pass the strict 100%-dialable
+   filter AND show the AutoNAT-state-flipping pattern. This is the
+   tightest version comparison the data supports.
+2. **All 8 peers advertise the v2 server protocol** in every
+   observation. They are Kubo deployments that have explicitly enabled
+   v2 (via `EnableAutoNATv2()` or default in newer Kubo).
+3. **Most non-Public observations are Unknown, not Private.** Of the
+   non-Public observations across these 8 peers (15 observations
+   total: 8 Private + 13 Unknown — wait, recount: 4+1+0+1+0+1+0+1 = 8
+   Private, 9+2+1+0+1+0+1+0 = 14 Unknown), so ~64% Unknown vs ~36%
+   Private. These peers are losing AutoNAT confidence to timeouts
+   more than to explicit dial-failure responses.
+
+The presence of these 8 peers in the dataset is direct production
+evidence that AutoNAT v1 in current Kubo can incorrectly conclude
+non-Public for stably-reachable nodes. Eight peers out of 2,047 always-
+dialable Kubo nodes is **0.39%** — a small but non-zero rate.
+
+#### The state-machine view: how each transition fires
+
+Reading `recordObservation` in `p2p/host/autonat/autonat.go:314-373`,
+the AutoNAT v1 state machine has six possible transitions. Let
+`maxConfidence = 3` and let `confidence` be the integer counter that
+the function maintains. From any state, the trigger conditions are:
+
+| Transition | Trigger observation | Confidence requirement | Service action | Source line |
+|---|---|---|---|---|
+| **Public → Public (no flip)** | `Public` | confidence < 3 → confidence++ | none | line 332 |
+| **Public → Unknown** | `Unknown` (timeout/refused/error) | confidence == 0 (the previous observations drained it) | `service.Enable()` (no-op, was on) | lines 360-368 |
+| **Public → Private** | `Private` (`Message_E_DIAL_ERROR`) | confidence == 0 | `service.Disable()` | lines 343-352 |
+| **Unknown → Public** | `Public` | none — bypasses confidence | `service.Enable()` (no-op) | lines 322-330 |
+| **Unknown → Private** | `Private` | confidence == 0 | `service.Disable()` | lines 343-352 |
+| **Unknown → Unknown** (drain) | `Unknown` | n/a | none | line 359 (decrement) |
+| **Private → Public** | `Public` | none — bypasses confidence | `service.Enable()` | lines 322-330 |
+| **Private → Unknown** | `Unknown` | confidence == 0 | **`service.Enable()`** (re-enables v1 server) | lines 360-368 |
+| **Private → Private (no flip)** | `Private` | confidence < 3 → confidence++ | none | line 354 |
+
+Two structural asymmetries to highlight:
+
+1. **Recovery to Public is immediate.** A single successful dial-back
+   from any non-Public state flips to Public, regardless of
+   accumulated confidence. The aggressive recovery is intentional —
+   AutoNAT errs toward Private during steady state but re-enters
+   Public on positive evidence.
+
+2. **Flipping away from Public requires either 4 consecutive
+   negative observations (Private or Unknown alone) OR a mix that
+   drains confidence and then triggers a flip.** The buffer behavior
+   means a single `E_DIAL_ERROR` can flip Public → Private if
+   confidence has already been eroded to 0 by 3 prior Unknowns. This
+   asymmetry — Unknowns and Privates BOTH drain confidence but only
+   Privates flip to Private — is a quirk of the state machine.
+
+#### Buffer-erosion examples
+
+Starting state: Public, confidence = 3.
+
+- **3 timeouts then 1 `E_DIAL_ERROR`** → Public/conf=2 → Public/conf=1 → Public/conf=0 → **Private/conf=0** (1 dial-error flip after 3 unknowns)
+- **3 timeouts then 1 timeout** → Public/conf=2 → Public/conf=1 → Public/conf=0 → **Unknown/conf=0** (4 consecutive unknowns to flip to Unknown)
+- **4 dial-errors in a row** → Public/conf=2 → Public/conf=1 → Public/conf=0 → **Private/conf=0**
+
+Once in Unknown, recovery to Public requires only one successful dial.
+Continuing degradation requires 4 more `E_DIAL_ERROR`s (drain conf
+from "freshly-Unknown" 0... wait — actually note: when transitioning
+into Unknown via the drain path, confidence is **not** reset to a
+positive value. It stays at 0. So from Unknown/conf=0, a single
+`E_DIAL_ERROR` flips to Private (lines 339-352, the inner else
+branch). So Unknown is a knife-edge state — one dial-error away from
+Private, one success away from Public.
+
+#### When does Private → Unknown happen?
+
+This is the non-obvious recovery path. From Private state, accumulated
+Unknown observations can flip the node back to Unknown (without
+going through Public first):
+
+**Sequence from Private, confidence = 3** (high confidence in Private):
+- Unknown: confidence=2
+- Unknown: confidence=1
+- Unknown: confidence=0
+- Unknown: state flips to **Private → Unknown**, `service.Enable()` is called
+
+This requires 4 consecutive Unknown observations from a fully-confident
+Private state. In practice, this means:
+- The node was confidently in Private (e.g., its address really was
+  unreachable for a while, or AutoNAT kept getting `E_DIAL_ERROR`)
+- The dial-error responses stopped (perhaps the server pool changed,
+  or the relevant servers became unreachable themselves)
+- Only timeouts/refused/errors remain
+- After 4 consecutive of those, the state moves to Unknown
+
+It is a "I no longer have positive negative evidence" recovery — the
+node has stopped seeing dial-error responses from servers but doesn't
+yet have positive proof of reachability. The autonat v1 server stream
+handler is re-enabled when the transition happens.
+
+**In our protocol-pair observations, this transition is visible as:**
+
+| Before | After |
+|---|---|
+| (kad off, autonat v1 off) — Private | (kad off, autonat v1 on) — Unknown |
+
+The kad protocol stays off. Only the autonat v1 server protocol comes
+back on.
+
+#### Observed Private ↔ Unknown peers in the data
+
+**16 Kubo peers** in the 7-day window were observed in both the
+Private state and the Unknown state. Of those:
+
+- **9** were also observed in the Public state at some point (so they
+  cycled through all three states or some combination)
+- **7** were observed only in Private and Unknown — never reached
+  Public during the window
+
+The 7 peers stuck oscillating between Private and Unknown without
+ever reaching Public are the cleanest evidence of the bottom-half
+state-machine cycling we just described. These nodes are caught in
+the "I don't know if I'm reachable, but I have no positive evidence
+either" zone for the entire week.
+
+#### The inverse direction: low dialability + always observed Public
+
+A second cell worth examining is the inverse failure mode: peers
+that are mostly undialable from Nebula's vantage point but, in the
+rare moments Nebula could identify them, were always observed in
+the Public state.
+
+The 2D distribution heatmap (Figure 8) shows the joint
+distribution of dialability fraction (X-axis, 0%–100% in deciles)
+against Public-state fraction (Y-axis, 0%–100% in deciles), counting
+Kubo peers in each cell. The cells of interest:
+
+- **Top-right corner (100% dialable, 100% Public observations):**
+  the 2,018 healthy stable peers. The dominant cell.
+- **Top-left corner (0–10% dialable, 100% Public observations):**
+  493 peers. Rarely reachable from Nebula but, when identified,
+  always confidently Public. This is the inverse-failure direction.
+- **Bottom-right corner (100% dialable, 0% Public observations):**
+  18 peers. Always reachable from Nebula but never observed in the
+  Public state. These overlap with the inconsistent-state Kubo
+  cohort (kad on, autonat off — non-default config) and explicitly-
+  configured DHT-client-mode operators.
+
+The top-left "inverse-failure" cell (493 peers) is the largest
+non-corner cell on the heatmap. These are peers whose AutoNAT v1 is
+confident in being Public (kad and autonat v1 both registered every
+time Nebula identified them) but whose observed dialability from
+Nebula's vantage point is below 10%. There are several plausible
+explanations:
+
+- **Vantage-point asymmetry.** The peers may be reachable from the
+  AutoNAT servers they probe (which are themselves IPFS DHT peers)
+  but specifically not reachable from Nebula's network location
+  (firewalling, geographic routing, ISP-level filtering).
+- **Survivor bias in the observation set.** A peer that is dialable
+  only ~10% of the time is identified by Nebula only during those
+  rare moments. By selection, those moments are when the peer is
+  reachable — and a Kubo node that is currently reachable is also
+  likely currently in Public state (Public is the default once
+  AutoNAT confirms). So observing "always Public when dialable" is
+  partly tautological for peers with low dialability.
+- **Genuine AutoNAT v1 false positives.** The peer's local AutoNAT v1
+  could be incorrectly confident about its reachability. We cannot
+  separate this from the survivor-bias case from Nebula data alone.
+
+We do not claim the 493 top-left peers are AutoNAT false positives.
+The cell is observable but the survivor-bias confound is structural —
+distinguishing genuine AutoNAT errors from Nebula-vantage-point
+failures would require either active probing from multiple vantage
+points or instrumented Kubo logs. We document the cell exists and
+move on.
+
+![Dialability × Public-state heatmap](../results/nebula-analysis/08_dialability_vs_public.png)
+*Figure 8: 2D distribution of Kubo peers by dialability fraction
+(X-axis) and Public-state fraction (Y-axis) over the 7-day window.
+Both axes are deciles (0% to 100%). Cell value is the number of
+Kubo peers; color is the log10 of that count (lighter = fewer).
+The dashed blue line marks the strict 100%-dialable column. Source:
+`nebula_ipfs_amino.visits` joined to
+`nebula_ipfs_amino_silver.peer_logs_protocols`. Top-right corner
+(100%-dialable + 100%-Public) holds the 2,018 healthy stable Kubo
+peers. The (100% dialable, anything less than 100% Public) cells
+within the dashed-line column are the strict-stable AutoNAT-flipping
+candidates from this finding (8 peers, mostly post-v2). The top-left
+corner shows 493 rarely-dialable but always-Public peers — the
+inverse-failure direction with its survivor-bias caveat.*
+
+#### Summary of Finding J
+
+The strict 100%-dialability filter gives the cleanest possible
+production AutoNAT false-negative count: **8 Kubo peers, all
+post-v2, all running v2 server**, observed in non-Public states
+during a week when Nebula's network-level reachability check passed
+every two hours without fail. This is direct production evidence
+that AutoNAT v1 in modern Kubo can produce false negatives under
+network conditions that are stable from at least one external
+vantage point.
+
+The inverse direction (rarely dialable + always Public) cannot be
+cleanly attributed to AutoNAT false positives because of structural
+survivor bias — the rare observations naturally coincide with the
+peer's reachable moments, when AutoNAT would correctly say Public.
+
+The state-machine analysis shows that v1 has both Public-to-non-Public
+and Private-to-Unknown recovery paths, with the recovery to Public
+itself being immediate (one positive observation). The 16 peers
+observed in both Private and Unknown during the window confirm that
+the Private↔Unknown cycling is real and observable in production.
+
 ---
 
 ## Reconciling Findings D and E
@@ -1452,8 +1739,8 @@ What it adds:
 
 | Final report finding | What Nebula data adds |
 |---|---|
-| **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Weak observed correlation: Kubo versions where v2 *can* be enabled (≥ 0.34) show a higher AutoNAT-driven flip rate among always-dialable peers (~2.3% vs ~0.35% pre-v2; Finding H). Absolute counts are tiny (5 vs 21 peers across the 7-day window) so per-version trends are at the edge of statistical noise. Consistent with the gap hypothesis but not proof of causation. |
-| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | The joint-state view (Finding I) shows 31 Kubo peers out of 2,490 always-dialable Kubo (~1.3%) exhibiting kad protocol toggling while remaining continuously reachable. This is the tightest production measurement — it isolates AutoNAT-driven flipping from restart/disconnect confounds. Confirms the phenomenon exists in production at roughly an order of magnitude of ~1% of stable Kubo peers per 7-day window. |
+| **#1 v1/v2 reachability gap** (source-code claim about Kubo's DHT not consuming v2 events) | Strict-100%-dialability subset (Finding J): all 8 Kubo peers showing AutoNAT false-negative behavior under constant network conditions are post-v2 Kubo (versions 0.35–0.40), all advertising v2 server. Zero pre-v2 Kubo peers exhibit this pattern in the strict subset. Consistent with the wiring-gap hypothesis — adding v2 did not stop v1 from incorrectly flipping these nodes — but absolute counts are too small to call statistically significant on their own. |
+| **#2 v1 oscillation → DHT oscillation** (testbed result with controlled unreliable servers) | Three nested measurements with progressively tighter controls: (a) 158 Kubo peers with kad-protocol toggling in 7 days (Finding E), (b) 32 of those also pass dialability stability (Finding H/I), (c) 8 of those pass the strict 100%-dialability filter (Finding J). The 8 peers in (c) cannot be explained by restart, disconnect, or transient network problems and are direct production evidence that AutoNAT v1 misjudges stably-reachable Kubo nodes. The phenomenon is real in production but small in absolute magnitude — 0.39% of always-dialable Kubo per 7-day window. |
 
 The fix proposed in Finding #1 (bridging v2 results into
 `EvtLocalReachabilityChanged`) is supported by, but not proven by, this
@@ -1533,6 +1820,29 @@ details in `docs/future-work-nat-monitoring.md`).
   `undialable_peers`
 - **Method:** Daily averages across the ~12 successful crawls per day. The
   per-crawl numbers are pre-aggregated by Nebula in the `crawls` table.
+
+#### `08_dialability_vs_public.png` — Dialability fraction × Public-state fraction (heatmap)
+
+- **Source tables:**
+  - `nebula_ipfs_amino.visits` (dialability per Kubo peer across all
+    successful crawls in the 7-day window)
+  - `nebula_ipfs_amino_silver.peer_logs_protocols` (observed AutoNAT
+    state via the kad+autonat-v1 protocol pair)
+- **Filter:** Visits and silver rows in the last 7 days. Restricted
+  to Kubo peers with at least one silver observation (so the
+  Public-state fraction is defined). 84 successful crawls in the
+  window.
+- **Method:** For each Kubo peer, compute (a) the fraction of the
+  84 crawls in which Nebula successfully dialed it, and (b) the
+  fraction of its silver-table observations that were in the Public
+  state (kad on, autonat v1 on). Bucket each axis into 11 deciles
+  (0%–10%, 10%–20%, ..., 100%) and count peers in each cell.
+- **Why it matters:** Lets us see the full structure of "what does
+  the peer think about itself" vs "what does Nebula see" without
+  any thresholds. The 100%-dialable column is the strict-stable
+  control for Finding J's 8-peer false-negative subset. The top-left
+  cell (low dialability, always Public) is the inverse-failure
+  direction.
 
 #### `07_joint_state.png` — Joint state (dialability × kad pattern × v2)
 

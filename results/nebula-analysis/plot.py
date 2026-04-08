@@ -368,6 +368,68 @@ def chart_joint_state():
     print("wrote 07_joint_state.png")
 
 
+# ----------------------------------------------------------------------
+# Chart 8: 2D heatmap — dialability fraction × Public-state fraction
+# ----------------------------------------------------------------------
+def chart_dialability_vs_public():
+    rows = read_csv("08_dialability_vs_public.csv")
+
+    # Build a 11x11 grid (deciles 0..10 on each axis)
+    grid = [[0] * 11 for _ in range(11)]
+    for row in rows:
+        d = int(row["dial_decile"])
+        p = int(row["public_decile"])
+        grid[d][p] = int(row["peers"])
+
+    fig, ax = plt.subplots(figsize=(9, 8))
+
+    import math
+    log_grid = [[(math.log10(v) if v > 0 else float('nan')) for v in row] for row in grid]
+
+    im = ax.imshow(
+        list(zip(*log_grid)),
+        origin="lower",
+        cmap="YlOrRd",
+        aspect="equal",
+        extent=(-0.5, 10.5, -0.5, 10.5),
+    )
+
+    # Annotate cells with the actual peer count
+    for d in range(11):
+        for p in range(11):
+            v = grid[d][p]
+            if v > 0:
+                color = "white" if v >= 100 else "black"
+                ax.text(d, p, str(v), ha="center", va="center",
+                        fontsize=7, color=color)
+
+    ax.set_xticks(range(11))
+    ax.set_xticklabels([f"{i*10}%" for i in range(11)])
+    ax.set_yticks(range(11))
+    ax.set_yticklabels([f"{i*10}%" for i in range(11)])
+    ax.set_xlabel("Dialability fraction (% of 84 crawls in window)")
+    ax.set_ylabel("Public-state fraction (% of silver-table observations)")
+    ax.set_title("Kubo peers: dialability × Public-state across 7-day window\n"
+                 "Top-right = healthy stable; top-left = inverse-failure direction;\n"
+                 "bottom-right = AutoNAT-driven flipping despite stable reachability",
+                 loc="left")
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.7, label="log10(peers)")
+
+    # Mark the strict-stable AutoNAT-flipping cell
+    # (dial decile 10, public decile < 10 — i.e., bottom of the rightmost column except the top cell)
+    ax.add_patch(plt.Rectangle((9.5, -0.5), 1.0, 10.0,
+                                fill=False, edgecolor="#1e40af",
+                                linewidth=1.5, linestyle="--"))
+    ax.text(10.4, 4.5, "100% dialable\n(strict stable)", rotation=90,
+            ha="center", va="center", fontsize=7, color="#1e40af")
+
+    fig.tight_layout()
+    fig.savefig(ROOT / "08_dialability_vs_public.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("wrote 08_dialability_vs_public.png")
+
+
 if __name__ == "__main__":
     chart_clients()
     chart_autonat_protocols()
@@ -376,4 +438,5 @@ if __name__ == "__main__":
     chart_dialable_over_time()
     chart_oscillation_refined()
     chart_joint_state()
+    chart_dialability_vs_public()
     print("\nDone. Charts in", ROOT)
