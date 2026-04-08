@@ -1083,6 +1083,78 @@ not proven by it.
 
 ---
 
+## Other Networks Considered
+
+The ProbeLab Nebula dataset includes several other libp2p networks
+besides IPFS Amino. We checked which ones could plausibly serve as
+comparison or control points for the AutoNAT analysis above. Two were
+considered and excluded; the rest are not relevant.
+
+### Filecoin mainnet — excluded due to known peer-population issues
+
+Filecoin uses go-libp2p with AutoNAT v1 (no v2 deployment), so on the
+surface it would be a useful go-libp2p control for the version trend
+in Finding E. However, the dialable peer population in
+`nebula_filecoin_mainnet.crawls` is dominated by a known issue with
+undialable peers: in recent crawls roughly **3% of crawled peers are
+dialable** (~175 out of ~5,800), with the rest being peer IDs Nebula
+can discover via FIND_NODE walking but cannot connect to.
+
+This selection bias makes the dialable Filecoin population
+unrepresentative of the actual Filecoin network state. The handful of
+peers we can observe are mostly Lotus/Boost storage providers on
+public IPs — a specific subset of operator deployments rather than the
+broader population. Comparing the kad-toggling rate of this skewed
+subset against the IPFS Amino dialable population (which is ~46%
+dialable) is not a like-for-like comparison.
+
+We did not attempt to control for the population bias and consequently
+do not include Filecoin numbers in this report.
+
+### Avail — excluded because the protocol we measure does not exist there
+
+Avail (a Substrate/Polkadot-derived data availability network)
+**explicitly disabled AutoNAT** as of release v1.13.2 because of
+issues with `autonat-over-quic`
+(see [`docs/libp2p-autonat-ecosystem.md`](libp2p-autonat-ecosystem.md)
+and the rust-libp2p#3900 discussion). Operators must set
+`--external-address` manually instead.
+
+A spot-check of `nebula_avail_mnlc.visits` confirms this: in recent
+crawls only **1 dialable Avail peer** advertises any
+`/libp2p/autonat/...` protocol. The kad-protocol-toggling proxy used
+in this report is meaningless on a network where neither the
+detection mechanism (autonat) nor its consequences (DHT mode flips
+driven by `EvtLocalReachabilityChanged`) are present.
+
+We do not include Avail numbers in the comparison. Avail is referenced
+in the ecosystem survey as the canonical "operators disabled autonat
+because it broke" case study, but the Nebula data does not add
+anything to that narrative.
+
+### Other networks — not relevant
+
+| Network | Why excluded |
+|---|---|
+| Polkadot mainnet | Substrate uses custom notification protocols, not libp2p kad/autonat — no relevant data |
+| Celestia mainnet | go-libp2p with v1, but only ~64 dialable peers per crawl — too small for any per-version analysis |
+| Filecoin calibnet | Filecoin testnet — same selection-bias issue as mainnet, smaller |
+| discv5 / discv4 | Ethereum execution / consensus layer discovery — not libp2p autonat |
+| Monero mainnet | Not libp2p |
+
+### Implication for the IPFS-only scope
+
+This means the analysis in this document is **specifically about the
+IPFS Amino DHT and Kubo deployments**. We do not generalize to other
+go-libp2p networks. The version trend in Finding E and the
+Public-to-Private observations in Finding G are statements about
+Kubo's behavior on the IPFS Amino DHT only. Whether the same patterns
+hold in other go-libp2p networks would require either fixing the
+selection-bias issues in those networks' Nebula data or using a
+different measurement approach.
+
+---
+
 ## How This Relates to the Final Report Findings
 
 The Nebula data does not by itself prove any of the final report findings.
