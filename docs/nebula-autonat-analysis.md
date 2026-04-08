@@ -692,6 +692,97 @@ advertise the v2 server protocol. These are excluded from the
 "AutoNAT-driven flip" count because they could be operator-customized
 deployments rather than AutoNAT state changes.
 
+#### Why "kad on, autonat v1 off" is inconsistent in default Kubo
+
+In a stock Kubo build using the default reachability event loop, the
+two protocols are gated by the same `EvtLocalReachabilityChanged`
+event:
+
+1. **kad server protocol** (`/ipfs/kad/1.0.0`) is registered by
+   `dht.moveToServerMode()` in `go-libp2p-kad-dht`
+   ([`dht.go:806`](https://github.com/libp2p/go-libp2p-kad-dht/blob/v0.38.0/dht.go#L806)).
+   The DHT subscriber notifee invokes `setMode(modeServer)` from
+   `handleLocalReachabilityChangedEvent` only when reachability is
+   `Public`
+   ([`subscriber_notifee.go:104-118`](https://github.com/libp2p/go-libp2p-kad-dht/blob/v0.38.0/subscriber_notifee.go#L104-L118)).
+   So `/ipfs/kad/1.0.0` is registered if and only if the local
+   reachability flag is `Public`.
+
+2. **AutoNAT v1 server protocol** (`/libp2p/autonat/1.0.0`) is
+   registered by `service.Enable()` inside the `AmbientAutoNAT`
+   `recordObservation` handler
+   ([`autonat.go:328`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L328)
+   and [`autonat.go:365`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L365)).
+   It is enabled when the local reachability transitions to `Public` or
+   to `Unknown`, and only disabled via `service.Disable()` when
+   reachability transitions to `Private`
+   ([`autonat.go:349`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L349)).
+
+Combining these two rules, the only valid state pairs in default Kubo
+are:
+
+| Reachability state | kad protocol | autonat v1 server protocol |
+|---|---|---|
+| Public | ON | ON |
+| Unknown | OFF | ON |
+| Private | OFF | OFF |
+
+The combination "kad ON, autonat v1 server OFF" cannot happen via the
+default `EvtLocalReachabilityChanged` flow, because the only branch that
+disables the autonat v1 server (`service.Disable()` on the Private
+transition) is also the branch that triggers `setMode(modeClient)`
+which removes `/ipfs/kad/1.0.0`. The two events are coupled.
+
+#### How a node can end up in the inconsistent state
+
+Reaching this state requires bypassing the default coupling. The
+plausible mechanisms are:
+
+- **The autonat v1 service was never created.** In `libp2p.New()` if
+  the host is constructed without the dialer (`conf.dialer == nil`) or
+  with `forceReachability` set to a non-Public value, the
+  `autoNATService` is never instantiated
+  ([`autonat.go:93-99`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L93-L99)).
+  In that case `service.Enable()` is never called and the v1 server
+  protocol is never registered, even when the host is in DHT server
+  mode.
+
+- **A custom build or fork that disables NATService.** Any code path
+  that omits `libp2p.EnableNATService()` or replaces the autonat
+  initialization will produce this state. In go-libp2p the v1 server
+  is opt-in: a host built with default options does NOT register the
+  v1 server unless explicitly enabled. Kubo enables it by default in
+  its libp2p host construction; a Kubo fork that removes that line
+  would produce the inconsistent state.
+
+- **Static reachability override.** Setting `libp2p.ForceReachability`
+  to a value (Public or Private) creates a `StaticAutoNAT` instead of
+  `AmbientAutoNAT` and bypasses the dynamic confidence loop entirely
+  ([`autonat.go:99-106`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/autonat/autonat.go#L99-L106)).
+  The static path can leave the v1 server in any state depending on
+  the configuration.
+
+- **A `Routing.AcceleratedDHTClient`-style accelerator.** Some Kubo
+  configurations use the `fullrt` DHT implementation alongside the
+  standard one. Verifying whether this can produce the inconsistent
+  protocol pattern would require reading the `fullrt` source.
+
+- **Something disables the v1 server after Kubo startup.** A patched
+  Kubo build that calls `host.RemoveStreamHandler("/libp2p/autonat/1.0.0")`
+  directly after startup (or as part of a maintenance routine) would
+  produce this state.
+
+The 44 Kubo 0.36/0.37 nodes that advertise the v2 server protocol but
+NOT the v1 server protocol are most consistent with one of the last
+two scenarios: either a custom build that disables v1 server while
+keeping v2, or an explicit `AutoNATServiceDisabled`-equivalent config
+choice. We did not investigate which specific operator runs them.
+
+We exclude these peers from the AutoNAT-driven flip count in Finding F
+not because they are uninteresting, but because their kad-protocol
+toggling cannot be unambiguously attributed to the
+`EvtLocalReachabilityChanged` mechanism we are measuring.
+
 Refined per-version results, comparing kad-only toggling (Finding E) to
 the AutoNAT-driven flip pattern:
 
