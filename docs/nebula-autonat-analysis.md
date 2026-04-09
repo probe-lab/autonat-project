@@ -14,19 +14,21 @@ for the dialability time series.
 
 ## TL;DR
 
-- **The IPFS Amino DHT is dominated by Kubo deployments.** ~46% of visible
-  peer IDs are dialable from Nebula's vantage point; of the dialable peers,
-  ~84% are Kubo (~3,170 nodes per crawl). rust-libp2p and js-libp2p
-  combined have <5 dialable nodes.
 - **AutoNAT v2 server adoption among Kubo is ~50%.** Half of dialable
   Kubo nodes advertise both v1 and v2 server protocols. The other half
   run v1 only. Almost no node runs v2 without v1.
 - **Production AutoNAT v1 false negatives on stably-reachable Kubo nodes
-  exist but are rare.** Out of 2,047 Kubo peers dialable in 100% of all
-  84 crawls in the 7-day window, **8 peers** show AutoNAT-state-flipping
-  that cannot be explained by network changes, restart, or disconnect.
-  All 8 are post-v2 Kubo (versions 0.35–0.40), all advertise the v2 server
-  protocol.
+  exist but are rare.** Out of **2,047 Kubo peers (~43.5% of observed
+  Kubo)** dialable in 100% of all 84 crawls in the 7-day window,
+  **8 peers (~0.39%)** show AutoNAT-state-flipping that cannot be
+  explained by network changes, restart, or disconnect. All 8 are
+  post-v2 Kubo (versions 0.35–0.40), all advertise the v2 server protocol.
+- **A broader pool of ~158 Kubo peers (~3.5% of observed Kubo) shows
+  apparent AutoNAT flipping in the same window, but it cannot be
+  cleanly attributed to AutoNAT failing.** ~80% of these peers also
+  flip in and out of dialability, so transient disconnects and restart
+  cycles cannot be excluded as the cause. Only the 8-peer strict subset
+  above survives the always-dialable control.
 
 ---
 
@@ -76,11 +78,13 @@ vantage point. The dialable subset is dominated by Kubo and legacy
 go-ipfs; the rest of the libp2p ecosystem (rust-libp2p, js-libp2p) is
 essentially absent from this DHT.
 
-![Dialable peer count and ratio over 30 days](../results/nebula-analysis/05_dialable_over_time.png)
+![Dialable peer count and ratio over 30 days](../results/nebula-analysis/01_dialable_over_time.png)
+
 *Figure 1: Total visible vs dialable peer counts per crawl, daily average
 over the last 30 days. Source: `nebula_ipfs_amino.crawls`.*
 
-![Client distribution from a single recent IPFS DHT crawl](../results/nebula-analysis/01_clients.png)
+![Client distribution from a single recent IPFS DHT crawl](../results/nebula-analysis/02_clients.png)
+
 *Figure 2: Client distribution by `agent_version` in one recent crawl.
 Grey bars are total visited; blue bars are the dialable subset.*
 
@@ -122,14 +126,16 @@ versions (96.3% – 100%), so the version dimension adds no information
 in the snapshot view. The per-version kad table is in Appendix B.4 for
 reference.
 
-![AutoNAT v1/v2 server adoption among dialable Kubo nodes](../results/nebula-analysis/02_autonat_protocols.png)
+![AutoNAT v1/v2 server adoption among dialable Kubo nodes](../results/nebula-analysis/03_autonat_protocols.png)
+
 *Figure 3: AutoNAT v1 and v2 server protocols advertised by dialable
 Kubo nodes in one recent crawl. ~half of dialable Kubo runs v1 + v2
 together; the other ~half runs v1 only. Only 9 nodes run v2 without
 v1. Source: `nebula_ipfs_amino.visits` filtered to
 `agent_version LIKE 'kubo/%'`.*
 
-![DHT server mode by Kubo version (snapshot)](../results/nebula-analysis/03_server_mode.png)
+![DHT server mode by Kubo version (snapshot)](../results/nebula-analysis/04_server_mode.png)
+
 *Figure 4: Percentage of dialable Kubo nodes advertising
 `/ipfs/kad/1.0.0` (DHT server mode), per Kubo version, in the same
 recent crawl. The advertisement is nearly uniform across versions
@@ -183,14 +189,9 @@ The strict subset rate is **8 / 2,047 ≈ 0.39%** of always-dialable Kubo,
 or roughly 0.17% of all observed Kubo. The phenomenon is real and
 verifiable, but small in absolute magnitude.
 
-![Refined: kad toggling vs AutoNAT-driven flip rate by Kubo version](../results/nebula-analysis/06_oscillation_refined.png)
-*Figure 5: AutoNAT-state-change rate per Kubo version on the broader
-"any kad toggling" population, which is an upper bound on the rate
-(includes peers with restart or disconnect confounds). The strict-stable
-subset for F3 is much smaller — see Appendix C.2.*
+![Dialability × Public-state heatmap](../results/nebula-analysis/05_dialability_vs_public.png)
 
-![Dialability × Public-state heatmap](../results/nebula-analysis/08_dialability_vs_public.png)
-*Figure 6: 2D distribution of Kubo peers by dialability fraction (X)
+*Figure 5: 2D distribution of Kubo peers by dialability fraction (X)
 and Public-state fraction (Y) over the 7-day window. The leftmost X
 column ("1–10%") contains peers dialed in 1 to 8 crawls out of 84;
 peers never dialed by Nebula are excluded entirely (they have no
@@ -206,7 +207,7 @@ controls, restart confound), and the Private↔Unknown direction.
 ### F4 — The inverse direction (rarely-dialable + always-Public) cannot be cleanly attributed to AutoNAT false positives
 
 The opposite failure mode would be a peer that AutoNAT thinks is Public
-but is mostly unreachable. The heatmap (Figure 6) shows **493 Kubo
+but is mostly unreachable. The heatmap (Figure 5) shows **493 Kubo
 peers** in the bottom-left region (≤10% dialability + 100% Public-state
 fraction). However, this cell is structurally biased: a peer dialable
 only ~10% of the time is identified by Nebula only during the moments
@@ -215,7 +216,7 @@ correctly says Public. The cell exists but cannot be attributed to
 AutoNAT misjudgment without active probing from multiple vantage points.
 
 We document the cell exists and do not claim it is an AutoNAT false-positive
-finding. **See Appendix C.4** for the full discussion.
+finding. **See Appendix C.6** for the full discussion.
 
 ---
 
@@ -546,7 +547,7 @@ time.
 
 This appendix walks through the methodological refinements that lead
 from the loose "kad protocol toggling" measurement (an upper bound) to
-the strict 8-peer count in main-body F4. The progression is:
+the strict 8-peer count in main-body F3. The progression is:
 
 - **C.1** — Loose measurement: how many Kubo peers' kad protocol
   appears and disappears in the silver-table change log? (158 peers)
@@ -557,7 +558,7 @@ the strict 8-peer count in main-body F4. The progression is:
   And how many are dialability-flipping (so we cannot exclude restart
   or transient disconnect)?
 - **C.4** — Tightest: how many are dialable in **all 84** crawls? This
-  is the F4 strict subset.
+  is the F3 strict subset.
 - **C.5** — Direction asymmetry: what fraction of non-Public
   observations are Private vs Unknown? Including the Private↔Unknown
   recovery path.
@@ -644,6 +645,16 @@ largest reduction (9.29% → 5.00%): about half of the 0.36 "toggling"
 peers are in the inconsistent (`kad on, autonat off`) state. See C.7
 for the inconsistent-state explanation.
 
+![Refined: kad toggling vs AutoNAT-driven flip rate by Kubo version](../results/nebula-analysis/06_oscillation_refined_appendix.png)
+
+*Per-version comparison of the loose kad-only metric (C.1) and the
+tighter kad+autonat-v1 lockstep metric (this section). The two columns
+are identical or nearly so for almost every version, confirming that
+the kad protocol toggling we measure in the silver table is dominantly
+the AutoNAT-driven Public ↔ non-Public state-change pattern. This is
+the upper-bound population — restart and disconnect confounds are
+addressed in C.3 and C.4.*
+
 ## C.3 Dialability cross-tab: most kad toggling is on peers also flipping in/out of dialability
 
 The C.1 and C.2 measurements count peers based on the silver
@@ -703,7 +714,7 @@ essentially **0%** for the largest version buckets (0.1x with 384
 peers, 0.33 with 79 peers, 0.30 with 20 peers — all zero AutoNAT-driven
 flips on the strong subset).
 
-## C.4 Strict 100%-dialable subset (the F4 measurement)
+## C.4 Strict 100%-dialable subset (the F3 measurement)
 
 C.3's "always dialable" definition was `undialable_visits = 0` across
 all visits. This is implicitly bounded by however many crawls Nebula
@@ -734,7 +745,7 @@ Of the 2,047 Kubo peers always dialable in all 84 crawls:
 | Only Private observed | 0 |
 | Only Unknown observed | 0 |
 
-The 8 peers in the second row are the F4 result. They are listed in
+The 8 peers in the second row are the F3 result. They are listed in
 full below:
 
 | peer_id | agent_version | total obs | Public | Private | Unknown | v2 advertised |
@@ -817,7 +828,7 @@ went to Private**, only 7 went to Unknown only, and 9 visited both.
 This suggests the dominant failure mode is "AutoNAT received explicit
 `E_DIAL_ERROR` responses from servers" rather than "AutoNAT lost
 confidence slowly via timeouts." On this broader population. The strict
-F4 subset (8 peers) is the opposite — predominantly Unknown.
+F3 subset (8 peers) is the opposite — predominantly Unknown.
 
 ### Private → Unknown recovery
 
@@ -847,7 +858,7 @@ I have no positive evidence either" zone for the entire week.
 A second cell worth examining is the inverse failure mode: peers that
 are mostly undialable from Nebula's vantage point but, in the rare
 moments Nebula could identify them, were always observed in the Public
-state. The 2D distribution heatmap (Figure 6 in main body) shows the
+state. The 2D distribution heatmap (Figure 5 in main body) shows the
 joint distribution.
 
 The interesting cells:
@@ -1024,9 +1035,9 @@ state — one dial-error away from Private, one success away from Public.
    selects for peers with at least some observed change history,
    potentially biasing toward less stable peers.
 
-5. **Snapshot vs window.** The single-crawl numbers (F1, F2, F3) are
+5. **Snapshot vs window.** The single-crawl numbers (F1, F2) are
    instantaneous snapshots and do not capture state changes between
-   crawls. The 7-day window (F4 and Appendix C) catches more changes
+   crawls. The 7-day window (F3 and Appendix C) catches more changes
    but may miss cycles shorter than the ~2-hour crawl interval.
 
 6. **Causation vs correlation.** Per-version trends in Appendix C show
@@ -1040,7 +1051,7 @@ state — one dial-error away from Private, one success away from Public.
    are in the larger buckets (0.1x, 0.2x, 0.37, 0.39, 0.4x).
 
 8. **Restart confound.** The C.3 dialability cross-tab and C.4 strict
-   100%-dialable filter address this directly: the F4 result is
+   100%-dialable filter address this directly: the F3 result is
    constructed precisely to exclude restart-explained cases.
 
 9. **Inverse direction survivor bias.** The C.6 inverse-failure cell
@@ -1114,7 +1125,7 @@ The plotting script is `results/nebula-analysis/plot.py`. Charts are in
 against the public ClickHouse dataset (connection details in
 `docs/future-work-nat-monitoring.md`).
 
-### Figure 1 (`05_dialable_over_time.png`) — Dialable peer counts over 30 days
+### Figure 1 (`01_dialable_over_time.png`) — Dialable peer counts over 30 days
 
 - **Source table:** `nebula_ipfs_amino.crawls`
 - **Filter:** `state = 'succeeded' AND created_at > now() - INTERVAL 30 DAY`
@@ -1122,7 +1133,7 @@ against the public ClickHouse dataset (connection details in
   `undialable_peers`
 - **Method:** Daily averages across the ~12 successful crawls per day.
 
-### Figure 2 (`01_clients.png`) — Client distribution
+### Figure 2 (`02_clients.png`) — Client distribution
 
 - **Source table:** `nebula_ipfs_amino.visits`
 - **Filter:** `crawl_id =` the most recent successful crawl
@@ -1132,7 +1143,7 @@ against the public ClickHouse dataset (connection details in
 - **Includes both dialable and undialable peers**: grey bars are total
   visited; blue bars are the dialable subset.
 
-### Figure 3 (`02_autonat_protocols.png`) — AutoNAT v1/v2 server protocols
+### Figure 3 (`03_autonat_protocols.png`) — AutoNAT v1/v2 server protocols
 
 - **Source table:** `nebula_ipfs_amino.visits`
 - **Filter:** Most recent successful crawl, `agent_version LIKE 'kubo/%'`,
@@ -1141,7 +1152,7 @@ against the public ClickHouse dataset (connection details in
   `/libp2p/autonat/1.0.0` and `/libp2p/autonat/2/dial-request`
 - **Excludes undialable peers and non-Kubo clients.**
 
-### Figure 4 (`03_server_mode.png`) — DHT kad protocol presence by Kubo version
+### Figure 4 (`04_server_mode.png`) — DHT kad protocol presence by Kubo version
 
 - **Source table:** `nebula_ipfs_amino.visits`
 - **Filter:** Most recent successful crawl, dialable Kubo only
@@ -1150,23 +1161,7 @@ against the public ClickHouse dataset (connection details in
 - **Excludes undialable peers and non-Kubo clients.**
 - **Caveat:** Snapshot only; does not reflect changes between crawls.
 
-### Figure 5 (`06_oscillation_refined.png`) — kad-only vs AutoNAT-driven flip rate
-
-- **Source tables:**
-  - `nebula_ipfs_amino_silver.peer_logs_protocols`
-  - `nebula_ipfs_amino_silver.peer_logs_agent_version`
-- **Filter:** `updated_at > now() - INTERVAL 7 DAY`, peers with
-  `>= 2` silver-table observations, restricted to `agent_version LIKE 'kubo/%'`
-- **Method:** Per peer, classify each silver-table row into one of four
-  states based on the (kad, autonat-v1-server) protocol pair. A peer is
-  "AutoNAT-driven flipping" if it has at least one Public state and at
-  least one non-Public state (Unknown or Private) in the window.
-  Compared side-by-side with the looser kad-only metric (C.1).
-- **What it shows:** For most Kubo versions the two metrics are
-  identical, indicating the kad toggling we observed is dominantly the
-  AutoNAT Public ↔ non-Public state-change pattern.
-
-### Figure 6 (`08_dialability_vs_public.png`) — Dialability fraction × Public-state fraction (heatmap)
+### Figure 5 (`05_dialability_vs_public.png`) — Dialability fraction × Public-state fraction (heatmap)
 
 - **Source tables:**
   - `nebula_ipfs_amino.visits` (dialability per Kubo peer across all
@@ -1183,6 +1178,24 @@ against the public ClickHouse dataset (connection details in
   (0%–10%, 10%–20%, ..., 100%) and count peers in each cell.
 - **Why it matters:** Shows the full structure of "what does the peer
   think about itself" vs "what does Nebula see" without thresholds. The
-  100%-dialable column is the strict-stable control for F4's 8-peer
+  100%-dialable column is the strict-stable control for F3's 8-peer
   false-negative subset. The top-left cell (low dialability, always
   Public) is the inverse-failure direction (C.6).
+
+### Appendix-only chart (`06_oscillation_refined_appendix.png`) — kad-only vs AutoNAT-driven flip rate (Appendix C.2)
+
+- **Source tables:**
+  - `nebula_ipfs_amino_silver.peer_logs_protocols`
+  - `nebula_ipfs_amino_silver.peer_logs_agent_version`
+- **Filter:** `updated_at > now() - INTERVAL 7 DAY`, peers with
+  `>= 2` silver-table observations, restricted to `agent_version LIKE 'kubo/%'`
+- **Method:** Per peer, classify each silver-table row into one of four
+  states based on the (kad, autonat-v1-server) protocol pair. A peer is
+  "AutoNAT-driven flipping" if it has at least one Public state and at
+  least one non-Public state (Unknown or Private) in the window.
+  Compared side-by-side with the looser kad-only metric (C.1).
+- **What it shows:** For most Kubo versions the two metrics are
+  identical, indicating the kad toggling we observed is dominantly the
+  AutoNAT Public ↔ non-Public state-change pattern. This is the upper
+  bound on the rate; the strict-stable subset for F3 is much smaller
+  (see C.3 and C.4 for the restart and disconnect controls).
