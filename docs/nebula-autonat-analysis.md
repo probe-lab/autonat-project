@@ -39,7 +39,7 @@ For each Kubo peer Nebula visits, we observe two things:
    `(/ipfs/kad/1.0.0, /libp2p/autonat/1.0.0)` protocol pair tells us
    what Kubo's local libp2p host thinks about its own reachability:
 
-   | kad protocol | autonat v1 server protocol | Kubo state |
+   | kad protocol | autonat v1 server protocol | Global reachability state |
    |---|---|---|
    | ON | ON | Public |
    | OFF | ON | Unknown |
