@@ -96,9 +96,10 @@ DHT. **See Appendix B.2 for the full breakdown.**
 **See Appendix B.1 and B.2** for the historical time series, the exact
 cross-tab of empty agent vs undialable, and the "other" bucket detail.
 
-### F2 — AutoNAT v2 adoption among Kubo
+### F2 — Protocol snapshot of dialable Kubo: kad, autonat v1, autonat v2
 
-Of dialable Kubo nodes in one recent crawl:
+Of dialable Kubo nodes in one recent crawl, by the autonat server
+protocols advertised:
 
 | AutoNAT server protocols | Count | % |
 |---|---|---|
@@ -107,36 +108,47 @@ Of dialable Kubo nodes in one recent crawl:
 | v2 only | 9 | 0.3% |
 | neither | 30 | 0.9% |
 
-About half of Kubo nodes have v2 enabled (default since Kubo 0.30.0,
-introduced as opt-in in 0.34.0). v2 is consistently additive: only 9
-peers run v2 without v1. The data confirms that v2 has been broadly
-deployed but has not replaced v1 — nodes run both side-by-side.
+About half of dialable Kubo nodes have v2 enabled (default-on since
+Kubo 0.30.0, introduced as opt-in in 0.34.0). v2 is consistently
+**additive**: only 9 peers run v2 without v1. The data confirms that
+v2 has been broadly deployed but has not replaced v1 — nodes run both
+side-by-side.
+
+In parallel, **~99% of the same dialable Kubo population advertises
+the DHT server protocol** (`/ipfs/kad/1.0.0`) in the same snapshot —
+i.e., at any given moment almost all reachable Kubo nodes are in DHT
+server mode. The kad advertisement is nearly uniform across Kubo
+versions (96.3% – 100%), so the version dimension adds no information
+in the snapshot view. The per-version kad table is in Appendix B.4 for
+reference.
 
 ![AutoNAT v1/v2 server adoption among dialable Kubo nodes](../results/nebula-analysis/02_autonat_protocols.png)
-*Figure 3: AutoNAT server protocols advertised by dialable Kubo nodes
-in one recent crawl. Source: `nebula_ipfs_amino.visits` filtered to
+*Figure 3: AutoNAT v1 and v2 server protocols advertised by dialable
+Kubo nodes in one recent crawl. ~half of dialable Kubo runs v1 + v2
+together; the other ~half runs v1 only. Only 9 nodes run v2 without
+v1. Source: `nebula_ipfs_amino.visits` filtered to
 `agent_version LIKE 'kubo/%'`.*
-
-**See Appendix B.3** for the per-version v2 adoption breakdown.
-
-### F3 — Snapshot DHT mode tracking is correct (in single-crawl view)
-
-In a single recent crawl, **~99% of dialable Kubo nodes** advertise
-`/ipfs/kad/1.0.0` (DHT server mode) regardless of version. AutoNAT-driven
-DHT mode is correctly tracking reachability at any moment.
 
 ![DHT server mode by Kubo version (snapshot)](../results/nebula-analysis/03_server_mode.png)
 *Figure 4: Percentage of dialable Kubo nodes advertising
-`/ipfs/kad/1.0.0`, per Kubo version, in one recent crawl. Source:
-`nebula_ipfs_amino.visits`.*
+`/ipfs/kad/1.0.0` (DHT server mode), per Kubo version, in the same
+recent crawl. The advertisement is nearly uniform across versions
+(96.3% – 100%) — at any single moment almost all reachable Kubo nodes
+are in DHT server mode. The flat per-version pattern means the version
+axis adds no information in the snapshot view; the time-series
+analysis in F3 below is where version differences become visible.
+Source: `nebula_ipfs_amino.visits` filtered to
+`agent_version LIKE 'kubo/%'` and `connect_maddr IS NOT NULL`.*
 
 **Important caveat:** the snapshot view does not capture flipping over
-time. Multi-crawl analysis (F4) shows a small but real subset of
-stably-reachable Kubo peers whose DHT mode flips during the week. **See
-Appendix B.4** for the per-version snapshot table and **F4 below** for
-the time-series result.
+time. Multi-crawl analysis (F3 below) shows a small but real subset of
+stably-reachable Kubo peers whose DHT mode flips during the week.
 
-### F4 — Production AutoNAT v1 false negatives on stable Kubo peers
+**See Appendix B.3** for a note on how to interpret the v1/v2 split,
+and **Appendix B.4** for the per-version kad snapshot table in numeric
+form.
+
+### F3 — Production AutoNAT v1 false negatives on stable Kubo peers
 
 This is the headline production result. Methodology: restrict to Kubo
 peers Nebula successfully dialed in **all 84** of the successful crawls
@@ -175,7 +187,7 @@ verifiable, but small in absolute magnitude.
 *Figure 5: AutoNAT-state-change rate per Kubo version on the broader
 "any kad toggling" population, which is an upper bound on the rate
 (includes peers with restart or disconnect confounds). The strict-stable
-subset for F4 is much smaller — see Appendix C.2.*
+subset for F3 is much smaller — see Appendix C.2.*
 
 ![Dialability × Public-state heatmap](../results/nebula-analysis/08_dialability_vs_public.png)
 *Figure 6: 2D distribution of Kubo peers by dialability fraction (X)
@@ -183,7 +195,7 @@ and Public-state fraction (Y) over the 7-day window. The leftmost X
 column ("1–10%") contains peers dialed in 1 to 8 crawls out of 84;
 peers never dialed by Nebula are excluded entirely (they have no
 silver-table observations). The dashed blue line marks the strict
-100%-dialable column. The 8 strict-flipping peers from F4 sit inside
+100%-dialable column. The 8 strict-flipping peers from F3 sit inside
 that column at Y < 100%.*
 
 **See Appendix C** for the full state-machine reference, the list of
@@ -191,7 +203,7 @@ the 8 peers, the version-by-version breakdown across multiple
 methodological cuts (kad toggling, kad+autonat lockstep, dialability
 controls, restart confound), and the Private↔Unknown direction.
 
-### F5 — The inverse direction (rarely-dialable + always-Public) cannot be cleanly attributed to AutoNAT false positives
+### F4 — The inverse direction (rarely-dialable + always-Public) cannot be cleanly attributed to AutoNAT false positives
 
 The opposite failure mode would be a peer that AutoNAT thinks is Public
 but is mostly unreachable. The heatmap (Figure 6) shows **493 Kubo
@@ -215,8 +227,8 @@ production at small but measurable rates:
 
 | Final report finding | What Nebula data adds |
 |---|---|
-| **#1 v1/v2 reachability gap** | All 8 strict-stable AutoNAT-flipping Kubo peers (F4) are post-v2 Kubo running v2 server. v2 being enabled did not stop v1 from incorrectly flipping these nodes — consistent with the wiring-gap hypothesis (DHT consumes v1 events, not v2). |
-| **#2 v1 oscillation → DHT oscillation** | F4 confirms the phenomenon exists in production at ~0.39% of always-dialable Kubo per 7-day window. The rate is much smaller than the naive kad-toggling number (~5%), because most of that broader population is confounded by restart and disconnect. |
+| **#1 v1/v2 reachability gap** | All 8 strict-stable AutoNAT-flipping Kubo peers (F3) are post-v2 Kubo running v2 server. v2 being enabled did not stop v1 from incorrectly flipping these nodes — consistent with the wiring-gap hypothesis (DHT consumes v1 events, not v2). |
+| **#2 v1 oscillation → DHT oscillation** | F3 confirms the phenomenon exists in production at ~0.39% of always-dialable Kubo per 7-day window. The rate is much smaller than the naive kad-toggling number (~5%), because most of that broader population is confounded by restart and disconnect. |
 
 The fix proposed in Finding #1 of the final report (bridging v2 results
 into `EvtLocalReachabilityChanged`) is supported by, but not proven by,
