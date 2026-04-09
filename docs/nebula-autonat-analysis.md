@@ -61,75 +61,20 @@ caveats are in Appendix A; the source-code references are in Appendix C.
 
 ### F1 — Network composition
 
-Single recent crawl, grouped by `agent_version`:
-
-| Agent bucket | Total visited | Dialable |
-|---|---|---|
-| `(empty)` | 4,668 | 131 |
-| `kubo/...` | 3,174 | 3,174 |
-| `go-ipfs/...` (legacy, pre-Kubo rename) | 303 | 303 |
-| `other` (custom go-libp2p apps) | 75 | 75 |
-| `harmony` | 42 | 42 |
-| `storm` (botnet) | 30 | 30 |
-| `rust-libp2p/...` | 2 | 2 |
-| `js-libp2p/...` | 1 | 1 |
-| **Total** | **8,295** | **3,758** |
-
-Longitudinal stats over the same window:
-
 | Metric | Value |
 |---|---|
 | Visible peer IDs per crawl (avg, last 30d) | ~8,100 |
 | Dialable per crawl | ~3,750 (~46%) |
+| Of dialable peers, Kubo | ~3,170 (~84%) |
+| rust-libp2p / js-libp2p (combined dialable) | 3 nodes |
 | Kubo peers visited 2+ times in 7 days | 4,701 |
 | Kubo peers "lost" between prior week and current week | 727 (~18%) |
 
-#### Why so many `(empty)` agents?
-
-4,668 of 8,295 visible peers (56%) have empty `agent_version`. This
-is NOT a sign of implementation diversity — it is primarily an
-observability artifact. Decomposing the 4,668:
-
-| Subset | Count | What it means |
-|---|---|---|
-| Never connected (`connect_maddr IS NULL`) | 4,537 | Nebula learned the peer ID via FIND_NODE walking from some other peer's routing table but could not establish any connection — no TCP handshake, no QUIC handshake, nothing. Identify never runs without a connection, so `agent_version` is empty by construction. |
-| Connected but empty protocols (`connect_maddr IS NOT NULL`, `length(protocols) = 0`) | 131 | The dial succeeded but Identify did not return a useful response within Nebula's 5-second Identify timeout. Either the peer is slow to respond, has a non-standard Identify implementation, or the exchange was interrupted. |
-| Connected with non-empty protocols | 0 | By construction: if protocols came back, the peer returned an agent string and it lives in one of the other buckets. |
-
-So of the 4,668 empty-agent peers, **~97% (4,537) are stale routing-table
-references**. Nebula knows the peer ID because some dialable peer's
-routing table contained it, but Nebula's own dial attempts fail for
-the usual reasons (peer is offline, peer is behind NAT, ISP filtering,
-etc.). The remaining ~3% (131) are peers Nebula could reach but where
-Identify didn't return enough data to classify.
-
-#### What's in "other"?
-
-The `other` bucket (75 dialable peers in this crawl) is a long tail of
-custom go-libp2p applications running on top of the library. The
-largest sub-categories in a recent crawl are:
-
-| Custom agent | Peers |
-|---|---|
-| Generic `github.com/libp2p/go-libp2p` (app developer didn't set a name) | 24 |
-| `nabu/v0.1.0` | 8 |
-| `github.com/bsv-blockchain/teranode` (Bitcoin SV node) | 6 |
-| `github.com/JackalLabs/sequoia` (Filecoin storage provider) | 3 |
-| `oprueba.com/p2pTun` (P2P tunnel) | 3 |
-| `github.com/bitcoin-sv/alert-system` | 2 |
-| `github.com/licketyspliket/ipfs` | 2 |
-| Various bootnode, dvpn, meshproxy, zora, oasis, etc. builds | 1 each |
-
-These are all independent projects embedding libp2p for their own use
-cases — storage, blockchain nodes, VPNs, mesh networking, research
-bots. Most do not set an explicit agent-version string, so they show
-up as the raw module path. None of them are IPFS-ecosystem clients;
-they happen to share the IPFS Amino DHT because they're using
-`go-libp2p` defaults that include the standard DHT protocol ID.
-
-The broader picture: **the IPFS Amino DHT is overwhelmingly Kubo +
-legacy go-ipfs**, with a small long tail of custom go-libp2p apps and
-essentially zero rust-libp2p or js-libp2p dialable presence.
+About half of visible peer IDs are stale routing-table entries — peer IDs
+Nebula learned via FIND_NODE walking but cannot connect to from its single
+vantage point. The dialable subset is dominated by Kubo and legacy
+go-ipfs; the rest of the libp2p ecosystem (rust-libp2p, js-libp2p) is
+essentially absent from this DHT.
 
 ![Dialable peer count and ratio over 30 days](../results/nebula-analysis/05_dialable_over_time.png)
 *Figure 1: Total visible vs dialable peer counts per crawl, daily average
@@ -137,13 +82,19 @@ over the last 30 days. Source: `nebula_ipfs_amino.crawls`.*
 
 ![Client distribution from a single recent IPFS DHT crawl](../results/nebula-analysis/01_clients.png)
 *Figure 2: Client distribution by `agent_version` in one recent crawl.
-Grey bars are total visited; blue bars are the dialable subset. The
-large grey bar on the "(empty)" row is dominated by stale routing-table
-entries Nebula learned about but could not connect to.*
+Grey bars are total visited; blue bars are the dialable subset.*
 
-**See Appendix B.1 and B.2** for the historical time series, the
-exact cross-tab of empty agent vs undialable, and notes on the
-~50% decline in visible peer count since mid-2025.
+Note on the `(empty)` and `other` buckets in Figure 2: the large grey
+`(empty)` bar is not a diverse implementation cohort — it is almost
+entirely peer IDs Nebula learned via FIND_NODE walking but could not
+connect to, so Identify never ran and no agent string is available. The
+small `other` bar is a long tail of custom go-libp2p applications (Bitcoin
+SV node, Filecoin storage provider, P2P tunnel, bootnodes, etc.) that
+embed libp2p for their own use case and happen to share the IPFS Amino
+DHT. **See Appendix B.2 for the full breakdown.**
+
+**See Appendix B.1 and B.2** for the historical time series, the exact
+cross-tab of empty agent vs undialable, and the "other" bucket detail.
 
 ### F2 — AutoNAT v2 adoption among Kubo
 
@@ -444,52 +395,84 @@ how Nebula bootstraps and walks the DHT.
 
 ## B.2 Client distribution and the empty/undialable cross-tab
 
-Cross-tab of `agent_version` (empty vs not) and dialability in one recent
-crawl:
+### Full agent distribution in one recent crawl
 
-| `agent_version` | Dialable | Undialable | Total |
-|---|---|---|---|
-| Has agent string | 3,621 | 0 | 3,621 |
-| Empty | 121 | 4,116 | 4,237 |
-| **Total** | 3,742 | 4,116 | 7,858 |
-
-Two relationships are exact:
-1. **Every undialable peer has empty `agent_version`.** Identify requires
-   a successful connection, so undialable peers have no agent string, no
-   protocol list, and no listen-address data Nebula could collect.
-2. **Some peers with empty `agent_version` are dialable** (121 in this
-   crawl). The connection succeeded but Identify did not return an agent
-   string within Nebula's **5-second Identify timeout**
-   (`libp2p/crawler_p2p.go:111-129`). This can be a slow Identify
-   response, an implementation that does not run standard Identify, or
-   a transient failure mid-exchange.
-
-So "empty agent" is a strict superset of "undialable": empty = undialable
-+ "dialable but Identify yielded no agent". They are related but not the
-same.
-
-Of dialable peers in the most recent crawl, grouped by `agent_version`:
-
-| Implementation (`agent_version` pattern) | Dialable nodes | % of dialable |
+| Agent bucket | Total visited | Dialable |
 |---|---|---|
-| `kubo/...` | 3,170 | ~84% |
-| `go-ipfs/...` (legacy, pre-Kubo rename) | 273 | ~7% |
-| (empty `agent_version`, dialable) | 145 | ~4% |
-| `harmony` | 41 | ~1% |
-| `storm...` | 39 | ~1% |
-| `other` | 70 | ~2% |
-| `edgevpn` | 3 | <1% |
-| `rust-libp2p/...` | 2 | <0.1% |
-| `js-libp2p/...` | 1 | <0.1% |
+| `(empty)` | 4,668 | 131 |
+| `kubo/...` | 3,174 | 3,174 |
+| `go-ipfs/...` (legacy, pre-Kubo rename) | 303 | 303 |
+| `other` (custom go-libp2p apps) | 75 | 75 |
+| `harmony` | 42 | 42 |
+| `storm` (botnet) | 30 | 30 |
+| `rust-libp2p/...` | 2 | 2 |
+| `js-libp2p/...` | 1 | 1 |
+| **Total** | **8,295** | **3,758** |
 
 Within the dialable subset, rust-libp2p and js-libp2p combined account
 for 3 nodes. **For dialable peers in the IPFS Amino DHT, the population
 is overwhelmingly Kubo + legacy go-ipfs.** We cannot make claims about
 the non-dialable population.
 
+### Decomposing the `(empty)` agent bucket
+
+4,668 of 8,295 visible peers (~56%) have empty `agent_version`. This is
+NOT a sign of implementation diversity — it is primarily an observability
+artifact. Decomposing the 4,668:
+
+| Subset | Count | What it means |
+|---|---|---|
+| Never connected (`connect_maddr IS NULL`) | 4,537 | Nebula learned the peer ID via FIND_NODE walking from some other peer's routing table but could not establish any connection — no TCP handshake, no QUIC handshake, nothing. Identify never runs without a connection, so `agent_version` is empty by construction. |
+| Connected but empty protocols (`connect_maddr IS NOT NULL`, `length(protocols) = 0`) | 131 | The dial succeeded but Identify did not return a useful response within Nebula's 5-second Identify timeout (`libp2p/crawler_p2p.go:111-129`). Either the peer is slow to respond, has a non-standard Identify implementation, or the exchange was interrupted. |
+| Connected with non-empty protocols | 0 | By construction: if protocols came back, the peer returned an agent string in the same Identify exchange and lives in one of the other buckets. |
+
+So of the 4,668 empty-agent peers, **~97% (4,537) are stale routing-table
+references** — peer IDs Nebula knows because some dialable peer's routing
+table contained them, but that Nebula's own dial attempts fail to reach
+(peer is offline, peer is behind NAT, ISP filtering, etc.). The remaining
+~3% (131) are peers Nebula could reach but where Identify didn't return
+enough data to classify.
+
+Two relationships are exact:
+1. **Every undialable peer has empty `agent_version`.** Identify requires
+   a successful connection, so undialable peers have no agent string, no
+   protocol list, and no listen-address data Nebula could collect.
+2. **Some peers with empty `agent_version` are dialable** (131 in this
+   crawl). They reached step 4 of the visit lifecycle (Appendix A.1) but
+   the 5-second Identify listener timed out.
+
+"Empty agent" is a strict superset of "undialable": empty = undialable
++ "dialable but Identify yielded no agent".
+
+### What's in the `other` bucket
+
+The `other` bucket (75 dialable peers in this crawl) is a long tail of
+custom go-libp2p applications running on top of the library. The largest
+sub-categories:
+
+| Custom agent | Peers |
+|---|---|
+| Generic `github.com/libp2p/go-libp2p` (app developer didn't set a name) | 24 |
+| `nabu/v0.1.0` | 8 |
+| `github.com/bsv-blockchain/teranode` (Bitcoin SV node) | 6 |
+| `github.com/JackalLabs/sequoia` (Filecoin storage provider) | 3 |
+| `oprueba.com/p2pTun` (P2P tunnel) | 3 |
+| `github.com/bitcoin-sv/alert-system` | 2 |
+| `github.com/licketyspliket/ipfs` | 2 |
+| Various bootnode, dvpn, meshproxy, zora, oasis, etc. builds | 1 each |
+
+These are all independent projects embedding libp2p for their own use
+cases — storage, blockchain nodes, VPNs, mesh networking, research bots.
+Most do not set an explicit agent-version string, so they show up as the
+raw Go module path. None of them are IPFS-ecosystem clients; they happen
+to share the IPFS Amino DHT because they're using `go-libp2p` defaults
+that include the standard DHT protocol ID (`/ipfs/kad/1.0.0`).
+
+### IPStorm
+
 The `storm` agent_version corresponds to the IPStorm botnet client.
 Public sources (e.g., DOJ press release, November 2023) describe an FBI
-dismantling operation. We observe 39 dialable nodes still advertising
+dismantling operation. We observe 30 dialable nodes still advertising
 this agent_version in April 2026. We did not investigate whether these
 are surviving infections, re-deployments, name reuse, or some other
 origin.
