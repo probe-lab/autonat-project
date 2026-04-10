@@ -759,13 +759,21 @@ and parts of F2. The proposed fix to the root cause is in the
 7. **Measure real-world NAT type distribution** — Deploy monitoring to
    quantify ADF prevalence, symmetric NAT fraction, and v2 adoption.
 
-> **Note:** Recommendations for the AutoNAT v2 specification — including
-> the v2-priority reduction (F1), the ADF blind spot (F3), and the
-> symmetric NAT missing signal (F4) — are under investigation — see
-> [#89](https://github.com/probe-lab/autonat-project/issues/89).
-> go-libp2p already detects symmetric NAT via `getNATType()` but how to
-> act on it (and whether this is a spec or implementation concern)
-> requires further analysis.
+### Proposed upstream issues
+
+The following issues should be discussed internally and/or with
+libp2p maintainers before filing. Each maps to a specific finding
+and includes the proposed fix.
+
+| # | Repository | Title | Finding | Proposed fix |
+|---|---|---|---|---|
+| 1 | [specs](https://github.com/libp2p/specs) | AutoNAT v2: define state transitions and confidence semantics | F1–F5 | The spec defines the wire protocol but not the client-side state machine: how many probes are needed, how failures/timeouts/refusals affect confidence, when to re-probe, and what events to emit. Each implementation has independently designed different confidence systems (go: sliding window of 5, targetConfidence=3; rust: single probe, no accumulation; js: fixed thresholds 4/8, monotonic counters + TTL), different error classification (go v1 treats timeouts as evidence; go v2 discards them; rust ignores errors), and different re-probe schedules. The spec should define: (a) confidence thresholds, (b) how each server response (OK, E_DIAL_ERROR, E_DIAL_REFUSED, E_DIAL_BACK_ERROR, timeout) affects state, and (c) the event surface for consumers. See [v1-v2-state-transitions.md](v1-v2-state-transitions.md). *Requires follow-up PRs in go-libp2p, rust-libp2p, and js-libp2p to align their implementations with the agreed spec.* |
+| 2 | [specs](https://github.com/libp2p/specs) | AutoNAT v2: mandate v2-priority reduction for global reachability | F1 | Spec should define canonical reduction: "PUBLIC if any v2-confirmed address is reachable; UNREACHABLE if all unreachable; UNKNOWN otherwise." This directly fixes the go-libp2p wiring gap (DHT/AutoRelay consuming v1 instead of v2) by making the expected behavior a spec requirement, not an implementation choice. *Requires follow-up PRs in each implementation to wire the reduction into their DHT/relay/address-manager subsystems.* |
+| 3 | [specs](https://github.com/libp2p/specs) | AutoNAT v2: ADF false positive — dial-back always from trusted IP | F3 | Require dial-back from a different IP when multihomed servers available. Document the limitation for single-IP servers. ADF is rare (most routers default to APDF) so this may be accepted as a known limitation. *If adopted, requires follow-up PRs in all three implementations to support multi-IP dial-back.* |
+| 4 | [go-libp2p](https://github.com/libp2p/go-libp2p) | AutoNAT v2 `dialerHost` should disable UDP black hole detector | F2 | Set `UDPBlackHoleSuccessCounter: nil` in `makeAutoNATV2Host()`, matching the v1 fix ([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)). The dial-back result is the information the client needs; the detector should not suppress it. |
+| 5 | [go-libp2p](https://github.com/libp2p/go-libp2p) | Symmetric NAT: `EvtNATDeviceTypeChanged` emitted but has zero subscribers | F4 | Wire `getNATType()` detection (`EndpointDependent`) into either lowering `ActivationThresh` or emitting UNREACHABLE directly. Testbed confirms `ActivationThresh=1` produces correct UNREACHABLE. |
+| 6 | [rust-libp2p](https://github.com/libp2p/rust-libp2p) | Identify skips address translation when TCP port reuse silently falls back to ephemeral | F5 | TCP transport should construct the connection with `PortUse::New` when `bind()` falls back to ephemeral (compare `stream.local_addr()` against listen port). No public API change; fix contained in `libp2p-tcp`. |
+| 7 | [js-libp2p](https://github.com/libp2p/js-libp2p) | AutoNAT v2 emits no reachability events to consumers | F4 | Expose v2 probe results via EventEmitter or observable. Currently tracked internally in `dialResults` Map but not surfaced. Related: [js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620) (TCP observed addrs dropped). |
 
 ---
 
