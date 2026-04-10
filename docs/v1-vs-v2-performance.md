@@ -23,7 +23,7 @@ DHT — causing routing table churn.**
 | Aspect | v1 | v2 |
 |--------|----|----|
 | **Scope** | Global (whole-node: Public/Private) | Per-address (each address independently) |
-| **Probing model** | Random peer selection, majority vote | Specific server selection, per-address confidence |
+| **Probing model** | Random peer from same pool, global verdict | Same peer pool, per-address confidence |
 | **Confidence system** | Sliding window of last 3 results | Sliding window of last 5 results, targetConfidence=3 |
 | **Protocol** | `/libp2p/autonat/1.0.0` | `/libp2p/autonat/2/dial-request` + `/libp2p/autonat/2/dial-back` |
 | **Dial-back identity** | Same peer ID | Separate peer ID (go-libp2p) |
@@ -34,15 +34,29 @@ DHT — causing routing table churn.**
 
 ### Why v2 Is More Stable
 
-v1 selects a random connected peer for each probe. If that peer can't
-reach the node (because the *peer* is behind NAT, or has a transient issue),
-v1 counts it as a failure. The sliding window of 3 means a single failure
-can flip the result.
+Both v1 and v2 select probe servers from the same pool of connected
+peers (most Kubo nodes advertise both protocols). The difference is
+in **how failures are handled**, not in server selection:
 
-v2 only probes with peers that explicitly support the `/libp2p/autonat/2/dial-request`
-protocol. It tests each address independently and requires `targetConfidence=3`
-(3 net successes) before declaring reachable. A random failure from one
-server doesn't flip the result because the confidence system absorbs it.
+**v1:** All non-success results — timeouts, stream resets, refusals,
+and `E_DIAL_ERROR` — erode v1's confidence (`maxConfidence=3`). After
+4 consecutive non-success probes, confidence drains to 0 and the
+state flips to Unknown. The DHT treats Unknown the same as Private
+(both trigger client mode), so **timeouts from honest-but-unreliable
+servers are sufficient to disrupt the DHT** — no malicious peers
+needed.
+
+**v2:** Server failures (timeouts, stream resets, refusals,
+`E_DIAL_REFUSED`) **are discarded entirely** — they do not affect the
+address's confidence. Only explicit `E_DIAL_ERROR` (server tried to
+dial back, NAT blocked it) counts as a failure. Server unreliability
+cannot cause state flips. To flip from reachable (+3) to unreachable
+(-3), v2 requires 6 consecutive `E_DIAL_ERROR` results.
+
+**Tradeoff:** v2's stability means slower detection of genuine changes.
+After reaching high confidence, v2 re-probes every 1 hour (primary)
+vs v1's 15 minutes (configurable). No event-driven re-probe triggers
+exist in either protocol.
 
 ---
 
@@ -140,24 +154,25 @@ connections provide alternative paths.
 
 ### v1 Time-to-Confidence
 
-v1's convergence time is highly variable due to random peer selection:
+v1's convergence time is highly variable because server timeouts erode
+confidence:
 
 - **Best case:** ~3,000ms (first probe succeeds, quick confidence buildup)
 - **Worst case:** >185,000ms (3+ minutes when unreliable servers dominate)
-- **Oscillation case:** Never settles — flips between PUBLIC and PRIVATE
+- **Oscillation case:** Never settles — flips between Public and Unknown
 
 v1 doesn't have a fixed TTC because its confidence can be undone by
-subsequent failures.
+subsequent timeouts from unreliable servers.
 
-### Key Finding: QUIC Resilience
+### Transport Resilience Under Packet Loss
 
-QUIC is dramatically more resilient to packet loss than TCP:
-- 10% packet loss: QUIC TTC increases by **1%**, TCP by **147%**
-- This is because QUIC handles retransmission at the transport layer,
-  while TCP retransmission adds visible latency to the probe cycle
-
-Both transports scale linearly with added latency, but QUIC's baseline
-is lower for the same RTT due to 0-RTT connection establishment.
+Both TCP and QUIC maintain **0% FNR/FPR** under all tested loss levels.
+Initial single-run data suggested a dramatic QUIC advantage (+1% vs
++147% TTC at 10% loss), but follow-up testing with 3 runs per scenario
+showed this was a **statistical artifact from insufficient runs** —
+neither transport shows a consistent convergence advantage. See the
+final report's [Transport Resilience](#transport-resilience-under-packet-loss)
+section for the full investigation.
 
 ---
 

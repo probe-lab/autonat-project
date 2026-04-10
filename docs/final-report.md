@@ -102,14 +102,16 @@ The most impactful finding is that **global (v1) and per-address (v2)
 reachability can disagree, and there is no canonical way to reconcile
 them**. In go-libp2p — the only implementation where v2 is deployed in
 production — DHT and AutoRelay subscribe to v1's global flag and are
-blind to v2's per-address signal. v1 oscillates under realistic
-conditions (60% of testbed runs with 5/7 unreliable servers flip
-Public ↔ Private; 0% of v2 runs do), so the unstable global flag
-overrides v2's stable per-address result and drives DHT/relay decisions.
-This directly explains the oscillation observed by Obol. rust-libp2p
-and js-libp2p don't have the bug today, but only by accident — neither
-documents what should happen if both protocols run, and the spec
-doesn't either.
+blind to v2's per-address signal. Both protocols select servers from
+the same peer pool, but v1 counts all non-success results (including
+timeouts from honest-but-unreliable servers) as evidence against
+reachability, while v2 discards them entirely. This means **v1 can
+oscillate due to server unreliability alone — no malicious peers
+needed** (60% of testbed runs with 5/7 unreliable servers; 0% of v2
+runs). The unstable global flag overrides v2's stable per-address
+result and drives DHT/relay decisions. rust-libp2p and js-libp2p
+don't have the bug today, but only by accident — neither documents
+what should happen if both protocols run, and the spec doesn't either.
 
 Cross-implementation analysis reveals that **only go-libp2p has v2
 consumed by a production project** (Kubo). rust-libp2p's v2
@@ -267,22 +269,42 @@ Unknown} for each multiaddr. When both protocols run on the same node,
 the two signals can disagree, and **there is no canonical reduction
 defined by the spec or by any implementation**.
 
-The two protocols disagree because they use different state-update
-mechanisms:
+Both protocols select probe servers from the **same pool** of connected
+peers (most Kubo nodes advertise both v1 and v2 server protocols), so
+the same unreliable servers are candidates for both. The critical
+difference is **how each protocol handles probe failures**:
 
-- **v1** uses a sliding window of 3 with random server selection.
-  Critically, server failures (timeouts, stream resets, refusals)
-  don't directly flip state but **erode confidence** — after 4
-  consecutive failures, confidence drains to 0 and the state flips.
-  With 5/7 unreliable servers, the probability of selecting 2
-  unreliable peers in a row is (5/7)² ≈ 51%, and 2 consecutive
-  failures are enough to flip the window from Public [S,S,S] →
-  [S,F,F] (Private). v1 oscillates under realistic conditions.
-- **v2** uses explicit server selection and per-address confidence
-  (`targetConfidence = 3` in go-libp2p). Server failures are
-  **discarded entirely** — only explicit `E_DIAL_ERROR` (server tried
-  and failed to reach the address) counts as evidence. v2 does not
-  oscillate in our testbed.
+- **v1** uses a sliding window of 3 (`maxConfidence=3`). **All
+  non-success results — including timeouts, stream resets, and
+  refusals — erode confidence.** After 4 consecutive non-success
+  probes, confidence drains to 0 and the state flips to Unknown.
+  Since the DHT treats Unknown the same as Private (both trigger
+  client mode), **timeouts from honest-but-unreliable servers are
+  sufficient to disrupt the DHT — no malicious peers needed.** With
+  5/7 unreliable servers, v1 oscillates between Public and Unknown
+  as the random probe selection alternates between reliable and
+  unreliable peers. To flip to Private specifically (which also
+  disables the v1 server), at least one `E_DIAL_ERROR` is needed
+  after confidence is already drained to 0.
+- **v2** uses a per-address sliding window of 5
+  (`targetConfidence=3`). **Server failures (timeouts, stream resets,
+  refusals, `E_DIAL_REFUSED`) are discarded entirely** — they do not
+  affect the address's confidence. Only explicit `E_DIAL_ERROR`
+  (server successfully connected and tried to dial back, but the NAT
+  blocked it) counts as a failure. This means **server unreliability
+  cannot cause state flips** — v2 only changes state based on
+  genuine reachability changes. To flip from reachable (+3) to
+  unreachable (-3), v2 requires 6 consecutive `E_DIAL_ERROR`
+  results.
+
+**Tradeoff:** v2's stability comes at the cost of slower reaction to
+genuine changes. Once an address reaches high confidence, v2 re-probes
+only every **1 hour** (primary address) or **3 hours** (secondary).
+If reachability genuinely changes (NAT mapping expires, port forward
+removed), v2 may take up to 1 hour to notice — whereas v1 rechecks
+every 15 minutes. There is no event-driven re-probe trigger (e.g., on
+connection loss or address change) defined by any implementation or
+the spec.
 
 For the full comparison of how each event (success, error, timeout,
 refusal) changes state across all implementations and protocol
@@ -369,7 +391,8 @@ leaving behavior undefined is the root cause.
 | Metric | v1 | v2 |
 |--------|----|----|
 | Oscillation rate (5/7 unreliable, go-libp2p) | [60% of runs](#key-metrics) | **0%** |
-| Stability after convergence | Flips on random peer failure | Stable (`targetConfidence`=3) |
+| Stability after convergence | Timeouts from unreliable servers erode confidence and flip state | Server failures discarded; only genuine `E_DIAL_ERROR` counts |
+| Re-probe after high confidence | 15 min default (configurable) | 1 hour primary / 3 hours secondary (configurable) |
 
 **Cross-implementation:**
 
@@ -384,7 +407,7 @@ leaving behavior undefined is the root cause.
 - **DHT subscribes to v1**: [`go-libp2p-kad-dht/subscriber_notifee.go#L32-L39`](https://github.com/libp2p/go-libp2p-kad-dht/blob/v0.39.0/subscriber_notifee.go#L32-L39) (subscription) and [`#L72-L75`](https://github.com/libp2p/go-libp2p-kad-dht/blob/v0.39.0/subscriber_notifee.go#L72-L75) (handler dispatch on `event.EvtLocalReachabilityChanged`)
 - **DHT does NOT subscribe to v2**: zero references to `EvtHostReachableAddrsChanged` in `go-libp2p-kad-dht/subscriber_notifee.go` (verified by file inspection)
 - **v1 sliding window** (`maxConfidence = 3`): [`go-libp2p/p2p/host/autonat/autonat.go#L24`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L24) (constant) and [`#L314-L372`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L314-L372) (`recordObservation` state machine)
-- **v1 random server selection** (Fisher-Yates shuffle in `getPeerToProbe`): [`go-libp2p/p2p/host/autonat/autonat.go#L400-L425`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L400-L425)
+- **v1 server selection** (same random pool as v2 — Fisher-Yates shuffle in `getPeerToProbe`): [`go-libp2p/p2p/host/autonat/autonat.go#L400-L425`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L400-L425) — the selection is not the issue; the failure handling is
 - **v2 emits `EvtHostReachableAddrsChanged`** (zero consumers): [`go-libp2p/p2p/host/basic/addrs_manager.go#L396-L401`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/basic/addrs_manager.go#L396-L401)
 
 **Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md), [v1-vs-v2-performance.md](v1-vs-v2-performance.md), [v1-v2-state-transitions.md](v1-v2-state-transitions.md)
@@ -767,7 +790,7 @@ and includes the proposed fix.
 
 | # | Repository | Title | Finding | Proposed fix |
 |---|---|---|---|---|
-| 1 | [specs](https://github.com/libp2p/specs) | AutoNAT v2: define state transitions and confidence semantics | F1–F5 | The spec defines the wire protocol but not the client-side state machine: how many probes are needed, how failures/timeouts/refusals affect confidence, when to re-probe, and what events to emit. Each implementation has independently designed different confidence systems (go: sliding window of 5, targetConfidence=3; rust: single probe, no accumulation; js: fixed thresholds 4/8, monotonic counters + TTL), different error classification (go v1 treats timeouts as evidence; go v2 discards them; rust ignores errors), and different re-probe schedules. The spec should define: (a) confidence thresholds, (b) how each server response (OK, E_DIAL_ERROR, E_DIAL_REFUSED, E_DIAL_BACK_ERROR, timeout) affects state, and (c) the event surface for consumers. See [v1-v2-state-transitions.md](v1-v2-state-transitions.md). *Requires follow-up PRs in go-libp2p, rust-libp2p, and js-libp2p to align their implementations with the agreed spec.* |
+| 1 | [specs](https://github.com/libp2p/specs) | AutoNAT v2: define state transitions and confidence semantics | F1–F5 | The spec defines the wire protocol but not the client-side state machine: how many probes are needed, how failures/timeouts/refusals affect confidence, when to re-probe, and what events to emit. Each implementation has independently designed different confidence systems (go: sliding window of 5, targetConfidence=3; rust: single probe, no accumulation; js: fixed thresholds 4/8, monotonic counters + TTL), different error classification (go v1 treats timeouts as evidence eroding confidence; go v2 discards them entirely; rust ignores errors), and different re-probe schedules (go v2: 1h after high confidence; v1: 15min). The spec should define: (a) confidence thresholds, (b) how each server response (OK, E_DIAL_ERROR, E_DIAL_REFUSED, E_DIAL_BACK_ERROR, timeout) affects state — in particular, whether timeouts should erode confidence (v1 behavior, causes oscillation on unreliable servers) or be discarded (v2 behavior, stable but slow to detect genuine changes), (c) re-probe triggers for connectivity changes (currently no implementation re-probes on connection loss or address change), and (d) the event surface implementations must expose to consumers. See [v1-v2-state-transitions.md](v1-v2-state-transitions.md). *Requires follow-up PRs in go-libp2p, rust-libp2p, and js-libp2p to align their implementations with the agreed spec.* |
 | 2 | [specs](https://github.com/libp2p/specs) | AutoNAT v2: mandate v2-priority reduction for global reachability | F1 | Spec should define canonical reduction: "PUBLIC if any v2-confirmed address is reachable; UNREACHABLE if all unreachable; UNKNOWN otherwise." This directly fixes the go-libp2p wiring gap (DHT/AutoRelay consuming v1 instead of v2) by making the expected behavior a spec requirement, not an implementation choice. *Requires follow-up PRs in each implementation to wire the reduction into their DHT/relay/address-manager subsystems.* |
 | 3 | [specs](https://github.com/libp2p/specs) | AutoNAT v2: ADF false positive — dial-back always from trusted IP | F3 | Require dial-back from a different IP when multihomed servers available. Document the limitation for single-IP servers. ADF is rare (most routers default to APDF) so this may be accepted as a known limitation. *If adopted, requires follow-up PRs in all three implementations to support multi-IP dial-back.* |
 | 4 | [go-libp2p](https://github.com/libp2p/go-libp2p) | AutoNAT v2 `dialerHost` should disable UDP black hole detector | F2 | Set `UDPBlackHoleSuccessCounter: nil` in `makeAutoNATV2Host()`, matching the v1 fix ([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)). The dial-back result is the information the client needs; the detector should not suppress it. |
