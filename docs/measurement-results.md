@@ -2,9 +2,11 @@
 
 Complete results from all testbed experiments. For findings and
 interpretation, see [final-report.md](final-report.md). For testbed
-architecture, see [testbed.md](testbed.md).
+architecture, see [testbed.md](testbed.md). For the v1/v2 wiring gap
+and state-machine analysis, see
+[v1-v2-analysis.md](v1-v2-analysis.md).
 
-**Total: 178 runs** across 69 scenarios, 7 scenario files.
+**Total: 183 runs** across 69 scenarios, 7 scenario files.
 
 ---
 
@@ -373,3 +375,152 @@ reuse silently fails.
 
 ![FNR/FPR Summary](../results/figures/07_fnr_fpr_summary.png)
 *False negative and false positive rates across all conditions.*
+
+---
+
+## v1 vs v2 Performance Analysis
+
+This section interprets the v1/v2 gap results (§6 above) and the
+convergence data from the baseline, latency, and packet-loss scenarios.
+
+### v1/v2 Stability Comparison
+
+Both v1 and v2 select probe servers from the **same pool** of connected
+peers. The difference is in failure handling:
+
+- **v1:** All non-success results (timeouts, resets, refusals) erode
+  confidence. 4 consecutive non-success probes flip Public → Unknown.
+  The DHT treats Unknown the same as Private (both trigger client mode),
+  so **timeouts from honest-but-unreliable servers disrupt the DHT —
+  no malicious peers needed.**
+- **v2:** Server failures are **discarded entirely**. Only explicit
+  `E_DIAL_ERROR` (NAT blocked the dial-back) counts. Server
+  unreliability cannot cause state flips.
+
+With 5/7 unreliable servers in the testbed, **60% of v1 runs oscillate;
+0% of v2 runs do.**
+
+### Trace Timelines (v1-v2-gap scenarios)
+
+**Run 2 — clearest oscillation (`v1v2-gap-fullcone-tcp`):**
+
+```
+  3,026ms   v1  PUBLIC         ← initial v1 determination
+  6,018ms   v2  reachable=1    ← v2 confirms /ip4/73.0.0.2/tcp/4001
+                                  (stays stable for entire 600s window)
+108,027ms   v1  PRIVATE        ← v1 FLIPPED (unreliable server timeout)
+183,027ms   v1  PUBLIC         ← v1 flipped back (reliable server selected)
+```
+
+**Run 1 — v1 slow convergence:**
+
+```
+ 16,025ms   v2  reachable=1    ← v2 confirms reachable
+ 18,024ms   v1  PRIVATE        ← v1 starts PRIVATE (unreliable servers dominate)
+ 95,025ms   v1  PUBLIC         ← v1 reaches public 77s later
+```
+
+**Run 3 — v1 stuck for 3 minutes:**
+
+```
+ 18,028ms   v1  PRIVATE        ← v1 starts private
+185,030ms   v1  PUBLIC         ← v1 takes 3+ minutes to reach public
+```
+
+### All v1-v2-gap Runs Summary (20 runs)
+
+Extended run (10 runs per scenario, 2026-04-10):
+
+| Scenario | Runs | v1 oscillated | Rate | v2 stable? |
+|----------|------|--------------|------|------------|
+| fullcone-tcp | 10 | 3 | **30%** | Yes (all 10) |
+| fullcone-both (TCP+QUIC) | 10 | 8 | **80%** | Yes (all 10) |
+| **Total** | **20** | **11** | **55%** | **Yes (all 20)** |
+
+Per-run detail:
+
+| Run | Scenario | v1 flips | v1 → private | v2 events | v1 oscillated? |
+|-----|----------|----------|-------------|-----------|----------------|
+| 1 | tcp | 4 | 2 | 1 | **Yes** |
+| 2 | tcp | 1 | 0 | 1 | No |
+| 3 | tcp | 1 | 0 | 1 | No |
+| 4 | tcp | 1 | 0 | 2 | No |
+| 5 | tcp | 1 | 0 | 2 | No |
+| 6 | tcp | 1 | 0 | 1 | No |
+| 7 | tcp | 4 | 2 | 1 | **Yes** |
+| 8 | tcp | 5 | 2 | 2 | **Yes** |
+| 9 | tcp | 1 | 0 | 2 | No |
+| 10 | tcp | 1 | 0 | 2 | No |
+| 1 | both | 1 | 0 | 1 | No |
+| 2 | both | 3 | 1 | 2 | **Yes** |
+| 3 | both | 1 | 0 | 2 | No |
+| 4 | both | 3 | 1 | 2 | **Yes** |
+| 5 | both | 3 | 1 | 2 | **Yes** |
+| 6 | both | 3 | 1 | 2 | **Yes** |
+| 7 | both | 3 | 1 | 1 | **Yes** |
+| 8 | both | 3 | 1 | 2 | **Yes** |
+| 9 | both | 3 | 1 | 2 | **Yes** |
+| 10 | both | 6 | 3 | 1 | **Yes** |
+
+**Key observations:**
+- **v2 is stable in all 20 runs** — confirmed with statistical
+  confidence. v2 never oscillated regardless of transport.
+- **Overall v1 oscillation rate: 55%** — consistent with the earlier
+  60% estimate from 5 runs.
+- **"Both" transport oscillates more than TCP-only** (80% vs 30%) —
+  this contradicts the initial 5-run hypothesis. The reason is not
+  fully understood; it may be related to how QUIC and TCP connections
+  interact in the peer selection pool.
+- The testbed uses iptables to block dial-backs on unreliable servers,
+  producing `E_DIAL_ERROR` (not timeouts). In production, unreliable
+  servers more commonly produce timeouts (peers behind their own NAT),
+  which flip to Unknown rather than Private — but the DHT impact is the
+  same (both trigger client mode).
+
+### Convergence Speed
+
+**v2 Time-to-Confidence:**
+
+| Condition | TCP | QUIC |
+|-----------|-----|------|
+| Baseline (no degradation) | ~6,000ms | ~6,000ms |
+| 200ms added latency | ~18,600ms (+210%) | ~12,600ms (+110%) |
+| 500ms added latency | ~32,000ms (+432%) | ~20,000ms (+233%) |
+| 1% packet loss | ~6,000ms (+0%) | ~6,000ms (+0%) |
+| 5% packet loss | ~7,000ms (+17%) | ~6,200ms (+4%) |
+| 10% packet loss | ~14,900ms (+147%) | ~6,100ms (+1%) |
+
+**v1 Time-to-Confidence:** highly variable because timeouts erode
+confidence — best case ~3s, worst case >185s, oscillation case never
+settles.
+
+**Transport resilience:** Both TCP and QUIC maintain 0% FNR/FPR under
+all tested loss levels. Initial single-run data suggested a QUIC
+advantage, but follow-up testing showed this was a statistical artifact
+from insufficient runs — neither transport shows a consistent
+convergence advantage.
+
+### Re-probe Tradeoff
+
+v2's stability comes at the cost of slower reaction to genuine changes:
+
+| | v1 | v2 (high confidence) |
+|---|---|---|
+| Re-probe interval | 15 min (configurable) | 1 hour primary / 3 hours secondary (configurable) |
+| Flips on server unreliability | Yes (4 timeouts sufficient) | No (only E_DIAL_ERROR counts) |
+| Detects genuine NAT change | Within ~15 min | Within ~1 hour |
+| Event-driven re-probe triggers | None | None |
+
+### DHT Impact
+
+In go-libp2p, the DHT in `ModeAuto` subscribes to v1's
+`EvtLocalReachabilityChanged`. It does not subscribe to v2's events.
+When v1 oscillates, each flip triggers a DHT server↔client mode
+switch, causing routing table updates across connected peers.
+
+**Production observation (Kubo on live IPFS network, 2026-03-10):**
+1. v2 confirms 2 addresses reachable at ~5s
+2. v1 reports PUBLIC at ~8s
+3. v1 decays to Unknown at ~45s (timeouts from unreliable peers)
+4. v2 addresses remain reachable throughout
+5. DHT switches to client mode — despite confirmed v2 reachability

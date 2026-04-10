@@ -410,7 +410,7 @@ leaving behavior undefined is the root cause.
 - **v1 server selection** (same random pool as v2 — Fisher-Yates shuffle in `getPeerToProbe`): [`go-libp2p/p2p/host/autonat/autonat.go#L400-L425`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L400-L425) — the selection is not the issue; the failure handling is
 - **v2 emits `EvtHostReachableAddrsChanged`** (zero consumers): [`go-libp2p/p2p/host/basic/addrs_manager.go#L396-L401`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/basic/addrs_manager.go#L396-L401)
 
-**Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md), [v1-vs-v2-performance.md](v1-vs-v2-performance.md), [v1-v2-state-transitions.md](v1-v2-state-transitions.md)
+**Full analysis:** [v1-v2-analysis.md](v1-v2-analysis.md) — state transitions, wiring gap, fix options, and testbed performance data
 
 ### Finding 2: UDP Black Hole Detector Blocks QUIC Dial-Back
 

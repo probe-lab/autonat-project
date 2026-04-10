@@ -53,10 +53,8 @@ for requirements.
 |----------|-------------|
 | [Final Report](docs/final-report.md) | Findings, metrics, recommendations |
 | [Cross-Implementation Comparison](docs/cross-implementation-comparison.md) | How each finding manifests in go/rust/js, feature matrix, adoption status |
-| [v1 vs v2 State Transitions](docs/v1-v2-state-transitions.md) | State machine, confidence systems, and server selection across implementations |
-| [Measurement Results](docs/measurement-results.md) | Complete data from all 183 runs |
-| [v1 vs v2 Performance](docs/v1-vs-v2-performance.md) | Quantitative comparison |
-| [v1/v2 Reachability Gap](docs/v1-v2-reachability-gap.md) | Event model gap analysis |
+| [v1 vs v2 Analysis](docs/v1-v2-analysis.md) | State transitions, wiring gap, fix options (F1 deep dive) |
+| [Measurement Results](docs/measurement-results.md) | Complete testbed data + v1/v2 performance analysis |
 | [ADF False Positive](docs/adf-false-positive.md) | Protocol design issue with testbed evidence |
 | [Symmetric NAT Missing Signal](docs/symmetric-nat-silent-failure.md) | Cross-implementation root cause analysis |
 | [UDP Black Hole Detector](docs/udp-black-hole-detector.md) | QUIC dial-back issue + fix options |
