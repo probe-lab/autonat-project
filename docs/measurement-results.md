@@ -427,21 +427,55 @@ With 5/7 unreliable servers in the testbed, **60% of v1 runs oscillate;
 185,030ms   v1  PUBLIC         ← v1 takes 3+ minutes to reach public
 ```
 
-### All v1-v2-gap Runs Summary
+### All v1-v2-gap Runs Summary (20 runs)
 
-| Trace | Scenario | v1 flips | v2 stable? | v1 oscillated? |
-|-------|----------|----------|------------|----------------|
-| 111857Z | fullcone-both | 1 (→PUBLIC) | Yes (QUIC reachable at 6s) | No (single transition) |
-| 111857Z | fullcone-tcp | 2 (→PRIVATE→PUBLIC) | Yes (TCP reachable at 16s) | **Yes** |
-| 122413Z | fullcone-tcp | 3 (→PUBLIC→PRIVATE→PUBLIC) | Yes (TCP reachable at 6s) | **Yes** |
-| 123118Z | fullcone-both | 1 (→PUBLIC) | Yes (QUIC reachable at 6s) | No (single transition) |
-| 131939Z | fullcone-tcp | 2 (→PRIVATE→PUBLIC) | — | **Yes** |
+Extended run (10 runs per scenario, 2026-04-10):
 
-3 out of 5 runs show v1 oscillation. Note: the testbed uses iptables to
-block dial-backs on unreliable servers, producing `E_DIAL_ERROR` (not
-timeouts). In production, unreliable servers more commonly produce
-timeouts (e.g., peers behind their own NAT), which flip to Unknown
-rather than Private — but the DHT impact is the same.
+| Scenario | Runs | v1 oscillated | Rate | v2 stable? |
+|----------|------|--------------|------|------------|
+| fullcone-tcp | 10 | 3 | **30%** | Yes (all 10) |
+| fullcone-both (TCP+QUIC) | 10 | 8 | **80%** | Yes (all 10) |
+| **Total** | **20** | **11** | **55%** | **Yes (all 20)** |
+
+Per-run detail:
+
+| Run | Scenario | v1 flips | v1 → private | v2 events | v1 oscillated? |
+|-----|----------|----------|-------------|-----------|----------------|
+| 1 | tcp | 4 | 2 | 1 | **Yes** |
+| 2 | tcp | 1 | 0 | 1 | No |
+| 3 | tcp | 1 | 0 | 1 | No |
+| 4 | tcp | 1 | 0 | 2 | No |
+| 5 | tcp | 1 | 0 | 2 | No |
+| 6 | tcp | 1 | 0 | 1 | No |
+| 7 | tcp | 4 | 2 | 1 | **Yes** |
+| 8 | tcp | 5 | 2 | 2 | **Yes** |
+| 9 | tcp | 1 | 0 | 2 | No |
+| 10 | tcp | 1 | 0 | 2 | No |
+| 1 | both | 1 | 0 | 1 | No |
+| 2 | both | 3 | 1 | 2 | **Yes** |
+| 3 | both | 1 | 0 | 2 | No |
+| 4 | both | 3 | 1 | 2 | **Yes** |
+| 5 | both | 3 | 1 | 2 | **Yes** |
+| 6 | both | 3 | 1 | 2 | **Yes** |
+| 7 | both | 3 | 1 | 1 | **Yes** |
+| 8 | both | 3 | 1 | 2 | **Yes** |
+| 9 | both | 3 | 1 | 2 | **Yes** |
+| 10 | both | 6 | 3 | 1 | **Yes** |
+
+**Key observations:**
+- **v2 is stable in all 20 runs** — confirmed with statistical
+  confidence. v2 never oscillated regardless of transport.
+- **Overall v1 oscillation rate: 55%** — consistent with the earlier
+  60% estimate from 5 runs.
+- **"Both" transport oscillates more than TCP-only** (80% vs 30%) —
+  this contradicts the initial 5-run hypothesis. The reason is not
+  fully understood; it may be related to how QUIC and TCP connections
+  interact in the peer selection pool.
+- The testbed uses iptables to block dial-backs on unreliable servers,
+  producing `E_DIAL_ERROR` (not timeouts). In production, unreliable
+  servers more commonly produce timeouts (peers behind their own NAT),
+  which flip to Unknown rather than Private — but the DHT impact is the
+  same (both trigger client mode).
 
 ### Convergence Speed
 
