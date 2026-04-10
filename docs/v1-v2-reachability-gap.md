@@ -35,43 +35,57 @@ v1 and v2 are completely independent systems with separate event types:
 into a v1-compatible global signal. The four v1 consumers have no way to learn
 about v2 results.
 
-#### Why v1 Is Inherently Flaky (Issue #8)
+#### Why v1 Can Be Flaky
 
 The v1 global flag oscillates because of how AutoNAT v1 selects dial-back peers
 and accumulates confidence:
 
-1. **Random peer selection:** v1 picks a random connected peer to perform each
-   dial-back. On the public IPFS network, the node connects to dozens of DHT
-   peers. Some are on the same subnet or have favorable NAT paths; others cannot
-   reach the node.
+Both v1 and v2 select probe servers from the **same pool** of connected
+peers (most Kubo nodes advertise both protocols). The difference is not
+in server selection but in **how failures are handled**:
 
-2. **Sliding window confidence:** v1 uses a sliding window of the last
-   `maxConfidence=3` results. Each probe replaces the oldest result. With random
-   peer selection, a single failed dial-back from a peer that happens to be
-   behind its own restrictive NAT can flip the window from Public to Private.
+1. **v1 treats all non-success results as evidence.** Timeouts, stream
+   resets, refusals, and `E_DIAL_ERROR` all erode v1's confidence
+   counter (`maxConfidence=3`). After 4 consecutive non-success probes,
+   confidence drains to 0 and the state flips to Unknown. Since the DHT
+   treats Unknown the same as Private (both trigger client mode),
+   **timeouts from honest-but-unreliable servers are sufficient to
+   disrupt the DHT — no malicious peers are needed.** To flip to
+   Private specifically (which also disables the v1 server stream
+   handler), at least one `E_DIAL_ERROR` is required after confidence
+   reaches 0.
 
-3. **DHT peer churn:** As DHT routing table maintenance connects/disconnects
-   peers, the pool of potential dial-back peers changes continuously. A peer
-   that successfully dialed back may disconnect, and the next randomly selected
-   peer may fail — even though the node's actual network situation hasn't changed.
+2. **v1 doesn't distinguish "peer can't reach me" from "I'm behind
+   NAT."** A timeout may occur because the server itself is behind NAT,
+   overloaded, or has a transient network issue — none of which reflect
+   the client's reachability. But v1 counts these equally as evidence
+   against the client.
 
-4. **No distinction between "peer can't reach me" and "I'm behind NAT":** v1
-   treats any `IsDialError` as evidence of Private reachability. But the dial
-   may fail because the *server* is behind NAT, has a full connection table, or
-   has a transient network issue — none of which reflect the client's
-   reachability.
+3. **DHT peer churn amplifies the problem.** As DHT routing table
+   maintenance connects/disconnects peers, the pool of potential
+   dial-back peers changes continuously. A reliable peer may disconnect,
+   and the next probe may hit an unreliable one — producing a timeout
+   that erodes confidence even though the node's actual reachability
+   hasn't changed.
 
-**Observed rate:** ~33% of runs oscillate between Public and Private, confirmed
-in both low-latency (6ms hotel WiFi) and high-latency (711ms satellite)
-environments. The oscillation is independent of network conditions — it is
-inherent to the random peer selection + sliding window design.
+**Testbed evidence:** with 5/7 unreliable servers, 60% of v1 runs
+oscillate. The oscillation path is Public → (4 timeouts) → Unknown →
+(1 success) → Public → repeat.
 
-**Why v2 doesn't have this problem:** v2 tests specific addresses against
-specific servers that support the `/libp2p/autonat/2/dial-request` protocol.
-The server performs a structured dial-back with nonce verification. Results are
-per-address and require `targetConfidence=3` consistent results before changing
-state. There is no random peer selection — the client explicitly selects v2
-servers from its connected peers.
+**Why v2 doesn't have this problem:** v2 **discards server failures
+entirely** — timeouts, stream resets, refusals, and `E_DIAL_REFUSED`
+do not affect the address's confidence. Only explicit `E_DIAL_ERROR`
+(server connected and tried to dial back, but the NAT blocked it)
+counts as a failure. To flip a reachable address (+3) to unreachable
+(-3), v2 requires 6 consecutive `E_DIAL_ERROR` results — meaning the
+node's reachability must genuinely change. Server unreliability cannot
+cause state flips.
+
+**Tradeoff:** v2's stability comes at the cost of slower reaction to
+genuine changes. Once at high confidence, v2 re-probes only every 1
+hour (primary) or 3 hours (secondary). v1 rechecks every 15 minutes
+(configurable). No event-driven re-probe triggers exist in either
+protocol.
 
 #### v1 Global Flag Consumers in go-libp2p
 
@@ -127,13 +141,13 @@ In live testing against the IPFS network (2026-03-10, `run-local.sh`):
 
 1. v2 confirms 2 addresses reachable at ~5s
 2. v1 reports Public at ~8s (DHT peers confirm)
-3. v1 decays to Private at ~45s (DHT peer churn — random peers can't dial back)
+3. v1 decays to Unknown at ~45s (timeouts from unreliable peers erode confidence)
 4. v2 addresses remain reachable throughout
 5. AutoRelay activates, DHT switches to client mode — **despite confirmed v2 reachability**
 
-The v1 oscillation (Issue #8, ~33% rate) compounds this: even when v1 briefly
-reaches Public, it can decay back to Private due to DHT peer selection noise.
-v2 results are stable but ignored by the subsystems that matter.
+The v1 oscillation compounds this: even when v1 briefly reaches Public,
+it can decay back to Unknown due to timeouts from unreliable peers. v2
+results are stable but ignored by the subsystems that matter.
 
 ### rust-libp2p (partially affected)
 
@@ -204,8 +218,9 @@ Prometheus gauge `p2p_reachability_status` (0=unknown, 1=public, 2=private) on
 their Grafana dashboard.
 
 **Consequences:**
-- Dashboard metric oscillates due to v1 Issue #8 (~33% rate), even when v2
-  confirms stable reachability
+- Dashboard metric may oscillate due to v1 flakiness, even when v2
+  confirms stable reachability (no direct evidence from Obol confirms
+  this — see [obol.md](obol.md) for what is actually reported)
 - AutoRelay activates unnecessarily when v1 decays to Private
 - DHT switches to client mode, reducing the node's participation in peer
   discovery
@@ -226,7 +241,7 @@ mentions "autonat-over-quic libp2p errors" as early as v1.7.4.
 - Kademlia server mode chicken-and-egg: without AutoNAT, external addresses are
   only populated manually
 - A working v2 (with the address-list-based Kademlia in rust-libp2p) could
-  resolve this, but Issue #1 (addr-restricted false positive) would need fixing
+  resolve this, but the ADF false positive (F3) would need fixing
   first
 
 See [docs/avail.md](avail.md) for full Avail analysis.
@@ -249,15 +264,15 @@ Not affected.
 
 ---
 
-## Relationship to Other Issues
+## Relationship to Final Report Findings
 
-| Issue | Relationship |
-|-------|-------------|
-| **#8 v1 oscillation** | Root cause of v1 decay; v2 results are stable but not consumed |
-| **#1 Addr-restricted false positive** | Affects v2 accuracy; even if v2 fed into v1, this FP would propagate |
-| **#17 Symmetric blocks v2** | When v2 can't run, only v1 is available — and it oscillates |
-| **#3 v1 stuck private after UPnP remap** | v1 fires Private on original port, never learns about UPnP-remapped port that v2 confirms |
-| **#2 QUIC dial-back failure** | When v2 can't test QUIC, that transport remains "unknown" — only v1 provides (unreliable) signal |
+| Finding | Relationship |
+|---------|-------------|
+| **F1 Inconsistent global vs per-address reachability** | This document is F1's deep-dive. v1 oscillation is the root cause; v2 results are stable but not consumed. |
+| **F2 UDP black hole blocks QUIC dial-back** | When v2 can't test QUIC (server blocks it), that transport remains "unknown" — only v1 provides (unreliable) signal |
+| **F3 ADF false positive** | Affects v2 accuracy; even if v2 fed into v1, this FP would propagate |
+| **F4 Symmetric NAT missing signal** | When v2 can't run (threshold blocks it), only v1 is available — and it oscillates |
+| **F5 rust-libp2p TCP port reuse** | When v2 probes the wrong TCP port, that address is incorrectly unreachable — v2 signal is degraded |
 
 ---
 
