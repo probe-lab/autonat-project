@@ -13,7 +13,7 @@ configurable NAT types.
 
 ## Report
 
-**[Final Report](docs/final-report.md)** — 5 findings, 178 testbed runs,
+**[Final Report](docs/final-report.md)** — 5 findings, 183 testbed runs,
 cross-implementation comparison, and recommendations.
 
 Key results:
@@ -22,7 +22,7 @@ Key results:
 - **UDP black hole**: blocks QUIC dial-back on fresh servers (Medium)
 - **ADF false positive**: 100% FPR for address-restricted NAT (Low — protocol-level, ADF rare in modern routers)
 - **Symmetric NAT missing signal**: no explicit UNREACHABLE emitted, but node is definitively unreachable on its IPv4 NAT path and DCUtR cannot rescue it either — impact is operational (no relay activation, no observability) (Low)
-- **QUIC convergence advantage**: more stable under packet loss (observed, under investigation)
+- **Transport resilience**: both TCP and QUIC maintain 0% error rates under packet loss; neither shows a statistically significant convergence advantage
 
 ## Quick Start
 
@@ -54,7 +54,7 @@ for requirements.
 | [Final Report](docs/final-report.md) | Findings, metrics, recommendations |
 | [Cross-Implementation Comparison](docs/cross-implementation-comparison.md) | How each finding manifests in go/rust/js, feature matrix, adoption status |
 | [v1 vs v2 State Transitions](docs/v1-v2-state-transitions.md) | State machine, confidence systems, and server selection across implementations |
-| [Measurement Results](docs/measurement-results.md) | Complete data from all 178 runs |
+| [Measurement Results](docs/measurement-results.md) | Complete data from all 183 runs |
 | [v1 vs v2 Performance](docs/v1-vs-v2-performance.md) | Quantitative comparison |
 | [v1/v2 Reachability Gap](docs/v1-v2-reachability-gap.md) | Event model gap analysis |
 | [ADF False Positive](docs/adf-false-positive.md) | Protocol design issue with testbed evidence |

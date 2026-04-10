@@ -69,14 +69,27 @@ production (2–12% per Kubo version), but most of it correlates with
 disconnections and restarts. Only ~0.39% of stably-reachable peers
 show flipping that cannot be explained by network events.
 
+### Scope
+
+This report evaluates AutoNAT v2's correctness, performance, and
+integration across three libp2p implementations (go, rust, js). It
+does NOT evaluate:
+
+- Hole punching success rates (DCUtR) — see Trautwein et al. 2022/2025
+- Relay performance (Circuit Relay v2)
+- DHT performance itself (routing, lookup latency)
+- AutoNAT v1 in isolation (only v1/v2 comparison)
+
 ### Findings
 
 AutoNAT v2 is a significant improvement over v1 in per-address
 reachability detection. In [controlled testbed conditions](#testbed),
 it produces **0% false negative rate and 0% false positive rate**
-across all non-edge-case NAT types, converges in ~6 seconds, and is
-resilient to high latency and packet loss (QUIC adds only +1%
-convergence time at 10% packet loss vs TCP's +147%).
+across all non-edge-case NAT types, converges in ~6 seconds, and
+maintains correctness under high latency and packet loss (both TCP
+and QUIC show 0% FNR/FPR at all tested loss levels; convergence time
+increases but neither transport shows a consistent advantage — see
+[Transport Resilience](#transport-resilience-under-packet-loss)).
 
 However, we identified **5 findings** that affect its real-world
 effectiveness — ranging from protocol-level design issues to
@@ -222,24 +235,13 @@ For the full protocol walkthrough, see [autonat-v2.md](autonat-v2.md).
 | **Protocol** | `/libp2p/autonat/1.0.0` | `/libp2p/autonat/2/dial-request` + `dial-back` |
 | **Scope** | Global (whole-node: Public/Private) | Per-address (each address independently) |
 | **Probing** | Random peer, majority vote | Specific server selection, per-address confidence |
-| **Confidence** | Sliding window of 3 | Sliding window of 5, targetConfidence=3 |
+| **Confidence** | Sliding window of 3 (maxConfidence=3) | Per-address window of 5 probes, confirmed at 3 net successes |
 | **Nonce verification** | No | Yes (prevents spoofing) |
 | **Amplification protection** | No | Yes (30-100KB data when IP differs) |
 | **Dial-back identity** | Same peer ID | Separate peer ID (go-libp2p) |
 | **Event (go-libp2p)** | `EvtLocalReachabilityChanged` | `EvtHostReachableAddrsChanged` |
 | **DHT consumes** | **Yes** | **No** (Finding #1) |
 | **Spec** | Informal, no RFC | [specs/autonat/autonat-v2.md](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md) |
-
-### Scope of This Study
-
-This report evaluates AutoNAT v2's correctness, performance, and
-integration across three libp2p implementations (go, rust, js). It
-does NOT evaluate:
-
-- Hole punching success rates (DCUtR) — see Trautwein et al. 2022/2025
-- Relay performance (Circuit Relay v2)
-- DHT performance itself (routing, lookup latency)
-- AutoNAT v1 in isolation (only v1/v2 comparison)
 
 ---
 
@@ -348,6 +350,11 @@ This applies to all three implementations:
 3. **js-libp2p (preventive):** Same. Once Helia or another consumer
    enables v2, the reduction should be in place from day one.
 
+**Expected outcome:** DHT and AutoRelay stop flipping on v1
+oscillation; nodes remain in server mode once v2 confirms any
+address. Eliminates the oscillation-driven relay churn and DHT mode
+switches observed in testbed (60% → 0%).
+
 The deeper fix is at the **spec level**: AutoNAT v2 should mandate
 the reduction so all implementations agree on what "global
 reachability" means when v2 is the authoritative source. This is
@@ -419,6 +426,10 @@ test — the dial result itself is the information the client needs, so
 the detector should not suppress it (5 fix options analyzed in the
 full analysis below).
 
+**Expected outcome:** QUIC addresses correctly detected as reachable
+on fresh go-libp2p servers without waiting for the main host's UDP
+counter to accumulate history.
+
 **Code-level evidence:**
 
 - **`dialerHost` shares the main host's UDP counter** (the bug): [`go-libp2p/config/config.go#L313-L314`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/config/config.go#L313-L314) — `cfg.UDPBlackHoleSuccessCounter` is passed through to the v2 dialerHost
@@ -448,8 +459,17 @@ APDF), but no measurement data exists to quantify prevalence. This is
 a protocol-level issue — all implementations are affected identically.
 
 **Solution:** Require dial-back from a different IP than the one the
-client contacted (multi-server verification). This would distinguish ADF
-from full-cone NAT. Alternatively, document the limitation in the spec.
+client contacted, when the server is multihomed (has multiple public
+IPs available). This would distinguish ADF from full-cone NAT — if
+the dial-back comes from an IP the client never contacted, an ADF NAT
+blocks it, correctly revealing the restriction. When multihomed
+servers are not available, the limitation should be documented in the
+spec so implementations can flag the result as "reachable from
+contacted IPs only" rather than "globally reachable."
+
+**Expected outcome:** ADF nodes correctly classified as partially
+reachable (not globally reachable), preventing them from advertising
+addresses that most peers cannot reach.
 
 **[Testbed evidence](#experiment-matrix):** 120 runs (`adf-false-positive.yaml` scenario) — deterministic, not probabilistic.
 
@@ -548,6 +568,10 @@ observation regardless of sybil count. For js-libp2p: emit reachability
 events so that QUIC dial-back failures surface as UNREACHABLE rather
 than silent removal.
 
+**Expected outcome:** Symmetric NAT nodes receive explicit UNREACHABLE
+within ~60s; AutoRelay activates and establishes a relay path — the
+only viable inbound connectivity for these nodes.
+
 **[Testbed evidence](#experiment-matrix)** (`threshold-sensitivity.yaml` scenario):
 
 | Threshold | NAT type | Result |
@@ -643,6 +667,10 @@ warning if you skip it.
    ports with the listen port after enough consistent observations.
    This provides a safety net independent of per-connection metadata,
    protecting against future bugs of this class.
+
+**Expected outcome:** TCP addresses correctly detected as reachable
+regardless of listener startup timing. Nodes that only enable TCP
+(no QUIC) can enter DHT server mode.
 
 **Cross-implementation:** go-libp2p is unaffected — its
 `ObservedAddrManager` corrects ports independently of `PortUse`
@@ -851,7 +879,7 @@ configurable parameters:
 | `v1-v2-gap.yaml` | 2 | 1 each | 2 reliable + 5 unreliable servers (600s observation) |
 | `threshold-sensitivity.yaml` | 6 | 1 each | obs_addr_thresh {1,2,4} × {no-NAT, symmetric} |
 
-**Total: 178 runs** producing OTel traces analyzed by `analyze.py`.
+**Total: 183 runs** producing OTel traces analyzed by `analyze.py`.
 Individual scenarios take 2-10 minutes each (depending on timeout);
 the full matrix was run in batches across multiple sessions.
 
@@ -873,7 +901,7 @@ From each run, `analyze.py` extracts:
 
 ### Key Metrics
 
-From 178 testbed runs:
+From 183 testbed runs:
 
 | Metric | Value |
 |--------|-------|
