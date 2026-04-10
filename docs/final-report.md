@@ -64,12 +64,10 @@ NATed nodes** that motivated this investigation:
 This project investigates AutoNAT v2 across go-libp2p, rust-libp2p, and
 js-libp2p to evaluate whether it solves the reachability detection
 problem. A companion [Nebula crawl analysis](nebula-autonat-analysis.md)
-examines reachability-state flipping in production on the IPFS Amino
-DHT using ProbeLab's Nebula crawler data. The analysis confirms that
-state flipping exists in the broader Kubo population (~3.5%), but the
-majority correlates with disconnections and node restarts. Only a
-small residual (~0.39% of stably-reachable peers) cannot be explained
-by network events and is consistent with AutoNAT-driven flipping.
+of the IPFS Amino DHT confirms that DHT-mode flipping exists in
+production (2–12% per Kubo version), but most of it correlates with
+disconnections and restarts. Only ~0.39% of stably-reachable peers
+show flipping that cannot be explained by network events.
 
 ### Findings
 
@@ -103,11 +101,8 @@ doesn't either.
 Cross-implementation analysis reveals that **only go-libp2p has v2
 consumed by a production project** (Kubo). rust-libp2p's v2
 implementation works correctly when properly configured but lacks a
-safety net when TCP port reuse fails — which, combined with the QUIC
-false positive issue
-([rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900)),
-explains the errors that led Avail to disable AutoNAT. js-libp2p emits
-no reachability events from v2. No rust or js project deploys v2 in
+safety net when TCP port reuse fails (F5). js-libp2p emits no
+reachability events from v2. No rust or js project deploys v2 in
 production (Substrate skips autonat entirely; Helia uses v1 only).
 
 ### Findings at a Glance
@@ -254,9 +249,10 @@ Each finding below follows a Problem / Impact / Solution structure and
 links to a dedicated deep-dive document for full root-cause analysis.
 The testbed methodology, experiment matrix, and full numerical results
 that back the findings are in the [Testbed](#testbed) section at the
-end of this report — most-cited numbers (FNR/FPR rates, oscillation
-percentages, convergence times) are summarized in the
-[Key Metrics](#key-metrics) subsection there.
+end of this report — most-cited numbers (FNR/FPR — False Negative /
+False Positive Rate, oscillation percentages, TTC — Time to
+Confidence) are summarized in the [Key Metrics](#key-metrics)
+subsection there.
 
 ### Finding 1: Inconsistent Global vs Per-Address Reachability (v1 vs v2)
 
@@ -272,14 +268,24 @@ defined by the spec or by any implementation**.
 The two protocols disagree because they use different state-update
 mechanisms:
 
-- **v1** uses a sliding window of 3 with random server selection. With
-  5/7 unreliable servers, the probability of selecting 2 unreliable
-  peers in a row is (5/7)² ≈ 51%, and 2 consecutive failures are
-  enough to flip the window from Public [S,S,S] → [S,F,F] (Private).
-  v1 oscillates under realistic conditions.
+- **v1** uses a sliding window of 3 with random server selection.
+  Critically, server failures (timeouts, stream resets, refusals)
+  don't directly flip state but **erode confidence** — after 4
+  consecutive failures, confidence drains to 0 and the state flips.
+  With 5/7 unreliable servers, the probability of selecting 2
+  unreliable peers in a row is (5/7)² ≈ 51%, and 2 consecutive
+  failures are enough to flip the window from Public [S,S,S] →
+  [S,F,F] (Private). v1 oscillates under realistic conditions.
 - **v2** uses explicit server selection and per-address confidence
-  (`targetConfidence = 3` in go-libp2p). v2 does not oscillate in our
-  testbed.
+  (`targetConfidence = 3` in go-libp2p). Server failures are
+  **discarded entirely** — only explicit `E_DIAL_ERROR` (server tried
+  and failed to reach the address) counts as evidence. v2 does not
+  oscillate in our testbed.
+
+For the full comparison of how each event (success, error, timeout,
+refusal) changes state across all implementations and protocol
+versions, see
+[v1-v2-state-transitions.md § What Counts as Success vs Failure](v1-v2-state-transitions.md#4-what-counts-as-success-vs-failure).
 
 [Testbed evidence](#key-metrics): with 5/7 unreliable servers,
 **60% of v1 runs oscillate; 0% of v2 runs oscillate** (in go-libp2p
@@ -403,25 +409,15 @@ indefinitely. TCP addresses are unaffected — the detector only gates
 UDP/QUIC.
 
 rust-libp2p and js-libp2p do not implement a black hole detector, so
-they are not affected by this specific issue. However, they face their
-own QUIC-related AutoNAT problems:
-- **rust-libp2p** — AutoNAT v1 over QUIC produces **false positives**
-  due to connection reuse ([rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900)):
-  the dial-back succeeds through NAT because QUIC reuses the same
-  4-tuple, so NATed nodes are incorrectly reported as publicly reachable.
-  This is the root cause of Avail's "autonat-over-quic" errors (see
-  [avail.md](avail.md)).
-- **js-libp2p** — QUIC transport in js-libp2p is relatively new and
-  AutoNAT v2 has no production consumer; QUIC dial-back behavior has
-  not been tested in production.
+they are not affected by this specific issue.
 
 **Solution:** Disable the UDP black hole detector on `dialerHost`,
 matching the existing v1 fix
 ([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)). The
 `dialerHost` only dials addresses that clients explicitly request to
 test — the dial result itself is the information the client needs, so
-the detector should not suppress it. 5 fix options analyzed in
-[udp-black-hole-detector.md](udp-black-hole-detector.md).
+the detector should not suppress it (5 fix options analyzed in the
+full analysis below).
 
 **Code-level evidence:**
 
