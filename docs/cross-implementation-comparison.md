@@ -44,21 +44,19 @@ How each main-report finding manifests in each implementation:
 
 ## Feature Comparison
 
-How the implementations differ structurally, independent of any
-specific finding:
+Key architectural differences. For full details see the per-implementation
+docs: [go-libp2p](go-libp2p-autonat-implementation.md),
+[rust-libp2p](rust-libp2p-autonat-implementation.md),
+[js-libp2p](js-libp2p-autonat-implementation.md).
 
 | Feature | go-libp2p | rust-libp2p | js-libp2p |
 |---------|-----------|-------------|-----------|
-| **Maturity** | Primary (May 2024) | Second (Aug 2024) | Third (June 2025) |
-| **Production consumer** | Kubo (tens of thousands) | None (Substrate skips autonat) | None (Helia uses v1) |
-| **Confidence system** | Sliding window, targetConfidence=3 | None (single probe) | Fixed thresholds (4/8) |
-| **Address filtering** | `ObservedAddrManager` (threshold=4) | Identify translation (when `PortUse::New`) | Address manager + cuckoo filter |
-| **Reachability events** | `EvtHostReachableAddrsChanged` | Per-probe `Event` struct | **None** |
-| **v2 → DHT wiring** | No (DHT reads v1 only) | Indirect (`ExternalAddrConfirmed`) | Indirect (`self:peer:update`) |
-| **Dial-back identity** | Separate `dialerHost` | Same swarm | Same identity |
-| **Rate limiting** | 60 RPM global, 12/peer | Basic concurrent limit | Stream limits only |
+| **v2 → DHT wiring** | No (DHT reads v1 only) | Yes (`ExternalAddrConfirmed` from v2 via swarm) | Yes (`self:peer:update`) |
+| **Reachability events** | `EvtHostReachableAddrsChanged` (v2), `EvtLocalReachabilityChanged` (v1) | Per-probe `Event` struct | **None** |
+| **Confidence system** | Sliding window of 5, targetConfidence=3 | Single probe, no accumulation | Fixed thresholds (4/8), monotonic counters + TTL |
+| **Failure handling** | v1: timeouts erode confidence; v2: discarded | Errors ignored | Failures increment counter toward threshold |
 | **Black hole detection** | Yes (causes F2) | No | No |
-| **v1 oscillation resistance** | Low (sliding window) | N/A | High (monotonic counters + TTL) |
+| **Dial-back identity** | Separate `dialerHost` | Same swarm | Same identity |
 
 ---
 
@@ -110,7 +108,10 @@ AutoNAT v2 is **implemented in all three libp2p libraries** but
 Rust projects that enable `autonat` (Forest, Pathfinder, Ceramic) get
 v2 compiled in (`default = ["v1", "v2"]` in `libp2p-autonat`), but
 none wire v2 behaviours into their swarm. The crate's `pub use v1::*`
-re-export means v1 is what projects get by default.
+re-export means v1 is what projects get by default. Note: even though
+v1 is compiled in, rust-libp2p's DHT does **not** consume v1's events
+— it consumes `ExternalAddrConfirmed` from v2 via swarm broadcasts,
+which is why the F1 wiring gap does not affect rust-libp2p.
 
 | Project | Language | AutoNAT status | v2 deployed? |
 |---------|----------|---------------|--------------|
@@ -133,6 +134,6 @@ full survey of ~25 projects.
 - [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
 - [js-libp2p-autonat-implementation.md](js-libp2p-autonat-implementation.md)
 - [go-libp2p-autonat-implementation.md](go-libp2p-autonat-implementation.md)
-- [v1-v2-state-transitions.md](v1-v2-state-transitions.md) — per-implementation state-machine details
+- [v1-v2-analysis.md](v1-v2-analysis.md) — state transitions, wiring gap, fix options
 - [upnp-nat-detection.md](upnp-nat-detection.md) — UPnP cross-implementation tests
 - [libp2p-autonat-ecosystem.md](libp2p-autonat-ecosystem.md) — full ecosystem survey
