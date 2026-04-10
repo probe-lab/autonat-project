@@ -60,7 +60,6 @@ for requirements.
 | [UDP Black Hole Detector](docs/udp-black-hole-detector.md) | QUIC dial-back issue + fix options |
 | [UPnP + NAT Detection](docs/upnp-nat-detection.md) | UPnP interaction with AutoNAT v2 + local home-router tests |
 | [libp2p AutoNAT Ecosystem](docs/libp2p-autonat-ecosystem.md) | Survey of ~25 libp2p projects and their AutoNAT adoption |
-| [Future Work: NAT Monitoring](docs/future-work-nat-monitoring.md) | Nebula + ants-watch proposal |
 
 ### Implementation Analysis
 
@@ -69,8 +68,6 @@ for requirements.
 | [go-libp2p](docs/go-libp2p-autonat-implementation.md) | Internals, constants, confidence system |
 | [rust-libp2p](docs/rust-libp2p-autonat-implementation.md) | Port reuse analysis, address translation |
 | [js-libp2p](docs/js-libp2p-autonat-implementation.md) | Confidence system, DHT integration |
-| [Obol Impact](docs/obol.md) | Impact on Obol Network (Charon) |
-| [Avail Impact](docs/avail.md) | Impact on Avail Network |
 
 ### Testbed
 

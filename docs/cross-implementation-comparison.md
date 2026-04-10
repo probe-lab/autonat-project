@@ -60,29 +60,6 @@ docs: [go-libp2p](go-libp2p-autonat-implementation.md),
 
 ---
 
-## Local UPnP Test Results (Home Router, 2026-03-27)
-
-Cross-implementation testing on a real residential router (port-restricted
-NAT, UPnP enabled) with 3 runs per implementation:
-
-| Metric | go-libp2p | rust-libp2p | js-libp2p |
-|--------|-----------|-------------|-----------|
-| UPnP port mapping | OK | OK | **FAIL** (`Service not found`) |
-| UPnP library | `go-nat` | `igd-next` | `@achingbrain/nat-port-mapper` |
-| Time to first reachable (median) | 14.3s | 5.7s | N/A (timeout) |
-| TCP reachable | Yes (3/3) | Yes (3/3) | No |
-| QUIC reachable | No (router bug) | No (router bug) | No |
-| v2 → DHT mode | Unstable (v1 oscillation) | Stable Server mode | N/A |
-
-The same router, same NAT, same UPnP — three different outcomes.
-rust-libp2p has the cleanest architecture (v2 feeds DHT directly, no
-oscillation), but go-libp2p is the only one proven in production.
-js-libp2p's UPnP failure is expected given its browser-first design.
-
-Full analysis: [upnp-nat-detection.md](upnp-nat-detection.md#cross-implementation-local-upnp-tests-2026-03-27)
-
----
-
 ## Platform Limitations
 
 | Limitation | Cause | Impact |
@@ -96,8 +73,9 @@ Full analysis: [upnp-nat-detection.md](upnp-nat-detection.md#cross-implementatio
 
 ## v2 Availability vs. Production Deployment
 
-AutoNAT v2 is **implemented in all three libp2p libraries** but
-**deployed in production by only two Go projects:**
+AutoNAT v2 is **implemented in all three libp2p libraries**. Among the
+projects we surveyed, only two Go projects deploy v2 in production
+(other deployments may exist that we are not aware of):
 
 | Implementation | v2 available? | How to enable | v2 in production? |
 |---|---|---|---|
@@ -124,7 +102,7 @@ which is why the F1 wiring gap does not affect rust-libp2p.
 | **Lighthouse** | Rust | No autonat (UPnP only, sigp fork) | No |
 
 See [libp2p-autonat-ecosystem.md](libp2p-autonat-ecosystem.md) for the
-full survey of ~25 projects.
+full survey (~25 projects examined; the list is not exhaustive).
 
 ---
 
