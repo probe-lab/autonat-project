@@ -80,27 +80,25 @@ does NOT evaluate:
 
 ### Findings
 
-AutoNAT v2 is a significant improvement over v1 in per-address
-reachability detection. In [controlled testbed conditions](#testbed),
-it produces **0% false negative rate and 0% false positive rate**
-across all non-edge-case NAT types, converges in ~6 seconds, and
-maintains correctness under high latency and packet loss (both TCP
-and QUIC show 0% FNR/FPR at all tested loss levels; convergence time
-increases but neither transport shows a consistent advantage — see
-[measurement-results.md](measurement-results.md#transport-resilience-under-packet-loss)).
-
-However, we identified **5 findings** that affect its real-world
-effectiveness — ranging from protocol-level design issues to
-implementation gaps. A separate
+This study evaluates how libp2p's NAT reachability stack — AutoNAT
+v1, AutoNAT v2, and the subsystems that consume their signals (DHT,
+AutoRelay, address management) — behaves across go-libp2p,
+rust-libp2p, and js-libp2p. In [controlled testbed
+conditions](#testbed), AutoNAT v2 correctly determines reachability
+for all standard NAT types (**0% FNR/FPR**, ~6s convergence). However,
+we identified **5 findings** where the broader reachability stack
+breaks — in how implementations wire the protocol results into
+downstream decisions, in protocol-level limitations, and in
+cross-implementation inconsistencies. See the
 [cross-implementation comparison](cross-implementation-comparison.md)
-collects the survey data on how each finding manifests in go-libp2p,
-rust-libp2p, and js-libp2p.
+for how each finding manifests per implementation.
 
 The most impactful finding is that **global (v1) and per-address (v2)
 reachability can disagree, and there is no canonical way to reconcile
-them**. In go-libp2p — the only implementation where v2 is deployed in
-production — DHT and AutoRelay subscribe to v1's global flag and are
-does not consume v2's per-address signal. Both protocols select servers from
+them**. In go-libp2p — the most relevant implementation since Kubo
+uses it to participate in the IPFS Amino DHT — DHT and AutoRelay
+subscribe to v1's global flag and do not consume v2's per-address
+signal. Both protocols select servers from
 the same peer pool, but v1 counts all non-success results (including
 timeouts from honest-but-unreliable servers) as evidence against
 reachability, while v2 discards them entirely. This means **v1 can
@@ -219,9 +217,11 @@ the NAT's filtering rules, not on AutoNAT:
 | **Symmetric** (ADPM) | Different external port per destination | N/A (address never activated) | No signal |
 
 AutoNAT correctly interprets the full-cone and port-restricted cases.
-The address-restricted and symmetric cases are examined in
-[Finding #3](#finding-3-address-restricted-nat-false-positive) and
-[Finding #4](#finding-4-symmetric-nat-missing-signal) respectively.
+The address-restricted PASS is a protocol limitation (Finding #3) —
+however, ADF is not known to be used by modern consumer routers, so
+this case is unlikely to occur in practice. The symmetric case
+(Finding #4) produces no signal because the activation threshold is
+never reached.
 
 For the full protocol walkthrough, see [autonat-v2.md](autonat-v2.md).
 
