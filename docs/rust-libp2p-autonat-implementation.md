@@ -576,6 +576,12 @@ addresses indefinitely instead of falling back to TCP.
 
 ### DHT Mode Switching Mechanism
 
+Unlike go-libp2p, rust-libp2p's DHT does **not** consume v1's global
+reachability flag. It consumes `ExternalAddrConfirmed` events from the
+swarm, which v2 emits when an address is confirmed reachable. This
+means the F1 wiring gap (v1 controlling DHT mode) does not affect
+rust-libp2p — v2 results feed into the DHT directly.
+
 The Kademlia DHT (`libp2p-kad`) in rust-libp2p uses automatic mode
 switching based on **confirmed external addresses**:
 

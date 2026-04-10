@@ -417,6 +417,29 @@ Identify normally.
 **Upstream tracking:**
 [js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620)
 
+### 8. QUIC Silent Failure Under Symmetric NAT (F4)
+
+While TCP observed addresses are dropped entirely (§7 above), QUIC
+observed addresses do enter the pipeline and reach AutoNAT v2. Under
+symmetric NAT, each outbound QUIC connection uses a different external
+port, so every dial-back fails — the server dials back to the port it
+saw, but the NAT only accepts traffic from the original destination on
+that port.
+
+The failure path:
+1. QUIC observed address enters the address manager (not dropped)
+2. AutoNAT v2 probes the address
+3. Server dial-back fails (symmetric NAT blocks it)
+4. After 8 failures (`REQUIRED_FAILED_DIALS`), the address is removed
+5. Since js-libp2p emits **no reachability events** (§1 above), the
+   failure is silent from the application's perspective
+
+The node remains in Unknown state indefinitely — no explicit
+UNREACHABLE signal is ever produced. This is the js-libp2p side of
+Finding 4 (symmetric NAT missing signal). Combined with the TCP
+exclusion (§7), js-libp2p nodes behind symmetric NAT have no path to
+a reachability determination on any transport.
+
 ---
 
 ## Testbed Integration

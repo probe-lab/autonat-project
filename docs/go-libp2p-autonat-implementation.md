@@ -375,6 +375,24 @@ full analysis, testbed workaround, and upstream fix proposal.
 
 > ⚠️ **Do not use `EvtLocalReachabilityChanged`** — that event is AutoNAT v1 only and is not emitted by the v2 subsystem.
 
+### Symmetric NAT Detection (getNATType — unwired)
+
+The `ObservedAddrManager` includes a `getNATType()` function
+([`manager.go#L568`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/observedaddrs/manager.go#L568))
+that classifies the node's NAT type by comparing observed external
+ports across peers. When ports differ per destination, it classifies
+as `NATDeviceTypeEndpointDependent` (symmetric NAT) and emits
+`EvtNATDeviceTypeChanged`
+([`manager.go#L343`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/observedaddrs/manager.go#L343)).
+
+**This detection works correctly** — it identifies symmetric NAT at
+~60s. However, **no subsystem subscribes to `EvtNATDeviceTypeChanged`**.
+The detection exists; the response doesn't. This is the root cause of
+Finding 4 (symmetric NAT missing signal): the activation threshold
+(`ActivationThresh=4`) blocks v2 from running (no address reaches 4
+observers under symmetric NAT), and the NAT-type detection that could
+lower the threshold or emit UNREACHABLE directly has zero consumers.
+
 ### DHT Mode Dependency on v1
 
 The Kademlia DHT (`go-libp2p-kad-dht`) in `ModeAuto` subscribes to
@@ -385,7 +403,7 @@ This means:
 
 - v1 oscillation (e.g., with a mix of reliable and unreliable servers)
   cascades directly into DHT server↔client oscillation and routing table
-  churn — see [v1/v2 reachability gap](v1-v2-reachability-gap.md)
+  churn — see [v1/v2 analysis](v1-v2-analysis.md)
 - Even when v2 correctly confirms per-address reachability, the DHT
   follows v1's global majority vote
 - No implementation (go, rust, or js) currently uses v2's per-address
