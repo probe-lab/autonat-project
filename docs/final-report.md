@@ -13,15 +13,11 @@
 
 1. [Executive Summary](#executive-summary)
 2. [Background](#background)
-3. [Testbed](#testbed)
-4. [Findings](#findings)
-5. [Key Metrics](#key-metrics)
-6. [Cross-Implementation Comparison](#cross-implementation-comparison)
-7. [Recommendations](#recommendations)
-8. [Future Work](#future-work)
-9. [What v2 Got Right](#what-v2-got-right)
-10. [References](#references)
-11. [Glossary](#glossary)
+3. [Findings](#findings)
+4. [Cross-Implementation Comparison](#cross-implementation-comparison)
+5. [Recommendations](#recommendations)
+6. [Testbed](#testbed)
+7. [Glossary](#glossary)
 
 ---
 
@@ -43,70 +39,98 @@ node's addresses are actually dialable from outside. AutoNAT v1 uses a
 simple majority vote; AutoNAT v2 (specified 2023, deployed 2024)
 improves on this with per-address testing and nonce-based verification.
 
-However, multiple libp2p-based projects have reported that reachability
-detection **does not work reliably in production**:
+However, libp2p-based projects report **connectivity issues for
+NATed nodes** that motivated this investigation:
 
 - **Obol Network** ([Charon](https://github.com/ObolNetwork/charon),
-  go-libp2p v0.47.0): Distributed validator nodes running behind home
-  or corporate NAT experience oscillating reachability status. Their
-  Prometheus metric `p2p_reachability_status` flips between public and
-  private, triggering unnecessary relay activation and DHT client mode
-  — degrading validator coordination through higher-latency relay paths.
+  go-libp2p v0.47.0): Uses AutoNAT for reachability detection in
+  distributed validator nodes behind home or corporate NAT. Operators
+  report NAT-related connectivity issues — primarily low hole-punching
+  success rates and relay churn — although these are directly related
+  to hole punching and relay behavior, not to AutoNAT v2 specifically.
+  See [obol.md](obol.md) for details.
 
 - **Avail Network** ([avail-light](https://github.com/availproject/avail-light),
   rust-libp2p v0.55.0): Light clients reported persistent
-  "autonat-over-quic libp2p errors" starting from v1.7.4. The team
-  ultimately **disabled AutoNAT entirely** in v1.13.2 (September 2025),
-  forcing operators to manually set `--external-address` for DHT server
-  mode — defeating the purpose of automatic reachability detection.
+  "autonat-over-quic libp2p errors" starting from v1.7.4, caused by
+  QUIC connection reuse producing false positives
+  ([rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900),
+  since fixed by [PR #4568](https://github.com/libp2p/rust-libp2p/pull/4568)).
+  However, Avail **disabled AutoNAT entirely** in v1.13.2 (September
+  2025) before the upstream fix shipped, forcing operators to manually
+  set `--external-address` for DHT server mode. See [avail.md](avail.md)
+  for details.
 
-These are not isolated incidents. They reflect fundamental issues in how
-AutoNAT determines and communicates reachability across the libp2p
-ecosystem. This project investigates AutoNAT v2 and evaluates whether it succeeds.
+This project investigates AutoNAT v2 across go-libp2p, rust-libp2p, and
+js-libp2p to evaluate whether it solves the reachability detection
+problem. A companion [Nebula crawl analysis](nebula-autonat-analysis.md)
+of the IPFS Amino DHT confirms that DHT-mode flipping exists in
+production (2–12% per Kubo version), but most of it correlates with
+disconnections and restarts. Only ~0.39% of stably-reachable peers
+show flipping that cannot be explained by network events.
 
-See [obol.md](obol.md) and [avail.md](avail.md) for detailed impact
-analysis on each project.
+### Scope
+
+This report evaluates AutoNAT v2's correctness, performance, and
+integration across three libp2p implementations (go, rust, js). It
+does NOT evaluate:
+
+- Hole punching success rates (DCUtR) — see Trautwein et al. 2022/2025
+- Relay performance (Circuit Relay v2)
+- DHT performance itself (routing, lookup latency)
+- AutoNAT v1 in isolation (only v1/v2 comparison)
 
 ### Findings
 
 AutoNAT v2 is a significant improvement over v1 in per-address
-reachability detection. In controlled testbed conditions, it produces
-**0% false negative rate and 0% false positive rate** across all
-non-edge-case NAT types, converges in ~6 seconds, and is resilient to
-high latency and packet loss (QUIC adds only +1% convergence time at 10%
-packet loss vs TCP's +147%).
+reachability detection. In [controlled testbed conditions](#testbed),
+it produces **0% false negative rate and 0% false positive rate**
+across all non-edge-case NAT types, converges in ~6 seconds, and
+maintains correctness under high latency and packet loss (both TCP
+and QUIC show 0% FNR/FPR at all tested loss levels; convergence time
+increases but neither transport shows a consistent advantage — see
+[Transport Resilience](#transport-resilience-under-packet-loss)).
 
-However, we identified **7 findings** that affect its real-world
+However, we identified **5 findings** that affect its real-world
 effectiveness — ranging from protocol-level design issues to
-implementation gaps and cross-implementation inconsistencies.
+implementation gaps. A separate
+[cross-implementation comparison](cross-implementation-comparison.md)
+collects the survey data on how each finding manifests in go-libp2p,
+rust-libp2p, and js-libp2p.
 
-The most impactful finding is that **v2's results are not consumed by the
-systems that matter most** (DHT, AutoRelay) in go-libp2p, the only
-implementation where v2 is deployed in production. v1 still controls the
-global reachability flag, and v1 oscillates under real-world conditions
-(3 out of 5 testbed runs with unreliable servers show v1 flipping between
-Public and Private while v2 remains stable). This directly explains the
-oscillation observed by Obol.
+The most impactful finding is that **global (v1) and per-address (v2)
+reachability can disagree, and there is no canonical way to reconcile
+them**. In go-libp2p — the only implementation where v2 is deployed in
+production — DHT and AutoRelay subscribe to v1's global flag and are
+blind to v2's per-address signal. v1 oscillates under realistic
+conditions (60% of testbed runs with 5/7 unreliable servers flip
+Public ↔ Private; 0% of v2 runs do), so the unstable global flag
+overrides v2's stable per-address result and drives DHT/relay decisions.
+This directly explains the oscillation observed by Obol. rust-libp2p
+and js-libp2p don't have the bug today, but only by accident — neither
+documents what should happen if both protocols run, and the spec
+doesn't either.
 
-Cross-implementation analysis reveals that **only go-libp2p has a
-functional AutoNAT v2 deployment**. rust-libp2p works correctly when
-properly configured but lacks a safety net when TCP port reuse fails — which,
-combined with the QUIC dial-back issue, explains the errors that led
-Avail to disable AutoNAT. js-libp2p emits no reachability events.
-Neither has a production consumer (Substrate skips autonat entirely;
-Helia uses v1 only).
+Cross-implementation analysis reveals that **only go-libp2p has v2
+consumed by a production project** (Kubo). rust-libp2p's v2
+implementation works correctly when properly configured but lacks a
+safety net when TCP port reuse fails (F5). js-libp2p emits no
+reachability events from v2. No rust or js project deploys v2 in
+production (Substrate skips autonat entirely; Helia uses v1 only).
 
 ### Findings at a Glance
 
 | # | Finding | Category | Severity |
 |---|---------|----------|----------|
-| 1 | [v1/v2 reachability gap](#finding-1-v1v2-reachability-gap) | go-libp2p | High |
-| 2 | [v1 oscillation → DHT oscillation](#finding-2-v1-oscillation--dht-oscillation) | go-libp2p | High |
-| 3 | [ADF false positive (100% FPR)](#finding-3-address-restricted-nat-false-positive) | Protocol | Medium |
-| 4 | [Symmetric NAT missing signal](#finding-4-symmetric-nat-missing-signal) | Cross-impl | Medium |
-| 5 | [UDP black hole blocks QUIC dial-back](#finding-5-udp-black-hole-blocks-quic-dial-back) | go-libp2p | Medium |
-| 6 | [Rust: TCP port reuse safety net](#finding-6-rust-libp2p-tcp-port-reuse-and-address-translation) | Cross-impl | Low |
-| 7 | [Cross-implementation differences and adoption](#finding-7-cross-implementation-differences-and-adoption) | Cross-impl | Info |
+| 1 | [Inconsistent global vs per-address reachability (v1 vs v2)](#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2) | go-libp2p | High |
+| 2 | [UDP black hole blocks QUIC dial-back](#finding-2-udp-black-hole-detector-blocks-quic-dial-back) | go-libp2p | Medium |
+| 3 | [ADF false positive (100% FPR)](#finding-3-address-restricted-nat-false-positive) | Protocol | Low |
+| 4 | [Symmetric NAT missing signal](#finding-4-symmetric-nat-missing-signal) | Cross-impl | Low |
+| 5 | [Rust: TCP port reuse safety net](#finding-5-rust-libp2p-tcp-port-reuse-safety-net) | rust-libp2p | Low |
+
+For the cross-implementation findings matrix, feature comparison,
+adoption status, and local UPnP test results, see
+[cross-implementation-comparison.md](cross-implementation-comparison.md).
 
 ---
 
@@ -121,12 +145,13 @@ inbound packets are allowed through).
 | NAT Type | Mapping | Filtering | Inbound from strangers | Prevalence |
 |----------|---------|-----------|----------------------|------------|
 | **No NAT** | — | — | Always works | Servers, cloud |
-| **Full-cone** | EIM | EIF | Always works | Rare (intentional DMZ/forward) |
-| **Address-restricted** | EIM | ADF | Only from previously contacted IPs | Rare in modern routers |
-| **Port-restricted** | EIM | APDF | Only from exact previously contacted IP:port | Most common home router default |
-| **Symmetric** | ADPM | APDF | Never (different port per destination) | CGNAT, mobile carriers |
+| **Full-cone** | EIM (Endpoint-Independent Mapping) | EIF (Endpoint-Independent Filtering) | Always works | Rare (intentional DMZ/forward) |
+| **Address-restricted** | EIM | ADF (Address-Dependent Filtering) | Only from previously contacted IPs | Rare in modern routers |
+| **Port-restricted** | EIM | APDF (Address- and Port-Dependent Filtering) | Only from exact previously contacted IP:port | Most common home router default |
+| **Symmetric** | ADPM (Address- and Port-Dependent Mapping) | APDF | Never (different port per destination) | CGNAT, mobile carriers |
 
-For the full mapping/filtering taxonomy (RFC 4787), see
+For the full mapping/filtering taxonomy
+([RFC 4787](https://www.rfc-editor.org/rfc/rfc4787)), see
 [autonat-v2.md](autonat-v2.md).
 
 ### Related Protocols in libp2p
@@ -181,19 +206,27 @@ Identify (discover external address)
 ### How NAT Filtering Affects AutoNAT v2 Dial-Back
 
 When the server's `dialerHost` dials back to the client, the NAT's
-filtering decision determines whether the connection reaches the client:
+filtering decision determines whether the connection reaches the client.
+In this example, 203.0.113.1 is the client's NAT-mapped external IP
+and 1.2.3.4 is the server's IP:
 
 ```
 Client behind NAT contacted Server at 1.2.3.4:5000
-NAT mapping: client:4001 → 203.0.113.1:50000
+NAT mapping: client:4001 → 203.0.113.1:50000 (external)
 
 Server's dialerHost dials back from 1.2.3.4:random_port to 203.0.113.1:50000
 
 Full-cone (EIF):       "Any source allowed"                → PASS
-Addr-restricted (ADF): "Is 1.2.3.4 trusted? YES"          → PASS ← Finding #4
-Port-restricted (APDF):"Is 1.2.3.4:random trusted? NO"    → BLOCK (correct)
-Symmetric (APDF):      N/A — v2 never reaches this stage   ← Finding #5
+Addr-restricted (ADF): "Is 1.2.3.4 contacted? YES"        → PASS ← Finding #3
+Port-restricted (APDF):"Is 1.2.3.4:random contacted? NO"  → BLOCK
+Symmetric (ADPM+APDF): N/A — address never activated       ← Finding #4
 ```
+
+The PASS/BLOCK outcomes are determined by the NAT type, not by AutoNAT.
+Finding #3 (ADF) is notable because the dial-back succeeds — the server's
+IP is already in the NAT's filter — making the node appear globally
+reachable when it is only reachable from previously contacted IPs.
+For the full protocol walkthrough, see [autonat-v2.md](autonat-v2.md).
 
 ### AutoNAT v1 vs v2
 
@@ -202,7 +235,7 @@ Symmetric (APDF):      N/A — v2 never reaches this stage   ← Finding #5
 | **Protocol** | `/libp2p/autonat/1.0.0` | `/libp2p/autonat/2/dial-request` + `dial-back` |
 | **Scope** | Global (whole-node: Public/Private) | Per-address (each address independently) |
 | **Probing** | Random peer, majority vote | Specific server selection, per-address confidence |
-| **Confidence** | Sliding window of 3 | Sliding window of 5, targetConfidence=3 |
+| **Confidence** | Sliding window of 3 (maxConfidence=3) | Per-address window of 5 probes, confirmed at 3 net successes |
 | **Nonce verification** | No | Yes (prevents spoofing) |
 | **Amplification protection** | No | Yes (30-100KB data when IP differs) |
 | **Dial-back identity** | Same peer ID | Separate peer ID (go-libp2p) |
@@ -210,33 +243,548 @@ Symmetric (APDF):      N/A — v2 never reaches this stage   ← Finding #5
 | **DHT consumes** | **Yes** | **No** (Finding #1) |
 | **Spec** | Informal, no RFC | [specs/autonat/autonat-v2.md](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md) |
 
-### Scope of This Study
+---
 
-This report evaluates AutoNAT v2's correctness, performance, and
-integration across three libp2p implementations (go, rust, js). It
-does NOT evaluate:
+## Findings
 
-- Hole punching success rates (DCUtR) — see Trautwein et al. 2022/2025
-- Relay performance (Circuit Relay v2)
-- DHT performance itself (routing, lookup latency)
-- AutoNAT v1 in isolation (only v1/v2 comparison)
+Each finding below follows a Problem / Impact / Solution structure and
+links to a dedicated deep-dive document for full root-cause analysis.
+The testbed methodology, experiment matrix, and full numerical results
+that back the findings are in the [Testbed](#testbed) section at the
+end of this report — most-cited numbers (FNR/FPR — False Negative /
+False Positive Rate, oscillation percentages, TTC — Time to
+Confidence) are summarized in the [Key Metrics](#key-metrics)
+subsection there.
 
-### NAT Traversal: libp2p vs Traditional
+### Finding 1: Inconsistent Global vs Per-Address Reachability (v1 vs v2)
 
-| Step | Traditional (STUN/ICE) | libp2p |
-|------|----------------------|--------|
-| Discover external address | STUN binding request | Identify protocol (ObservedAddr) |
-| Test reachability | STUN from **multiple IPs** (RFC 5780) | AutoNAT from **same IP** |
-| Direct connection | ICE candidate exchange | DCUtR via relay |
-| Fallback relay | TURN server | Circuit Relay v2 |
+**Category:** go-libp2p | **Severity:** High
 
-The key difference at step 2: STUN tests from multiple IPs, which
-distinguishes full-cone from address-restricted. AutoNAT v2 tests from
-the same IP the client already contacted, making these indistinguishable.
+**Problem:** AutoNAT v1 produces a **global** reachability flag — one
+of {Public, Unknown, Private} for the whole node — while AutoNAT v2
+produces **per-address** reachability — one of {Reachable, Unreachable,
+Unknown} for each multiaddr. When both protocols run on the same node,
+the two signals can disagree, and **there is no canonical reduction
+defined by the spec or by any implementation**.
+
+The two protocols disagree because they use different state-update
+mechanisms:
+
+- **v1** uses a sliding window of 3 with random server selection.
+  Critically, server failures (timeouts, stream resets, refusals)
+  don't directly flip state but **erode confidence** — after 4
+  consecutive failures, confidence drains to 0 and the state flips.
+  With 5/7 unreliable servers, the probability of selecting 2
+  unreliable peers in a row is (5/7)² ≈ 51%, and 2 consecutive
+  failures are enough to flip the window from Public [S,S,S] →
+  [S,F,F] (Private). v1 oscillates under realistic conditions.
+- **v2** uses explicit server selection and per-address confidence
+  (`targetConfidence = 3` in go-libp2p). Server failures are
+  **discarded entirely** — only explicit `E_DIAL_ERROR` (server tried
+  and failed to reach the address) counts as evidence. v2 does not
+  oscillate in our testbed.
+
+For the full comparison of how each event (success, error, timeout,
+refusal) changes state across all implementations and protocol
+versions, see
+[v1-v2-state-transitions.md § What Counts as Success vs Failure](v1-v2-state-transitions.md#4-what-counts-as-success-vs-failure).
+
+[Testbed evidence](#key-metrics): with 5/7 unreliable servers,
+**60% of v1 runs oscillate; 0% of v2 runs oscillate** (in go-libp2p
+— rust and js have different v2 stability characteristics, see
+[v1-v2-state-transitions.md](v1-v2-state-transitions.md)).
+
+The disagreement only matters when a downstream subsystem consumes one
+signal and not the other. **In go-libp2p this happens by default**:
+DHT, AutoRelay, Address Manager, and NAT Service all subscribe to v1's
+`EvtLocalReachabilityChanged` and are blind to v2's
+`EvtHostReachableAddrsChanged`. Even when v2 has confirmed an address
+is reachable, DHT/relay decisions follow v1's flipping signal — the
+unstable global flag dominates the stable per-address result.
+
+| Consumer (go-libp2p) | Event consumed | v2 aware? | Affected by v1 oscillation? |
+|---|---|---|---|
+| Kademlia DHT | `EvtLocalReachabilityChanged` (v1) | No | Yes — DHT mode flips |
+| AutoRelay | `EvtLocalReachabilityChanged` (v1) | No | Yes — relay reservation churn |
+| Address Manager | `EvtLocalReachabilityChanged` (v1) | No | Yes |
+| NAT Service | `EvtLocalReachabilityChanged` (v1) | No | Yes |
+
+**rust-libp2p and js-libp2p don't have the bug today**, but only by
+accident: rust-libp2p's DHT consumes `ExternalAddrConfirmed` from the
+swarm, which v2 emits directly; js-libp2p's DHT consumes
+`self:peer:update` from the address manager, which v2 also feeds.
+Helia currently uses v1 only, so the question hasn't come up. **Neither
+implementation has a documented behavior for what should happen if
+both v1 and v2 run simultaneously**, and the spec doesn't say either.
+A future project that wires both into the same swarm could rediscover
+the same bug independently.
+
+**Impact:** Every go-libp2p deployment that relies on DHT participation
+or relay decisions experiences intermittent routing degradation. DHT
+queries fail when v1 flips the node to client mode; direct connections
+are replaced by higher-latency relay paths; the cycle repeats as v1
+flips back. Validator networks see higher-latency relay paths during
+startup; IPFS nodes delay DHT participation and waste relay
+reservations. This is the production phenomenon Obol observed (see
+[obol.md](obol.md)). For rust-libp2p and js-libp2p the impact is
+latent — the bug doesn't manifest today, but it isn't prevented by
+anything either.
+
+**Solution:** When v2 is enabled, **v2's per-address reachability
+should be the source of truth for global reachability**. The canonical
+reduction is: *PUBLIC if any v2-confirmed address is reachable;
+UNREACHABLE if all v2 addresses are unreachable; UNKNOWN otherwise.*
+This applies to all three implementations:
+
+1. **go-libp2p (corrective):** Bridge v2 into v1's global flag with the
+   reduction function above. Existing v1 consumers (DHT, AutoRelay,
+   Address Manager, NAT Service) benefit from v2 without changing
+   their code. As a stronger variant, suppress v1 probing entirely
+   once v2 reaches `targetConfidence` — eliminating both the wasted
+   probes and the oscillation at the source.
+2. **rust-libp2p (preventive):** Document the reduction. The current
+   behavior (DHT consumes v2 via `ExternalAddrConfirmed`) is correct,
+   but nothing in the spec or in `libp2p-autonat` guarantees it. A
+   future project that adds v1 alongside v2 should know how to combine
+   them.
+3. **js-libp2p (preventive):** Same. Once Helia or another consumer
+   enables v2, the reduction should be in place from day one.
+
+**Expected outcome:** DHT and AutoRelay stop flipping on v1
+oscillation; nodes remain in server mode once v2 confirms any
+address. Eliminates the oscillation-driven relay churn and DHT mode
+switches observed in testbed (60% → 0%).
+
+The deeper fix is at the **spec level**: AutoNAT v2 should mandate
+the reduction so all implementations agree on what "global
+reachability" means when v2 is the authoritative source. This is
+consistent with the spec-gap framing in
+[Cross-Implementation Comparison](#cross-implementation-comparison) —
+the differences across implementations are the symptom; the spec
+leaving behavior undefined is the root cause.
+
+![v1/v2 Gap Comparison](../results/figures/10_v1_v2_gap_comparison.png)
+*Figure 1: v1 oscillates (red segments) while v2 stays stable (green) across three unreliable-server ratios. go-libp2p testbed.*
+
+| Metric | v1 | v2 |
+|--------|----|----|
+| Oscillation rate (5/7 unreliable, go-libp2p) | [60% of runs](#key-metrics) | **0%** |
+| Stability after convergence | Flips on random peer failure | Stable (`targetConfidence`=3) |
+
+**Cross-implementation:**
+
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| DHT consumes v1 global flag? | **Yes** — `EvtLocalReachabilityChanged` | No — uses `ExternalAddrConfirmed` (v2-fed) | No — uses `self:peer:update` (v2-fed) |
+| Bug manifests today? | **Yes** — DHT/relay mode flips with v1 oscillation | No — DHT already uses v2-level signal | No — Helia uses v1 only, v2 not deployed |
+| Documented reduction if both run? | No | No | No |
+
+**Code-level evidence:**
+
+- **DHT subscribes to v1**: [`go-libp2p-kad-dht/subscriber_notifee.go#L32-L39`](https://github.com/libp2p/go-libp2p-kad-dht/blob/v0.39.0/subscriber_notifee.go#L32-L39) (subscription) and [`#L72-L75`](https://github.com/libp2p/go-libp2p-kad-dht/blob/v0.39.0/subscriber_notifee.go#L72-L75) (handler dispatch on `event.EvtLocalReachabilityChanged`)
+- **DHT does NOT subscribe to v2**: zero references to `EvtHostReachableAddrsChanged` in `go-libp2p-kad-dht/subscriber_notifee.go` (verified by file inspection)
+- **v1 sliding window** (`maxConfidence = 3`): [`go-libp2p/p2p/host/autonat/autonat.go#L24`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L24) (constant) and [`#L314-L372`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L314-L372) (`recordObservation` state machine)
+- **v1 random server selection** (Fisher-Yates shuffle in `getPeerToProbe`): [`go-libp2p/p2p/host/autonat/autonat.go#L400-L425`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L400-L425)
+- **v2 emits `EvtHostReachableAddrsChanged`** (zero consumers): [`go-libp2p/p2p/host/basic/addrs_manager.go#L396-L401`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/basic/addrs_manager.go#L396-L401)
+
+**Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md), [v1-vs-v2-performance.md](v1-vs-v2-performance.md), [v1-v2-state-transitions.md](v1-v2-state-transitions.md)
+
+### Finding 2: UDP Black Hole Detector Blocks QUIC Dial-Back
+
+**Category:** go-libp2p | **Severity:** Medium
+
+**Problem:** This is a **server-side** issue in go-libp2p. The UDP
+black hole detector is a performance optimization that tracks UDP
+connection success rates and blocks outbound UDP dials when too few
+succeed — protecting nodes on networks that silently drop UDP traffic.
+The AutoNAT v2 `dialerHost` (the internal host that performs dial-backs)
+shares the main host's `UDPBlackHoleSuccessCounter`. On fresh servers
+with zero UDP history, the counter enters `Blocked` state. When a client
+requests a QUIC address test, the server's `dialerHost` refuses to
+attempt the dial-back and responds with `E_DIAL_REFUSED`. From the
+client's perspective, this is indistinguishable from "the server tried
+and my NAT blocked it" — both count as failures toward the confidence
+target. The result is a **false negative**: a genuinely QUIC-reachable
+address is reported as unreachable.
+
+**Impact:** Every go-libp2p AutoNAT v2 server is affected after startup,
+until the main host accumulates enough successful UDP connections for the
+counter to reach `Allowed` state. On long-running Kubo nodes with
+diverse traffic this happens within minutes; on freshly deployed
+infrastructure or isolated testbeds, the counter stays `Blocked`
+indefinitely. TCP addresses are unaffected — the detector only gates
+UDP/QUIC.
+
+rust-libp2p and js-libp2p do not implement a black hole detector, so
+they are not affected by this specific issue.
+
+**Solution:** Disable the UDP black hole detector on `dialerHost`,
+matching the existing v1 fix
+([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)). The
+`dialerHost` only dials addresses that clients explicitly request to
+test — the dial result itself is the information the client needs, so
+the detector should not suppress it (5 fix options analyzed in the
+full analysis below).
+
+**Expected outcome:** QUIC addresses correctly detected as reachable
+on fresh go-libp2p servers without waiting for the main host's UDP
+counter to accumulate history.
+
+**Code-level evidence:**
+
+- **`dialerHost` shares the main host's UDP counter** (the bug): [`go-libp2p/config/config.go#L313-L314`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/config/config.go#L313-L314) — `cfg.UDPBlackHoleSuccessCounter` is passed through to the v2 dialerHost
+- **`BlackHoleSuccessCounter` state machine** with `Probing`/`Allowed`/`Blocked` states: [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L45-L62`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/net/swarm/black_hole_detector.go#L45-L62)
+- **`FilterAddrs` removes UDP addresses when state is `Blocked`** (the line that turns the false negative on): [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L138-L175`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/net/swarm/black_hole_detector.go#L138-L175)
+- **Existing v1 fix to mirror**: [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529) — disables the detector for v1's dialerHost by passing `nil` counters; v2 needs the same treatment
+
+**Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
+
+### Finding 3: Address-Restricted NAT False Positive
+
+**Category:** Protocol design | **Severity:** Low
+
+**Problem:** AutoNAT v2 produces 100% false positive rate for nodes
+behind address-restricted NAT (EIM + ADF). The dial-back comes from the
+same IP the client already contacted, so the NAT allows it through.
+The node is technically reachable *from the testing server's IP* — but
+AutoNAT declares it **globally reachable**, which is incorrect. ADF NAT
+only permits inbound connections from IPs the client has previously
+contacted. Peers connecting from other IPs will be blocked by the NAT.
+
+**Impact:** Nodes behind ADF NAT advertise addresses as globally
+reachable. Peers from other IPs attempting direct connections are
+blocked by the NAT, adding latency before relay fallback. Real-world
+impact is likely low (ADF is rare in modern routers, most default to
+APDF), but no measurement data exists to quantify prevalence. This is
+a protocol-level issue — all implementations are affected identically.
+
+**Solution:** Require dial-back from a different IP than the one the
+client contacted, when the server is multihomed (has multiple public
+IPs available). This would distinguish ADF from full-cone NAT — if
+the dial-back comes from an IP the client never contacted, an ADF NAT
+blocks it, correctly revealing the restriction. When multihomed
+servers are not available, the limitation should be documented in the
+spec so implementations can flag the result as "reachable from
+contacted IPs only" rather than "globally reachable."
+
+**Expected outcome:** ADF nodes correctly classified as partially
+reachable (not globally reachable), preventing them from advertising
+addresses that most peers cannot reach.
+
+**[Testbed evidence](#experiment-matrix):** 120 runs (`adf-false-positive.yaml` scenario) — deterministic, not probabilistic.
+
+| NAT type | Runs | Reported reachable | FPR |
+|----------|------|-------------------|-----|
+| Address-restricted (ADF) | 60 | 60/60 | **100%** |
+| Port-restricted (APDF) | 60 | 0/60 | **0%** |
+
+![Detection Correctness](../results/figures/05_detection_correctness.png)
+*Figure 2: Detection correctness heatmap — address-restricted reports reachable (false positive).*
+
+**Cross-implementation:** Protocol-level issue — affects all
+implementations identically.
+
+**Code-level evidence:**
+
+- The bug is in the **AutoNAT v2 spec design**, not in any implementation: [autonat-v2 spec](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md) — the dial-back is performed by the same server that received the request, so the dial-back source IP is always an IP the client has previously contacted, which any ADF NAT will permit. There is no spec mechanism for cross-IP verification.
+- All three implementations follow the spec faithfully and produce 100% FPR; the testbed evidence above (60/60 ADF runs report reachable, 0/60 APDF runs report reachable) confirms the failure is deterministic and protocol-level, not implementation-specific.
+
+**Full analysis:** [adf-false-positive.md](adf-false-positive.md)
+
+### Finding 4: Symmetric NAT Missing Signal
+
+**Category:** Cross-implementation | **Severity:** Low
+
+**Problem:** Under symmetric NAT (ADPM), each outbound connection uses a
+different external port. The expected signal is UNREACHABLE (symmetric
+NAT nodes are definitively unreachable — no external peer can initiate
+a connection). Instead, go-libp2p and js-libp2p produce **no signal at
+all** — the status remains Unknown indefinitely. All three
+implementations fail to produce a timely reachability signal, but for
+different reasons:
+
+- **go-libp2p:** No address reaches `ActivationThresh=4` → AutoNAT v2
+  never runs. However, the `ObservedAddrManager` does detect symmetric
+  NAT at ~60s via `getNATType()` (classifies as `EndpointDependent`,
+  emits `EvtNATDeviceTypeChanged`) — but no subsystem subscribes to this
+  event. The detection exists, the response doesn't.
+- **js-libp2p (TCP):** All TCP observed addresses are unconditionally
+  dropped in Identify (`maybeAddObservedAddress()` returns early for any
+  TCP address — see [js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620)).
+  No candidates ever reach the address manager.
+- **js-libp2p (QUIC):** Observed addresses do enter the pipeline and
+  AutoNAT v2 runs, but every dial-back fails (the ephemeral port mapping
+  only accepts traffic from the original destination). After 8 failures
+  the address is removed. Since js-libp2p emits no reachability events,
+  the failure is silent from the application's perspective.
+- **rust-libp2p:** Not affected — no activation threshold, probes run
+  immediately and correctly produce UNREACHABLE.
+
+**Impact:** Nodes behind symmetric NAT are **definitively unreachable
+on their IPv4 NAT path** by definition — CGNAT and mobile carrier NAT
+do not support UPnP or port forwarding, so there is no way to open an
+inbound IPv4 path. **DCUtR hole punching cannot rescue symmetric NAT
+either:** DCUtR is a coordinated simultaneous-dial protocol that
+relies on the public port being stable across destinations (EIM
+mapping). Symmetric NAT picks a different external port per
+destination — exactly the property DCUtR depends on. The only working
+inbound path is through a relay, and that path is permanent (never
+upgraded to direct). The practical outcome (no DHT server queries, no
+direct connections) is the same whether the signal is "unknown" or
+"unreachable."
+
+*Exception:* peers with native IPv6 alongside CGNAT'd IPv4 are
+reachable directly on the v6 path without any NAT involved — most
+modern mobile carriers (T-Mobile, Verizon, EE, Deutsche Telekom)
+issue dual-stack. Applications that advertise and prefer v6 addresses
+can sometimes reach "CGNAT'd" peers without needing relay or hole
+punching at all. This is not hole punching — it's just preferring the
+unNATted path.
+
+The real impact is operational, not functional:
+
+- **Missing relay activation:** In go-libp2p, AutoRelay activates on
+  `Private`, not `Unknown`. Without an explicit UNREACHABLE signal,
+  the node may never reserve a relay path — and since the relay path
+  is the *only* viable inbound path for symmetric NAT (DCUtR cannot
+  help), the node is silently isolated. There is no false-positive
+  risk: the system never incorrectly claims a symmetric NAT node is
+  reachable.
+- **No observability:** Operators cannot distinguish "still waiting for
+  AutoNAT" from "definitively behind symmetric NAT." There is no
+  metric or event to diagnose the situation.
+
+Estimated ~11% of peers are behind symmetric NAT (Halkes 2011; current
+numbers unknown). go-libp2p and js-libp2p are both affected; only
+rust-libp2p correctly produces UNREACHABLE.
+
+**Solution:** For go-libp2p: wire the existing `getNATType()` detection
+(which correctly identifies symmetric NAT as `EndpointDependent`) into
+either lowering the activation threshold or emitting UNREACHABLE
+directly. With `ActivationThresh=1`, testbed confirms correct
+UNREACHABLE determination. The security tradeoff is small: observer-IP
+deduplication means a single attacker IP can only contribute 1
+observation regardless of sybil count. For js-libp2p: emit reachability
+events so that QUIC dial-back failures surface as UNREACHABLE rather
+than silent removal.
+
+**Expected outcome:** Symmetric NAT nodes receive explicit UNREACHABLE
+within ~60s; AutoRelay activates and establishes a relay path — the
+only viable inbound connectivity for these nodes.
+
+**[Testbed evidence](#experiment-matrix)** (`threshold-sensitivity.yaml` scenario):
+
+| Threshold | NAT type | Result |
+|-----------|----------|--------|
+| 4 (default) | symmetric | NO SIGNAL |
+| 1 | symmetric | **UNREACHABLE** (correct) |
+
+**UPnP note:** UPnP-mapped addresses bypass the activation threshold
+in go-libp2p (enter via `appendNATAddrs()`). However, this is not
+relevant for real-world symmetric NAT: CGNAT and mobile carrier NAT
+do not expose UPnP, and port forwarding is not available to users.
+The UPnP bypass was confirmed on a port-restricted (cone) NAT home
+router, not a symmetric NAT device.
+
+**Cross-implementation:**
+| | go-libp2p | rust-libp2p | js-libp2p |
+|-|-----------|-------------|-----------|
+| Affected? | **Yes** — NO SIGNAL (threshold blocks; `getNATType()` detects but nothing subscribes) | **No** — no threshold, produces UNREACHABLE | **Yes** — NO SIGNAL (TCP: excluded in Identify; QUIC: probes fail silently) |
+
+**Code-level evidence:**
+
+- **`ActivationThresh = 4` constant**: [`go-libp2p/p2p/host/observedaddrs/manager.go#L27`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/observedaddrs/manager.go#L27)
+- **Threshold gate filters out v2 candidates**: [`manager.go#L230`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/observedaddrs/manager.go#L230) — `getTopExternalAddrs(..., ActivationThresh)` requires 4 distinct observers before an address reaches the v2 client
+- **`getNATType()` correctly classifies symmetric NAT as `EndpointDependent`**: [`manager.go#L568`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/observedaddrs/manager.go#L568)
+- **`EvtNATDeviceTypeChanged` emission with zero subscribers**: [`manager.go#L343`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/host/observedaddrs/manager.go#L343) — emitted on symmetric NAT detection, but no go-libp2p subsystem subscribes to this event
+- **js-libp2p drops all TCP observed addresses in identify**: [`js-libp2p/packages/protocol-identify/src/identify.ts#L130-L136`](https://github.com/libp2p/js-libp2p/blob/main/packages/protocol-identify/src/identify.ts#L130-L136) — early return for TCP, blocked on [js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620)
+
+**Full analysis:** [symmetric-nat-silent-failure.md](symmetric-nat-silent-failure.md),
+[#89](https://github.com/probe-lab/autonat-project/issues/89),
+[upnp-nat-detection.md](upnp-nat-detection.md)
+
+### Finding 5: rust-libp2p TCP Port Reuse Safety Net
+
+**Category:** rust-libp2p | **Severity:** Low
+
+**Problem:** rust-libp2p's TCP transport defaults to `PortUse::Reuse`
+for outbound dials — the outbound socket is bound to the listen port so
+peers observe the correct address. If `bind()` fails (e.g., the listener
+isn't registered yet because TCP listener setup is asynchronous), the
+kernel silently picks an ephemeral port, but **the connection metadata
+still says `PortUse::Reuse`**. Identify's address-translation logic
+trusts that metadata and skips translation; AutoNAT v2 then probes the
+wrong (ephemeral) port and reports the address UNREACHABLE. Result:
+100% false negative on TCP for any node where outbound dialing races
+ahead of TCP listener registration.
+
+**Impact:** This bug only triggers under a specific startup-timing race
+— outbound dials must begin **before** the TCP listener finishes
+registering. In rust-libp2p, calling `swarm.listen_on()` returns
+immediately but listener registration is asynchronous;
+`local_dial_addr()` cannot find the listen address until it completes.
+**Applications that wait for the corresponding `NewListenAddr` event
+before dialing peers do not hit this bug.** Applications that start
+dialing peers immediately on startup do.
+
+We hit it in our testbed because the runner connected to peers
+immediately on startup, without waiting for listeners. After adding a
+wait for `NewListenAddr` events, both TCP and QUIC reported REACHABLE
+— the bug disappeared with **no library change**, just an
+application-side fix. So in practice this is a **latent library bug
+guarded by application discipline**: the library accepts a wrong-input
+pattern (dial-before-listen) silently instead of either failing loudly
+or correcting itself.
+
+When the race does trigger, the affected node is TCP-unreachable from
+AutoNAT v2's perspective despite having working public TCP listeners.
+QUIC is unaffected (single bound UDP socket, observed address always
+correct). Operators see a confusing asymmetry — QUIC works, TCP
+doesn't, same node, same IP. Because rust-libp2p's DHT consumes
+`ExternalAddrConfirmed` from v2, the TCP address never gets confirmed
+and never enters the routing table; nodes that don't enable QUIC stay
+out of the DHT entirely.
+
+**Real-world prevalence is unknown.** No survey has measured how many
+production rust-libp2p applications wait for `NewListenAddr` before
+dialing. The pattern isn't documented as required, and there is no
+warning if you skip it.
+
+**Solution:** Two-part fix.
+
+1. **Make `PortUse` accurate (immediate, contained in `libp2p-tcp`):**
+   when the TCP transport's outbound dial falls back from `Reuse` to
+   an ephemeral port, the connection should be constructed with
+   `PortUse::New` instead of `PortUse::Reuse`. The transport can detect
+   the fallback by comparing `stream.local_addr()` against the
+   requested listen port. Identify's existing translation logic then
+   works as designed. No public API changes; the fix lives entirely
+   inside `libp2p-tcp`.
+2. **Add an `ObservedAddrManager`-equivalent (longer term, defense in
+   depth):** rust-libp2p should adopt go-libp2p's pattern of a second
+   independent address-consolidation layer that groups observations by
+   thin waist (IP + transport, port-independent) and replaces observed
+   ports with the listen port after enough consistent observations.
+   This provides a safety net independent of per-connection metadata,
+   protecting against future bugs of this class.
+
+**Expected outcome:** TCP addresses correctly detected as reachable
+regardless of listener startup timing. Nodes that only enable TCP
+(no QUIC) can enter DHT server mode.
+
+**Cross-implementation:** go-libp2p is unaffected — its
+`ObservedAddrManager` corrects ports independently of `PortUse`
+metadata. js-libp2p is structurally not affected because Node.js TCP
+doesn't support `SO_REUSEPORT` at all and js-libp2p drops all TCP
+observed addresses in identify (see F4); if it didn't drop them, it
+would have the same bug as rust-libp2p.
+
+**Code-level evidence:**
+
+- **`PortUse` enum** (`Reuse` is the default): [`rust-libp2p/core/src/transport.rs#L70-L81`](https://github.com/libp2p/rust-libp2p/blob/v0.56.0/core/src/transport.rs#L70-L81)
+- **TCP transport `bind_addr` lookup that silently falls back to ephemeral** (the metadata-lying line — `PortUse::Reuse` stays even when the actual local port is ephemeral): [`rust-libp2p/transports/tcp/src/lib.rs#L323-L337`](https://github.com/libp2p/rust-libp2p/blob/v0.56.0/transports/tcp/src/lib.rs#L323-L337)
+- **Identify only tracks ephemeral ports for connections marked `PortUse::New`**: [`rust-libp2p/protocols/identify/src/behaviour.rs#L284-L286`](https://github.com/libp2p/rust-libp2p/blob/v0.56.0/protocols/identify/src/behaviour.rs#L284-L286) — this is the trap; the failed-reuse connection is never inserted because its metadata claims `Reuse`
+- **Address translation gated by the ephemeral-port set**: [`protocols/identify/src/behaviour.rs#L339-L341`](https://github.com/libp2p/rust-libp2p/blob/v0.56.0/protocols/identify/src/behaviour.rs#L339-L341) — translation is skipped, the wrong (ephemeral) port reaches AutoNAT v2 as the candidate
+
+**Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md#address-candidate-selection)
+
+---
+
+## Cross-Implementation Comparison
+
+The full cross-implementation evidence — findings matrix, feature
+comparison, local UPnP test results, platform limitations, and v2
+availability vs. production deployment — is collected in
+[cross-implementation-comparison.md](cross-implementation-comparison.md).
+
+It is intentionally separate from the F1–F5 findings because it is a
+survey, not a finding with a single fix. The differences across
+implementations are the symptom; the root cause is that the AutoNAT v2
+spec standardizes only the wire protocol, not the surrounding
+behaviors (activation thresholds, address selection, event surface,
+port translation, DHT wiring). Each implementation has independently
+made different choices, and those choices are what produce F1, F4, F5,
+and parts of F2. The proposed fix to the root cause is in the
+[Recommendations](#recommendations) section below.
+
+---
+
+## Recommendations
+
+### For go-libp2p (highest impact)
+
+1. **Make v2 the source of truth for global reachability (F1)** —
+   Bridge v2 into the global flag with the reduction "PUBLIC if any
+   v2-confirmed address is reachable", and suppress v1 probing once v2
+   reaches `targetConfidence`. This eliminates v1 oscillation reaching
+   DHT/AutoRelay/Address Manager and makes existing consumers benefit
+   from v2's stability without changing their code.
+
+2. **Disable black hole detector on dialerHost (F2)** — Match the v1
+   fix (PR #2529). [5 options analyzed](udp-black-hole-detector.md#proposed-upstream-fixes).
+
+### For rust-libp2p
+
+3. **Fix silent `PortUse::Reuse` fallback (F5)** — When TCP port reuse
+   falls back to an ephemeral port, the TCP transport should construct
+   the connection with `PortUse::New` so identify's existing translation
+   logic works. The fix is contained inside `libp2p-tcp` (no public API
+   change). As a longer-term hardening, add an `ObservedAddrManager`-
+   equivalent that consolidates observed addresses by thin waist
+   independently of per-connection metadata. **Note:** application
+   authors should also wait for `NewListenAddr` events before starting
+   outbound dials — without that, the race condition triggers regardless
+   of the library fix.
+
+### For js-libp2p
+
+4. **Emit reachability events (F4)** — Expose autonat v2 probe results
+   to consumers.
+
+5. **Upgrade Helia to v2** — v1's monotonic counters are
+   oscillation-resistant but v2 provides per-address granularity.
+
+### For all implementations
+
+6. **Document and adopt the v2-priority reduction (F1)** — When both
+   v1 and v2 run, v2's per-address result should determine global
+   reachability via the reduction "PUBLIC if any v2-confirmed address
+   is reachable". Today rust-libp2p and js-libp2p don't have go-libp2p's
+   bug, but only by accident — neither implementation documents the
+   rule, and the spec doesn't mandate it. Future projects that wire
+   both protocols should not rediscover this independently.
+
+### For the ecosystem
+
+7. **Measure real-world NAT type distribution** — Deploy monitoring to
+   quantify ADF prevalence, symmetric NAT fraction, and v2 adoption.
+
+> **Note:** Recommendations for the AutoNAT v2 specification — including
+> the v2-priority reduction (F1), the ADF blind spot (F3), and the
+> symmetric NAT missing signal (F4) — are under investigation — see
+> [#89](https://github.com/probe-lab/autonat-project/issues/89).
+> go-libp2p already detects symmetric NAT via `getNATType()` but how to
+> act on it (and whether this is a spec or implementation concern)
+> requires further analysis.
 
 ---
 
 ## Testbed
+
+This section is the methodology and numerical-results appendix for the
+report. Each subsection below backs a different part of the main body:
+the [Architecture](#architecture) and
+[Scenario Parameters](#scenario-parameters) describe how the experiments
+are run; the [Experiment Matrix](#experiment-matrix) lists the
+scenarios that produced the data cited in [Findings](#findings) (e.g.,
+F3's `adf-false-positive.yaml`, F4's `threshold-sensitivity.yaml`, F1's
+`v1-v2-gap.yaml`); [Metrics Collected](#metrics-collected) defines what
+`analyze.py` extracts; [Key Metrics](#key-metrics) summarizes the
+headline numbers used throughout Findings and Recommendations; and
+[Transport Resilience Under Packet Loss](#transport-resilience-under-packet-loss)
+plus [Convergence Heatmaps](#convergence-heatmaps) document the deeper
+investigation behind the resilience claims in the
+[Executive Summary findings](#findings).
 
 Docker-based lab with configurable NAT types via iptables on a Linux
 host. All experiments run in isolated Docker networks with no external
@@ -282,11 +830,13 @@ Scenario format reference: [scenario-schema.md](scenario-schema.md).
 
 **Components:**
 - **Router** — Alpine container with iptables. Implements all 5 NAT
-  types via masquerade + filtering rules. Also supports `tc netem` for
+  types via masquerade + filtering rules (see
+  [`router/entrypoint.sh`](../testbed/docker/router/entrypoint.sh) for
+  the iptables configuration per NAT type). Also supports `tc netem` for
   latency/packet-loss injection, static port forwarding (DNAT), and
   miniupnpd for UPnP emulation.
 - **Servers** (3-7) — go-libp2p nodes running AutoNAT v2 server with
-  our probe-lab fork (OTel instrumentation + UDP black hole fix).
+  our probe-lab fork ([OTel instrumentation + UDP black hole fix](https://github.com/probe-lab/go-libp2p/tree/v0.47.0-autonat_otel)).
   Write multiaddrs to a shared Docker volume for client discovery.
 - **Client** — go-libp2p (primary), rust-libp2p, or js-libp2p node
   behind the router. Reads server addresses from shared volume.
@@ -304,7 +854,7 @@ configurable parameters:
 
 | Parameter | Values tested | Description |
 |-----------|--------------|-------------|
-| `nat_type` | none, full-cone, address-restricted, port-restricted, symmetric | NAT filtering/mapping behavior |
+| `nat_type` | none, full-cone, address-restricted, port-restricted, symmetric | NAT filtering/mapping behavior (maps to iptables rules in [`router/entrypoint.sh`](../testbed/docker/router/entrypoint.sh)) |
 | `transport` | tcp, quic, both | Client transport protocol |
 | `server_count` | 3, 5, 7 | Number of AutoNAT servers |
 | `latency_ms` | 10, 200, 500 | One-way added latency via `tc netem` (RTT = 2×) |
@@ -329,338 +879,29 @@ configurable parameters:
 | `v1-v2-gap.yaml` | 2 | 1 each | 2 reliable + 5 unreliable servers (600s observation) |
 | `threshold-sensitivity.yaml` | 6 | 1 each | obs_addr_thresh {1,2,4} × {no-NAT, symmetric} |
 
-**Total: 178 runs** producing OTel traces analyzed by `analyze.py`.
+**Total: 183 runs** producing OTel traces analyzed by `analyze.py`.
+Individual scenarios take 2-10 minutes each (depending on timeout);
+the full matrix was run in batches across multiple sessions.
 
 ### Metrics Collected
 
 From each run, `analyze.py` extracts:
 
-- **FNR** — was a reachable node detected as reachable?
-- **FPR** — was an unreachable node incorrectly detected as reachable?
-- **TTC** — time from node start to first `reachable_addrs_changed` or
-  `reachability_changed` event with a definitive result
-- **TTU** — time from port forwarding toggle to detection of the change
+- **FNR (False Negative Rate)** — was a reachable node incorrectly
+  detected as unreachable?
+- **FPR (False Positive Rate)** — was an unreachable node incorrectly
+  detected as reachable?
+- **TTC (Time-to-Confidence)** — time from node start to first
+  `reachable_addrs_changed` or `reachability_changed` event with a
+  definitive result
+- **TTU (Time-to-Update)** — time from port forwarding toggle to
+  detection of the change
 - **Probe count** — number of `autonatv2.probe` spans per session
 - **v1 flips** — number of `reachability_changed` events (oscillation indicator)
 
----
+### Key Metrics
 
-## Findings
-
-### Finding 1: v1/v2 Reachability Gap
-
-**Category:** go-libp2p | **Severity:** High
-
-**Problem:** v2's per-address reachability results are ignored by every
-go-libp2p subsystem that matters. DHT, AutoRelay, Address Manager, and
-NAT Service all consume v1's global flag (`EvtLocalReachabilityChanged`)
-and are blind to v2's per-address signal (`EvtHostReachableAddrsChanged`).
-
-**Impact:** Any go-libp2p application where the node is reachable
-experiences a window where the DHT treats it as private — forcing
-traffic through relays, refusing DHT server queries, and delaying
-direct connections from other peers. The gap persists until v1
-independently confirms reachability, which can take significantly
-longer than v2. This affects every go-libp2p deployment relying on
-DHT or relay decisions: validator networks see higher-latency relay
-paths during startup, IPFS nodes delay DHT participation and waste
-relay reservations, and any application consuming the global
-reachability flag gets a stale answer. rust-libp2p and js-libp2p are
-not affected — their DHT consumes v2-level signals directly.
-
-**Solution:** Bridge v2 into v1's global flag with a reduction function:
-"PUBLIC if any v2-confirmed address is reachable." This makes all
-existing consumers benefit from v2 without changing their code.
-
-| Consumer | Event consumed | v2 aware? |
-|----------|---------------|-----------|
-| Kademlia DHT | `EvtLocalReachabilityChanged` (v1) | **No** |
-| AutoRelay | `EvtLocalReachabilityChanged` (v1) | **No** |
-| Address Manager | `EvtLocalReachabilityChanged` (v1) | **No** |
-| NAT Service | `EvtLocalReachabilityChanged` (v1) | **No** |
-
-**Cross-implementation:** Only go-libp2p affected. rust-libp2p's DHT uses
-`ExternalAddrConfirmed` (v2 path); js-libp2p uses address-level events.
-
-**Full analysis:** [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md)
-
-### Finding 2: v1 Oscillation → DHT Oscillation
-
-**Category:** go-libp2p | **Severity:** High
-
-**Problem:** v1 uses random peer selection and a sliding window of 3. A
-single failed dial-back from an unreliable peer flips Public→Private,
-causing DHT mode switches and relay churn.
-
-**Impact:** In decentralized networks where peers join and leave freely,
-a fraction of AutoNAT servers will be unreliable (behind NAT themselves,
-overloaded, or temporarily unreachable). Each failed dial-back from
-such a server can flip a node's reachability from Public to Private,
-triggering a DHT mode switch (server→client) and relay reservation
-churn. Applications experience intermittent routing degradation: DHT
-queries fail when the node drops to client mode, direct connections are
-replaced by higher-latency relay paths, and the cycle repeats as
-reachability flips back. Only go-libp2p is affected — js-libp2p's v1
-uses monotonic counters with TTL that resist oscillation, and
-rust-libp2p doesn't consume v1.
-
-**Solution:** Suppress v1 probing once v2 reaches targetConfidence.
-v2's explicit server selection and per-address confidence system
-eliminate the random-peer problem entirely.
-
-![v1/v2 Gap Comparison](../results/figures/10_v1_v2_gap_comparison.png)
-*Figure 1: v1 oscillates (red segments) while v2 stays stable (green). Three unreliable server ratios.*
-
-| Metric | v1 | v2 |
-|--------|----|----|
-| Oscillation rate (5/7 unreliable) | 60% of runs | **0%** |
-| Stability after convergence | Flips on random peer failure | Stable (targetConfidence=3) |
-
-**Cross-implementation:** go-libp2p affected. js-libp2p's v1 is
-mitigated (monotonic counters + TTL). rust-libp2p doesn't consume v1.
-
-**Full analysis:** [v1-vs-v2-performance.md](v1-vs-v2-performance.md)
-
-### Finding 3: Address-Restricted NAT False Positive
-
-**Category:** Protocol design | **Severity:** Medium
-
-**Problem:** AutoNAT v2 produces 100% false positive rate for nodes
-behind address-restricted NAT (EIM + ADF). The dial-back comes from the
-same IP the client already contacted, so the NAT allows it through —
-making the node appear reachable when it isn't.
-
-**Impact:** Nodes behind ADF NAT advertise unreachable addresses. Peers
-attempting direct connections fail, adding latency before relay fallback.
-Real-world impact is likely low (ADF is rare in modern routers, most
-default to APDF), but no measurement data exists to quantify prevalence.
-This is a protocol-level issue — all implementations are affected
-identically.
-
-**Solution:** Require dial-back from a different IP than the one the
-client contacted (multi-server verification). This would distinguish ADF
-from full-cone NAT. Alternatively, document the limitation in the spec.
-
-**Testbed evidence:** 120 runs — deterministic, not probabilistic.
-
-| NAT type | Runs | Reported reachable | FPR |
-|----------|------|-------------------|-----|
-| Address-restricted (ADF) | 60 | 60/60 | **100%** |
-| Port-restricted (APDF) | 60 | 0/60 | **0%** |
-
-![Detection Correctness](../results/figures/05_detection_correctness.png)
-*Figure 2: Detection correctness heatmap — address-restricted reports reachable (false positive).*
-
-**Cross-implementation:** Protocol-level issue — affects all
-implementations identically.
-
-**Full analysis:** [adf-false-positive.md](adf-false-positive.md)
-
-### Finding 4: Symmetric NAT Missing Signal
-
-**Category:** Cross-implementation | **Severity:** Medium
-
-**Problem:** Under symmetric NAT (ADPM), each outbound connection uses a
-different external port. All three implementations fail to produce a
-timely reachability signal, but for different reasons:
-
-- **go-libp2p:** No address reaches `ActivationThresh=4` → AutoNAT v2
-  never runs. However, the `ObservedAddrManager` does detect symmetric
-  NAT at ~60s via `getNATType()` (classifies as `EndpointDependent`,
-  emits `EvtNATDeviceTypeChanged`) — but no subsystem subscribes to this
-  event. The detection exists, the response doesn't.
-- **js-libp2p (TCP):** All TCP observed addresses are unconditionally
-  dropped in Identify (`maybeAddObservedAddress()` returns early for any
-  TCP address — see [js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620)).
-  No candidates ever reach the address manager.
-- **js-libp2p (QUIC):** Observed addresses do enter the pipeline and
-  AutoNAT v2 runs, but every dial-back fails (the ephemeral port mapping
-  only accepts traffic from the original destination). After 8 failures
-  the address is removed. Since js-libp2p emits no reachability events,
-  the failure is silent from the application's perspective.
-- **rust-libp2p:** Not affected — no activation threshold, probes run
-  immediately and correctly produce UNREACHABLE.
-
-**Impact:** Nodes behind symmetric NAT are **definitively unreachable**
-by definition — CGNAT and mobile carrier NAT do not support UPnP or
-port forwarding, so there is no path to inbound connectivity. The
-practical outcome (node does not serve DHT queries, does not accept
-direct connections) is the same whether the signal is "unknown" or
-"unreachable." There is **no false positive** — the system never
-incorrectly claims a symmetric NAT node is reachable.
-
-The real impact is operational, not functional:
-
-- **Missing relay activation:** In go-libp2p, AutoRelay activates on
-  `Private`, not `Unknown`. Without an explicit UNREACHABLE signal,
-  the node may never reserve a relay path — leaving it with no
-  connectivity fallback and no opportunity for DCUtR hole punching,
-  which depends on relay connections being established first.
-- **No observability:** Operators cannot distinguish "still waiting for
-  AutoNAT" from "definitively behind symmetric NAT." There is no
-  metric or event to diagnose the situation.
-
-Estimated ~11% of peers are behind symmetric NAT (Halkes 2011; current
-numbers unknown). go-libp2p and js-libp2p are both affected; only
-rust-libp2p correctly produces UNREACHABLE.
-
-**Solution:** For go-libp2p: wire the existing `getNATType()` detection
-(which correctly identifies symmetric NAT as `EndpointDependent`) into
-either lowering the activation threshold or emitting UNREACHABLE
-directly. With `ActivationThresh=1`, testbed confirms correct
-UNREACHABLE determination. The security tradeoff is small: observer-IP
-deduplication means a single attacker IP can only contribute 1
-observation regardless of sybil count. For js-libp2p: emit reachability
-events so that QUIC dial-back failures surface as UNREACHABLE rather
-than silent removal.
-
-**Testbed evidence:**
-
-| Threshold | NAT type | Result |
-|-----------|----------|--------|
-| 4 (default) | symmetric | NO SIGNAL |
-| 1 | symmetric | **UNREACHABLE** (correct) |
-
-**UPnP note:** UPnP-mapped addresses bypass the activation threshold
-in go-libp2p (enter via `appendNATAddrs()`). However, this is not
-relevant for real-world symmetric NAT: CGNAT and mobile carrier NAT
-do not expose UPnP, and port forwarding is not available to users.
-The UPnP bypass was confirmed on a port-restricted (cone) NAT home
-router, not a symmetric NAT device.
-
-**Cross-implementation:**
-| | go-libp2p | rust-libp2p | js-libp2p |
-|-|-----------|-------------|-----------|
-| Affected? | **Yes** — NO SIGNAL (threshold blocks; `getNATType()` detects but nothing subscribes) | **No** — no threshold, produces UNREACHABLE | **Yes** — NO SIGNAL (TCP: excluded in Identify; QUIC: probes fail silently) |
-
-**Full analysis:** [symmetric-nat-silent-failure.md](symmetric-nat-silent-failure.md),
-[#89](https://github.com/probe-lab/autonat-project/issues/89),
-[upnp-nat-detection.md](upnp-nat-detection.md)
-
-### Finding 5: UDP Black Hole Detector Blocks QUIC Dial-Back
-
-**Category:** go-libp2p | **Severity:** Medium
-
-**Problem:** The AutoNAT v2 `dialerHost` shares the main host's
-`UDPBlackHoleSuccessCounter`. On fresh servers with zero UDP history,
-the counter enters Blocked state → QUIC dial-backs refused → the server
-actively reports QUIC addresses as unreachable (false negative).
-
-**Impact:** QUIC addresses are incorrectly reported as unreachable on
-new or restarted AutoNAT servers, until sufficient UDP traffic builds
-the counter history. Affects every go-libp2p node acting as an AutoNAT
-server. rust-libp2p and js-libp2p are not affected — neither implements
-a black hole detector.
-
-**Solution:** Disable the UDP black hole detector on `dialerHost`,
-matching the existing v1 fix ([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)).
-5 fix options analyzed in [udp-black-hole-detector.md](udp-black-hole-detector.md).
-
-**Cross-implementation:** go-libp2p only. rust-libp2p and js-libp2p
-have no black hole detector.
-
-**Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
-
-### Finding 6: rust-libp2p TCP Port Reuse Safety Net
-
-**Category:** Cross-implementation | **Severity:** Low
-
-**Problem:** When TCP port reuse fails silently in rust-libp2p, the
-connection metadata still says `PortUse::Reuse` despite using an
-ephemeral port. The identify protocol skips address translation, causing
-AutoNAT v2 to probe the wrong port (100% false negative).
-
-**Impact:** Low in practice — the issue only manifests when TCP listeners
-aren't ready before outbound connections start (a startup timing issue).
-When properly configured, rust-libp2p v2 produces correct results for
-all NAT types, matching go-libp2p.
-
-**Cross-implementation:** go-libp2p is unaffected (its `ObservedAddrManager`
-corrects ports independently). rust-libp2p has no equivalent safety net.
-
-**Full analysis:** [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md)
-
-### Finding 7: Cross-Implementation Differences and Adoption
-
-**Category:** Cross-implementation | **Severity:** Info
-
-The AutoNAT v2 protocol works correctly when the implementation is
-right (go-libp2p: 0% FNR/FPR in testbed). However, each implementation
-has distinct limitations in the surrounding infrastructure — address
-management, event model, platform constraints, and production readiness.
-These differences mean that real-world reachability behavior varies
-significantly depending on which libp2p implementation a node runs.
-
-#### Findings Matrix
-
-| Issue | go-libp2p | rust-libp2p | js-libp2p |
-|-------|-----------|-------------|-----------|
-| **v1/v2 reachability gap** (F1) | **Yes** — v2 results not consumed by DHT/relay; v1 drives reachability | Not affected — no v1, v2 feeds DHT directly via `ExternalAddrConfirmed` | Not affected — v2 not deployed (Helia uses v1) |
-| **v1 oscillation → DHT oscillation** (F2) | **Yes** — 60% of runs with unreliable servers | Not affected — no v1 | Possible — Helia uses v1 with same architecture |
-| **ADF false positive** (F3) | **Yes** — 100% FPR | **Yes** — 100% FPR | **Yes** — 100% FPR |
-| **Symmetric NAT missing signal** (F4) | **Yes** — activation threshold blocks v2; `getNATType()` detects but unwired | Not affected — no threshold, produces UNREACHABLE | **Yes** — TCP excluded, QUIC fails silently, no events emitted |
-| **UDP black hole blocks QUIC** (F5) | **Yes** — `dialerHost` shares counter, blocks fresh servers | Not affected — no black hole detector | Not affected — no black hole detector |
-| **TCP port reuse failure** (F6) | Not affected — `ObservedAddrManager` corrects ports | **Yes** — silent fallback to ephemeral port, probes wrong address | Not applicable — TCP observed addrs dropped entirely |
-| **TCP observed addr exclusion** | Not affected — port reuse works | Not affected — port reuse works | **Yes** — Node.js lacks `SO_REUSEPORT`; all TCP observations dropped in Identify ([#2620](https://github.com/libp2p/js-libp2p/issues/2620)) |
-| **UPnP → AutoNAT → DHT chain** | Works but unstable (v1 oscillation) | **Best architecture** — v2 feeds DHT directly, no oscillation | UPnP library fails on some routers; browser-first design |
-| **Reachability events for consumers** | `EvtHostReachableAddrsChanged` (v2), `EvtLocalReachabilityChanged` (v1) | Per-probe `Event` struct | **None** — no events emitted |
-| **Bootstrap connectivity (IPFS DHT)** | 3/4 peers reachable | 1/4 peers (needs `rsa` feature, no WSS, QUIC cert issues) | Not tested |
-
-#### Local UPnP Test Results (Home Router, 2026-03-27)
-
-Cross-implementation testing on a real residential router (port-restricted
-NAT, UPnP enabled) with 3 runs per implementation:
-
-| Metric | go-libp2p | rust-libp2p | js-libp2p |
-|--------|-----------|-------------|-----------|
-| UPnP port mapping | OK | OK | **FAIL** (`Service not found`) |
-| UPnP library | `go-nat` | `igd-next` | `@achingbrain/nat-port-mapper` |
-| Time to first reachable (median) | 14.3s | 5.7s | N/A (timeout) |
-| TCP reachable | Yes (3/3) | Yes (3/3) | No |
-| QUIC reachable | No (router bug) | No (router bug) | No |
-| v2 → DHT mode | Unstable (v1 oscillation) | Stable Server mode | N/A |
-
-The same router, same NAT, same UPnP — three different outcomes.
-rust-libp2p has the cleanest architecture (v2 feeds DHT directly, no
-oscillation), but go-libp2p is the only one proven in production.
-js-libp2p's UPnP failure is expected given its browser-first design.
-
-Full analysis: [upnp-nat-detection.md](upnp-nat-detection.md#cross-implementation-local-upnp-tests-2026-03-27)
-
-#### Platform Limitations
-
-| Limitation | Cause | Impact |
-|-----------|-------|--------|
-| js-libp2p: no TCP reachability via Identify | Node.js `net.createConnection()` lacks `SO_REUSEPORT` | TCP address discovery depends entirely on UPnP or manual config |
-| js-libp2p: UPnP incompatible with some routers | `@achingbrain/nat-port-mapper` service discovery failure | No external address learned; node stays unreachable |
-| js-libp2p: browser-first design | No raw TCP/UDP sockets in browsers | UPnP, NAT traversal, port reuse are structurally irrelevant for the primary use case |
-| rust-libp2p: IPFS bootstrap fragility | Missing `rsa` feature, no WSS transport, QUIC cert validation | Delays peer discovery; AutoNAT v2 has fewer probers |
-
-#### Production Deployment
-
-| Project | Language | AutoNAT status | v2 functional? |
-|---------|----------|---------------|----------------|
-| **Kubo** | Go | v1 + v2 (both active) | **Yes** — 0% FNR/FPR |
-| **Helia** | JS | v1 only | Untested in production |
-| **Substrate** | Rust | Disabled entirely | Works when properly configured (Finding #6) |
-| **Avail** | Rust | **Disabled** (v1.13.2) | Broke in production, turned off |
-
-Only Kubo and Pactus deploy v2 in production. Across ~25 projects using
-libp2p, most use v1, UPnP, or skip AutoNAT entirely. See
-[libp2p-autonat-ecosystem.md](libp2p-autonat-ecosystem.md) for the full
-survey.
-
-**Full analysis:**
-[rust-libp2p](rust-libp2p-autonat-implementation.md) ·
-[js-libp2p](js-libp2p-autonat-implementation.md) ·
-[go-libp2p](go-libp2p-autonat-implementation.md) ·
-[UPnP cross-impl tests](upnp-nat-detection.md#cross-implementation-local-upnp-tests-2026-03-27)
-
----
-
-## Key Metrics
-
-From 178 testbed runs:
+From 183 testbed runs:
 
 | Metric | Value |
 |--------|-------|
@@ -716,158 +957,6 @@ for full investigation data.
 
 For complete per-scenario data and additional figures, see
 [measurement-results.md](measurement-results.md).
-
----
-
-## Cross-Implementation Comparison
-
-| Feature | go-libp2p | rust-libp2p | js-libp2p |
-|---------|-----------|-------------|-----------|
-| **Maturity** | Primary (May 2024) | Second (Aug 2024) | Third (June 2025) |
-| **Production consumer** | Kubo (tens of thousands) | None (Substrate skips autonat) | None (Helia uses v1) |
-| **Confidence system** | Sliding window, targetConfidence=3 | None (single probe) | Fixed thresholds (4/8) |
-| **Address filtering** | ObservedAddrManager (threshold=4) | Identify translation (when `PortUse::New`) | Address manager + cuckoo filter |
-| **Reachability events** | `EvtHostReachableAddrsChanged` | Per-probe `Event` struct | **None** |
-| **v2 → DHT wiring** | No (DHT reads v1 only) | Indirect (`ExternalAddrConfirmed`) | Indirect (`self:peer:update`) |
-| **Dial-back identity** | Separate dialerHost | Same swarm | Same identity |
-| **Rate limiting** | 60 RPM global, 12/peer | Basic concurrent limit | Stream limits only |
-| **Black hole detection** | Yes (causes issue #5) | No | No |
-| **v1 oscillation resistance** | Low (sliding window) | N/A | High (monotonic counters + TTL) |
-
----
-
-## Recommendations
-
-### For go-libp2p (highest impact)
-
-1. **Bridge v2 into v1 global flag** — Add a reduction function: "PUBLIC
-   if any v2-confirmed address is reachable." This makes DHT, AutoRelay,
-   and Address Manager benefit from v2 without changing their code.
-
-2. **Disable black hole detector on dialerHost** — Match the v1 fix
-   (PR #2529). [5 options analyzed](udp-black-hole-detector.md#proposed-upstream-fixes).
-
-3. **Deprecate v1 probing when v2 has data** — Suppress v1 once v2
-   reaches targetConfidence to prevent oscillation.
-
-### For rust-libp2p
-
-4. **Fix silent `PortUse::Reuse` fallback** — When TCP port reuse
-   fails and falls back to an ephemeral port, identify skips address
-   translation because the connection is still marked `Reuse`. Either
-   identify should check the actual local port, or the TCP transport
-   should report the actual outcome. Optionally, add an
-   `ObservedAddrManager`-equivalent as a safety net.
-
-### For js-libp2p
-
-5. **Emit reachability events** — Expose autonat v2 probe results to
-   consumers.
-
-6. **Upgrade Helia to v2** — v1's monotonic counters are
-   oscillation-resistant but v2 provides per-address granularity.
-
-### For the ecosystem
-
-7. **Measure real-world NAT type distribution** — Deploy monitoring to
-   quantify ADF prevalence, symmetric NAT fraction, and v2 adoption.
-   See [Future Work](#future-work).
-
-> **Note:** Recommendations for the AutoNAT v2 specification (addressing
-> ADF blind spot and symmetric NAT missing signal) are under
-> investigation — see [#89](https://github.com/probe-lab/autonat-project/issues/89).
-> go-libp2p already detects symmetric NAT via `getNATType()` but how to
-> act on it (and whether this is a spec or implementation concern)
-> requires further analysis.
-
----
-
-## Future Work
-
-### Tier 1: Query Existing Nebula Data
-
-The [Nebula crawler](https://github.com/probe-lab/nebula) already stores
-protocol lists, agent versions, and multiaddresses per peer. SQL queries
-on the existing database can provide:
-
-- AutoNAT v2 adoption rate (% of peers supporting `/libp2p/autonat/2/dial-request`)
-- go-libp2p version distribution (v0.42.0+ has v2 as primary)
-- Platform distribution (Go/Rust/JS inferred from `agent_version`)
-- TCP vs QUIC address patterns
-- Relay-dependent peer count
-
-**Effort:** Days. **Limitation:** Only sees DHT server-mode nodes.
-
-### Tier 2: Full NAT Classification via ants-watch
-
-Use [ants-watch](https://github.com/probe-lab/ants-watch) to deploy
-sybil nodes across the full DHT keyspace on 2-3 VPS with different
-public IPs. Peers connect to sybils during normal DHT operations,
-capturing the **entire active population** including NATted peers
-invisible to crawlers.
-
-Multi-vantage observed port comparison classifies all 4 NAT types:
-- **Step 1:** Compare observed ports across vantage points (EIM vs ADPM)
-- **Step 2:** Unsolicited dial from uncontacted vantage (EIF vs restricted)
-- **Step 3:** Contacted vantage dials from different port (ADF vs APDF)
-
-**Effort:** Weeks-months. **Value:** Definitive answer to "how common is
-ADF?" and "what fraction is symmetric?"
-
-**Full proposal:** [future-work-nat-monitoring.md](future-work-nat-monitoring.md)
-
----
-
-## What v2 Got Right
-
-Despite the issues found, AutoNAT v2 is a substantial improvement:
-
-- **Per-address testing** eliminates v1's "one bad peer ruins everything"
-- **Nonce verification** prevents spoofing
-- **Amplification protection** (30-100KB) prevents DDoS via protocol abuse
-- **Confidence system** (targetConfidence=3) provides stable results
-- **0% FNR/FPR** in all non-edge-case scenarios
-- **~6s convergence** — fast enough for interactive use
-- **UPnP integration** — correctly detects reachability through UPnP-mapped
-  ports (both TCP and QUIC), confirmed on a real home router
-
-The protocol design is sound. The issues are in how implementations
-integrate v2 into their broader subsystems, and in edge cases (ADF,
-symmetric) that the protocol doesn't handle.
-
----
-
-## References
-
-### Project Documents
-
-| Document | Scope |
-|----------|-------|
-| [autonat-v2.md](autonat-v2.md) | Protocol walkthrough and NAT type reference |
-| [v1-vs-v2-performance.md](v1-vs-v2-performance.md) | v1 vs v2 quantitative comparison |
-| [v1-v2-reachability-gap.md](v1-v2-reachability-gap.md) | v1/v2 event model gap analysis |
-| [adf-false-positive.md](adf-false-positive.md) | ADF false positive with 120-run evidence |
-| [symmetric-nat-silent-failure.md](symmetric-nat-silent-failure.md) | Symmetric NAT cross-implementation root cause analysis |
-| [udp-black-hole-detector.md](udp-black-hole-detector.md) | QUIC dial-back issue + 5 fix options |
-| [go-libp2p-autonat-implementation.md](go-libp2p-autonat-implementation.md) | go-libp2p internals |
-| [rust-libp2p-autonat-implementation.md](rust-libp2p-autonat-implementation.md) | rust-libp2p analysis |
-| [js-libp2p-autonat-implementation.md](js-libp2p-autonat-implementation.md) | js-libp2p analysis |
-| [upnp-nat-detection.md](upnp-nat-detection.md) | UPnP interaction with AutoNAT v2 + local test results |
-| [future-work-nat-monitoring.md](future-work-nat-monitoring.md) | NAT monitoring proposal |
-| [measurement-results.md](measurement-results.md) | Complete testbed results (all 178 runs) |
-| [testbed.md](testbed.md) | Testbed architecture |
-| [scenario-schema.md](scenario-schema.md) | Scenario format reference |
-
-### External References
-
-- [AutoNAT v2 Specification](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md)
-- [RFC 4787: NAT Behavioral Requirements](https://www.rfc-editor.org/rfc/rfc4787) — EIM/ADPM/EIF/ADF/APDF taxonomy
-- [RFC 5780: NAT Behavior Discovery Using STUN](https://www.rfc-editor.org/rfc/rfc5780)
-- [Trautwein et al., "Decentralized Hole Punching" (DINPS 2022)](https://research.protocol.ai/publications/decentralized-hole-punching/)
-- [Trautwein et al., "Challenging Tribal Knowledge" (2025)](https://arxiv.org/html/2510.27500v1) — 4.4M+ traversal attempts
-- [go-libp2p](https://github.com/libp2p/go-libp2p) · [rust-libp2p](https://github.com/libp2p/rust-libp2p) · [js-libp2p](https://github.com/libp2p/js-libp2p)
-- [Kubo](https://github.com/ipfs/kubo) · [Helia](https://github.com/ipfs/helia) · [Substrate](https://github.com/nickcen/polkadot-sdk)
-- [Nebula crawler](https://github.com/probe-lab/nebula) · [ants-watch](https://github.com/probe-lab/ants-watch)
 
 ---
 

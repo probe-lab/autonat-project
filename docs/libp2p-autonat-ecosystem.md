@@ -141,10 +141,44 @@ Based on network size, AutoNAT usage, and known issues:
 
 ---
 
+## v2 Availability vs. Deployment
+
+AutoNAT v2 is **implemented in all three libp2p libraries** but
+**deployed in production by only two Go projects**. The distinction
+matters:
+
+| Implementation | v2 available? | How to enable | v2 in production? |
+|---|---|---|---|
+| go-libp2p | Yes | Explicit opt-in: `EnableAutoNATv2()` | **Kubo + Pactus** |
+| rust-libp2p | Yes (compiled by default with `autonat` feature) | Wire `autonat::v2::client::Behaviour` + `autonat::v2::server::Behaviour` into swarm | **No** — no project wires v2 behaviours |
+| js-libp2p | Yes (separate `@libp2p/autonat-v2` package) | Import and add to services | **No** — Helia uses v1 (`@libp2p/autonat`) |
+
+**Why does this matter?**
+
+- rust-libp2p's v2 has the **best architecture** — v2 results feed
+  directly into Kademlia's mode decision via `ExternalAddrConfirmed`,
+  with no v1 intermediary and no oscillation (see
+  [upnp-nat-detection.md](upnp-nat-detection.md#dht-integration-rusts-architectural-advantage)).
+  But this has never been exercised at scale.
+
+- The `libp2p-autonat` crate ships with `default = ["v1", "v2"]`, so
+  any Rust project enabling the `autonat` feature compiles both
+  versions. However, the crate's top-level re-export (`pub use v1::*`)
+  only exposes v1 — projects must explicitly import `autonat::v2` to
+  use it.
+
+- In go-libp2p, v2 requires an explicit `EnableAutoNATv2()` call.
+  Without it, only v1 runs. This opt-in model means most Go projects
+  that upgraded to v0.34.0+ (where v2 was introduced) still only use v1.
+
+---
+
 ## Key Observations
 
-1. **AutoNAT v2 adoption is near-zero.** Only Kubo and Pactus use it.
-   Everyone else is on v1 or nothing.
+1. **AutoNAT v2 is implemented across all libp2p variants but deployed
+   only in Kubo and Pactus.** The protocol is available in Go (opt-in),
+   Rust (compiled by default), and JS (separate package), but production
+   adoption has not followed implementation availability.
 
 2. **UPnP is the most common alternative.** Lighthouse, MultiversX, Mina,
    IOTA, and nwaku all prefer UPnP/NAT-PMP over AutoNAT.
@@ -154,10 +188,10 @@ Based on network size, AutoNAT usage, and known issues:
    This suggests either: (a) AutoNAT isn't trusted, (b) these networks
    assume public IPs, or (c) operators are expected to configure manually.
 
-4. **The go-libp2p ecosystem dominates.** Most AutoNAT users are Go
-   projects. rust-libp2p has the ephemeral port bug (Finding #3),
-   js-libp2p emits no events (Finding #7) — which may explain low
-   adoption in Rust/JS projects.
+4. **The go-libp2p ecosystem dominates AutoNAT usage.** Most AutoNAT
+   users are Go projects. Rust projects that enable `autonat` (Forest,
+   Pathfinder, Ceramic) use v1 only. js-libp2p projects (Helia) also
+   use v1 only.
 
 5. **Filecoin is the most mature AutoNAT deployment** after IPFS. All
    three implementations (Lotus, Forest, Venus) enable it with API
