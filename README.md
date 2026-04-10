@@ -13,15 +13,15 @@ configurable NAT types.
 
 ## Report
 
-**[Final Report](docs/final-report.md)** — 7 findings, 178 testbed runs,
+**[Final Report](docs/final-report.md)** — 5 findings, 178 testbed runs,
 cross-implementation comparison, and recommendations.
 
 Key results:
 - **0% FNR / 0% FPR** for standard NAT types with ~6s convergence
-- **v1/v2 gap and DHT oscillation**: v2 results ignored by DHT and relay; v1 still controls and oscillates in 60% of runs with unreliable peers (High)
-- **ADF false positive**: 100% FPR for address-restricted NAT (Medium)
-- **Symmetric NAT missing signal**: no explicit UNREACHABLE emitted, but node is definitively unreachable — impact is operational (no relay activation, no observability) (Medium)
+- **Inconsistent global vs per-address reachability**: v1's global flag and v2's per-address signal can disagree, and no spec or implementation defines a canonical reduction. In go-libp2p the DHT consumes v1, which oscillates in 60% of runs with unreliable peers; v2's stable per-address result is ignored. rust/js don't have the bug today but nothing prevents it either (High)
 - **UDP black hole**: blocks QUIC dial-back on fresh servers (Medium)
+- **ADF false positive**: 100% FPR for address-restricted NAT (Low — protocol-level, ADF rare in modern routers)
+- **Symmetric NAT missing signal**: no explicit UNREACHABLE emitted, but node is definitively unreachable on its IPv4 NAT path and DCUtR cannot rescue it either — impact is operational (no relay activation, no observability) (Low)
 - **QUIC convergence advantage**: more stable under packet loss (observed, under investigation)
 
 ## Quick Start
@@ -52,12 +52,16 @@ for requirements.
 | Document | Description |
 |----------|-------------|
 | [Final Report](docs/final-report.md) | Findings, metrics, recommendations |
+| [Cross-Implementation Comparison](docs/cross-implementation-comparison.md) | How each finding manifests in go/rust/js, feature matrix, adoption status |
+| [v1 vs v2 State Transitions](docs/v1-v2-state-transitions.md) | State machine, confidence systems, and server selection across implementations |
 | [Measurement Results](docs/measurement-results.md) | Complete data from all 178 runs |
 | [v1 vs v2 Performance](docs/v1-vs-v2-performance.md) | Quantitative comparison |
 | [v1/v2 Reachability Gap](docs/v1-v2-reachability-gap.md) | Event model gap analysis |
 | [ADF False Positive](docs/adf-false-positive.md) | Protocol design issue with testbed evidence |
 | [Symmetric NAT Missing Signal](docs/symmetric-nat-silent-failure.md) | Cross-implementation root cause analysis |
 | [UDP Black Hole Detector](docs/udp-black-hole-detector.md) | QUIC dial-back issue + fix options |
+| [UPnP + NAT Detection](docs/upnp-nat-detection.md) | UPnP interaction with AutoNAT v2 + local home-router tests |
+| [libp2p AutoNAT Ecosystem](docs/libp2p-autonat-ecosystem.md) | Survey of ~25 libp2p projects and their AutoNAT adoption |
 | [Future Work: NAT Monitoring](docs/future-work-nat-monitoring.md) | Nebula + ants-watch proposal |
 
 ### Implementation Analysis

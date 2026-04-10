@@ -131,10 +131,16 @@ the final report), which causes **false negatives** — the server refuses to at
 dial-backs entirely because its black hole counter is in `Blocked` state. rust-libp2p has
 no black hole detector, so that issue does not apply.
 
+The upstream bug has since been fixed by
+[PR #4568](https://github.com/libp2p/rust-libp2p/pull/4568), which
+prevents port reuse during AutoNAT dial-back attempts. However, Avail
+disabled AutoNAT before the fix shipped and has not re-enabled it.
+
 Avail's response to rust-libp2p#3900 was progressive:
 1. v1.7.4 (Nov 2023): switched AutoNAT to TCP-only bootstrap listeners as a workaround
 2. Dec 2023: removed the QUIC listener entirely ([PR #390](https://github.com/availproject/avail-light/pull/390))
 3. v1.13.2 (Sep 2025): disabled AutoNAT altogether
+4. Upstream fix ([PR #4568](https://github.com/libp2p/rust-libp2p/pull/4568)): fixes the root cause, but Avail has not adopted it
 
 **Impact on Avail:** Light clients behind NAT were incorrectly classified as publicly
 reachable, causing them to switch to Kademlia server mode and advertise addresses that
