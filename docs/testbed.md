@@ -504,7 +504,5 @@ and file naming.
 | Document | Content |
 |----------|---------|
 | [otel-tracing.md](otel-tracing.md) | OTel span hierarchy, attributes, and Jaeger queries |
-| [trace-spec.md](trace-spec.md) | Implementation-agnostic trace format specification |
-| [instrumentation-requirements.md](instrumentation-requirements.md) | What each client implementation must instrument |
 | [upnp-nat-detection.md](upnp-nat-detection.md) | UPnP/NAT-PMP port mapping and detection details |
 | [scenario-schema.md](scenario-schema.md) | YAML scenario format reference |

@@ -640,7 +640,7 @@ reachable but unreliable servers fail dial-backs.
 
 ## 9. The Wiring Gap: v1 Controls Everything in go-libp2p
 
-*(Merged from v1-v2-reachability-gap.md)*
+*(Originally documented in v1-v2-reachability-gap.md)*
 
 AutoNAT v1 and v2 coexist in go-libp2p but produce **independent,
 incompatible reachability signals**. v1 emits a global
@@ -677,10 +677,10 @@ This is the architecture go-libp2p should converge toward.
 - **Obol/Charon** (go-libp2p v0.47.0): Exports `p2p_reachability_status`
   from v1. Reports NAT-related connectivity issues (low hole-punching
   success, relay churn) — consistent with v1 oscillation but not
-  directly attributed to AutoNAT. See [obol.md](obol.md).
+  directly attributed to AutoNAT. See [Obol/Charon GitHub issues](https://github.com/ObolNetwork/charon/issues/4233).
 - **Avail** (rust-libp2p v0.55.0): Disabled AutoNAT entirely in v1.13.2
   after "autonat-over-quic" errors (rust-libp2p#3900, since fixed by
-  PR #4568). See [avail.md](avail.md).
+  PR #4568). See [Avail release notes](https://github.com/availproject/avail-light/releases).
 
 ### Recommended Fix Options
 
