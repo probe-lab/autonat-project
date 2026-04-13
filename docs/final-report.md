@@ -631,11 +631,12 @@ safety net independent of per-connection metadata.
 spurious ephemeral address from the address manager, removing the
 unnecessary probe and the confusing diagnostic signal.
 
-**Testbed reproduction:** Reproduced in the cross-implementation
+**Testbed reproduction:** Observed in the cross-implementation
 testbed with a rust-libp2p client that dials immediately on startup
-without waiting for `NewListenAddr`. Adding the wait eliminated the
-false negative with no library change — confirming that the metadata
-bug is only reachable through the startup race. No dedicated scenario
+without waiting for `NewListenAddr`. The ephemeral address appeared
+in the address manager and was probed unnecessarily. Adding the wait
+ensured port reuse succeeded, so the correct address entered the
+pipeline and the spurious one never appeared. No dedicated scenario
 file; observed during cross-implementation validation runs.
 
 **Cross-implementation:** go-libp2p is unaffected — its
