@@ -379,6 +379,8 @@ leaving behavior undefined is the root cause.
 - **v1 sliding window** (`maxConfidence = 3`): [`go-libp2p/p2p/host/autonat/autonat.go#L24`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L24) (constant) and [`#L314-L372`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/autonat/autonat.go#L314-L372) (`recordObservation` state machine)
 - **v2 emits `EvtHostReachableAddrsChanged`** (zero consumers): [`go-libp2p/p2p/host/basic/addrs_manager.go#L396-L401`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/host/basic/addrs_manager.go#L396-L401)
 
+**[Testbed reproduction](measurement-results.md#6-v1v2-gap):** `v1-v2-gap.yaml` scenario — 20 runs comparing v1 and v2 under unreliable servers. v1 oscillates in 55% of runs; v2 is stable in all 20.
+
 **Full analysis:** [v1-v2-analysis.md](v1-v2-analysis.md) — state transitions, wiring gap, fix options, and testbed performance data
 
 ### Finding 2: UDP Black Hole Detector Blocks QUIC Dial-Back
@@ -428,6 +430,8 @@ counter to accumulate history.
 - **`BlackHoleSuccessCounter` state machine** with `Probing`/`Allowed`/`Blocked` states: [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L45-L62`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/net/swarm/black_hole_detector.go#L45-L62)
 - **`FilterAddrs` removes UDP addresses when state is `Blocked`** (the line that turns the false negative on): [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L138-L175`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/net/swarm/black_hole_detector.go#L138-L175)
 - **Existing v1 fix to mirror**: [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529) — disables the detector for v1's dialerHost by passing `nil` counters; v2 needs the same treatment
+
+**Testbed reproduction:** The testbed disables the black hole detector on servers via `libp2p.UDPBlackHoleSuccessCounter(nil)` as a workaround (see [udp-black-hole-detector.md § Testbed Workaround](udp-black-hole-detector.md#testbed-workaround)). Without this workaround, all QUIC scenarios in `matrix.yaml` fail with `E_DIAL_REFUSED`.
 
 **Full analysis:** [udp-black-hole-detector.md](udp-black-hole-detector.md)
 
@@ -566,74 +570,67 @@ router, not a symmetric NAT device.
 [#89](https://github.com/probe-lab/autonat-project/issues/89),
 [upnp-nat-detection.md](upnp-nat-detection.md)
 
-### Finding 5: rust-libp2p TCP Port Reuse Safety Net
+### Finding 5: rust-libp2p TCP Port Reuse Incorrect Metadata
 
 **Category:** rust-libp2p | **Severity:** Low
 
-**Problem:** rust-libp2p's TCP transport defaults to `PortUse::Reuse`
-for outbound dials — the outbound socket is bound to the listen port so
-peers observe the correct address. If `bind()` fails (e.g., the listener
-isn't registered yet because TCP listener setup is asynchronous), the
-kernel silently picks an ephemeral port, but **the connection metadata
-still says `PortUse::Reuse`**. Identify's address-translation logic
-trusts that metadata and skips translation; AutoNAT v2 then probes the
-wrong (ephemeral) port and reports the address UNREACHABLE. Result:
-100% false negative on TCP for any node where outbound dialing races
-ahead of TCP listener registration.
+**Problem:** rust-libp2p's TCP transport produces incorrect `PortUse`
+metadata. When an outbound dial requests `PortUse::Reuse` but `bind()`
+falls back to an ephemeral port (because the listen port isn't
+available yet), the connection metadata still says `PortUse::Reuse`.
+This is wrong — the connection used an ephemeral port, so the metadata
+should say `PortUse::New`.
 
-**Impact:** This bug only triggers under a specific startup-timing race
-— outbound dials must begin **before** the TCP listener finishes
-registering. In rust-libp2p, calling `swarm.listen_on()` returns
-immediately but listener registration is asynchronous;
-`local_dial_addr()` cannot find the listen address until it completes.
-**Applications that wait for the corresponding `NewListenAddr` event
-before dialing peers do not hit this bug.** Applications that start
-dialing peers immediately on startup do.
+Identify's address-translation logic correctly trusts `PortUse`
+metadata: when it sees `Reuse`, it skips port translation because the
+peer already observed the listen port. This is the right behavior —
+the bug is that the TCP transport lies about what happened. With
+incorrect metadata, Identify passes through the ephemeral port,
+AutoNAT v2 probes the wrong port, and the address is reported
+UNREACHABLE.
 
-We hit it in our testbed because the runner connected to peers
-immediately on startup, without waiting for listeners. After adding a
-wait for `NewListenAddr` events, both TCP and QUIC reported REACHABLE
-— the bug disappeared with **no library change**, just an
-application-side fix. So in practice this is a **latent library bug
-guarded by application discipline**: the library accepts a wrong-input
-pattern (dial-before-listen) silently instead of either failing loudly
-or correcting itself.
+**When this triggers:** The fallback happens when outbound dials begin
+before the TCP listener finishes registering. In rust-libp2p,
+`swarm.listen_on()` returns immediately but registration is
+asynchronous; `local_dial_addr()` cannot find the listen address
+until it completes. Applications that wait for `NewListenAddr` before
+dialing do not trigger the fallback, so the incorrect metadata path
+is never reached. QUIC is unaffected (single bound UDP socket,
+observed address always correct).
 
-When the race does trigger, the affected node is TCP-unreachable from
-AutoNAT v2's perspective despite having working public TCP listeners.
-QUIC is unaffected (single bound UDP socket, observed address always
-correct). Operators see a confusing asymmetry — QUIC works, TCP
-doesn't, same node, same IP. Because rust-libp2p's DHT consumes
-`ExternalAddrConfirmed` from v2, the TCP address never gets confirmed
-and never enters the routing table; nodes that don't enable QUIC stay
-out of the DHT entirely.
+**Impact:** When triggered, the node is TCP-unreachable from AutoNAT
+v2's perspective despite having working public TCP listeners. Because
+rust-libp2p's DHT consumes `ExternalAddrConfirmed` from v2, the TCP
+address never gets confirmed and never enters the routing table;
+nodes that don't enable QUIC stay out of the DHT entirely. Real-world
+prevalence is unknown — no survey has measured how many production
+rust-libp2p applications wait for `NewListenAddr` before dialing.
 
-**Real-world prevalence is unknown.** No survey has measured how many
-production rust-libp2p applications wait for `NewListenAddr` before
-dialing. The pattern isn't documented as required, and there is no
-warning if you skip it.
+**Solution:** Fix `PortUse` metadata in `libp2p-tcp`: when the
+outbound dial falls back to an ephemeral port, construct the
+connection with `PortUse::New` instead of `PortUse::Reuse`. The
+transport can detect the fallback by comparing `stream.local_addr()`
+against the requested listen port. Identify's existing translation
+logic then works as designed. No public API changes; the fix lives
+entirely inside `libp2p-tcp`.
 
-**Solution:** Two-part fix.
-
-1. **Make `PortUse` accurate (immediate, contained in `libp2p-tcp`):**
-   when the TCP transport's outbound dial falls back from `Reuse` to
-   an ephemeral port, the connection should be constructed with
-   `PortUse::New` instead of `PortUse::Reuse`. The transport can detect
-   the fallback by comparing `stream.local_addr()` against the
-   requested listen port. Identify's existing translation logic then
-   works as designed. No public API changes; the fix lives entirely
-   inside `libp2p-tcp`.
-2. **Add an `ObservedAddrManager`-equivalent (longer term, defense in
-   depth):** rust-libp2p should adopt go-libp2p's pattern of a second
-   independent address-consolidation layer that groups observations by
-   thin waist (IP + transport, port-independent) and replaces observed
-   ports with the listen port after enough consistent observations.
-   This provides a safety net independent of per-connection metadata,
-   protecting against future bugs of this class.
+As a longer-term defense in depth, rust-libp2p could adopt
+go-libp2p's `ObservedAddrManager` pattern — a second address-
+consolidation layer that groups observations by thin waist (IP +
+transport, port-independent) and replaces observed ports with the
+listen port after enough consistent observations. This provides a
+safety net independent of per-connection metadata.
 
 **Expected outcome:** TCP addresses correctly detected as reachable
 regardless of listener startup timing. Nodes that only enable TCP
 (no QUIC) can enter DHT server mode.
+
+**Testbed reproduction:** Reproduced in the cross-implementation
+testbed with a rust-libp2p client that dials immediately on startup
+without waiting for `NewListenAddr`. Adding the wait eliminated the
+false negative with no library change — confirming that the metadata
+bug is only reachable through the startup race. No dedicated scenario
+file; observed during cross-implementation validation runs.
 
 **Cross-implementation:** go-libp2p is unaffected — its
 `ObservedAddrManager` corrects ports independently of `PortUse`
