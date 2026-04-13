@@ -598,13 +598,19 @@ dialing do not trigger the fallback, so the incorrect metadata path
 is never reached. QUIC is unaffected (single bound UDP socket,
 observed address always correct).
 
-**Impact:** When triggered, the node is TCP-unreachable from AutoNAT
-v2's perspective despite having working public TCP listeners. Because
-rust-libp2p's DHT consumes `ExternalAddrConfirmed` from v2, the TCP
-address never gets confirmed and never enters the routing table;
-nodes that don't enable QUIC stay out of the DHT entirely. Real-world
-prevalence is unknown — no survey has measured how many production
-rust-libp2p applications wait for `NewListenAddr` before dialing.
+**Impact:** The incorrect metadata causes an ephemeral-port address
+to enter the address manager when it shouldn't. AutoNAT v2 triggers
+an unnecessary probe on this address and reports it UNREACHABLE —
+which is the correct result, since nothing listens on the ephemeral
+port. When port reuse fails behind NAT, the node is genuinely
+unreachable regardless of metadata: no NAT mapping exists for the
+listen port. The final reachability outcome is the same whether the
+metadata is correct or not — the bug does not cause a false negative.
+Once port reuse succeeds on subsequent connections, the correct
+address enters the pipeline separately and gets its own probe with
+the right result. The practical impact is limited to confusing
+diagnostics: an address that shouldn't exist appears in the address
+manager, gets tested, and fails.
 
 **Solution:** Fix `PortUse` metadata in `libp2p-tcp`: when the
 outbound dial falls back to an ephemeral port, construct the
@@ -621,9 +627,9 @@ transport, port-independent) and replaces observed ports with the
 listen port after enough consistent observations. This provides a
 safety net independent of per-connection metadata.
 
-**Expected outcome:** TCP addresses correctly detected as reachable
-regardless of listener startup timing. Nodes that only enable TCP
-(no QUIC) can enter DHT server mode.
+**Expected outcome:** Correct `PortUse` metadata eliminates the
+spurious ephemeral address from the address manager, removing the
+unnecessary probe and the confusing diagnostic signal.
 
 **Testbed reproduction:** Reproduced in the cross-implementation
 testbed with a rust-libp2p client that dials immediately on startup
