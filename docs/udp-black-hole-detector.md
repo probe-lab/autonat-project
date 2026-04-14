@@ -23,17 +23,33 @@ using a `BlackHoleSuccessCounter`. It was introduced in
 ### Counter States
 
 The counter uses a sliding window of the last N dial attempts (default N=100,
-MinSuccesses=5):
+MinSuccesses=5). The initial state is `Probing` (zero value of the state
+enum):
 
-| State | Condition | Behavior |
-|-------|-----------|----------|
-| **Probing** | < N results collected | Allows 1-in-N dials as probes to gather data |
+| State | Condition | Filter behavior (non-readOnly) |
+|-------|-----------|---------------------------------|
+| **Probing** | Initial state; <N results collected | **All UDP dials pass through**; outcomes are recorded to determine next state |
 | **Allowed** | ≥ MinSuccesses in last N | All dials permitted |
-| **Blocked** | < MinSuccesses in last N | All dials refused |
+| **Blocked** | < MinSuccesses in last N | UDP dials refused; every N-th request allowed as a probe so the state can recover |
 
 When a dial is refused, `filterKnownUndialables()` returns:
 ```
 dial refused because of black hole
+```
+
+**Read-only mode (used by AutoNAT v2 `dialerHost`) behaves differently:**
+any state other than `Allowed` is treated as `Blocked`. In particular,
+`Probing` is converted to `Blocked`, so UDP dials are filtered out
+whenever the shared counter has not yet reached `Allowed`. See
+`getFilterState` in `black_hole_detector.go`:
+
+```go
+if d.readOnly {
+    if f.State() != blackHoleStateAllowed {
+        return blackHoleStateBlocked  // Probing becomes Blocked
+    }
+    return blackHoleStateAllowed
+}
 ```
 
 ### Why It Exists
@@ -132,38 +148,78 @@ environments, it doesn't.
 
 ## The Problem: Fresh Servers
 
-This design assumes the main host has a healthy counter state — that it has
-seen enough successful UDP connections to be in `Allowed` state. This
-assumption holds for **long-running production nodes** (Kubo) that
-accumulate many successful QUIC connections over hours and days.
+The root cause is not that the main host's counter reaches `Blocked` —
+it's that the v2 `dialerHost` uses the counter in **read-only mode**,
+which converts the initial `Probing` state into `Blocked` for filter
+purposes. As long as the main host's counter has not yet reached
+`Allowed`, every QUIC dial-back is refused.
 
-It does **not** hold for **freshly started servers** — testbed containers,
-CI environments, newly deployed infrastructure:
+This design assumes the main host reliably reaches `Allowed` state
+by accumulating successful outbound UDP dials. That holds for
+**long-running production nodes** (Kubo) with diverse QUIC traffic
+over hours and days.
 
-1. Server starts. Main host counter has zero history → `Probing` state.
-2. The only UDP traffic the server handles is AutoNAT dial-back requests.
-   But `WithReadOnlyBlackHoleDetector()` means these results are not
-   recorded in the counter.
-3. Meanwhile, the main host may attempt a few outbound UDP connections
-   (DHT, relay) that fail or don't happen at all in an isolated testbed.
-4. Counter transitions to `Blocked` (< 5 successes in 100 attempts).
-5. `dialerHost` reads `Blocked` state from the shared counter.
-6. Client sends a QUIC dial-back request → `filterKnownUndialables()`
-   returns `"dial refused because of black hole"` → server responds
-   `E_DIAL_REFUSED`.
-7. Every QUIC dial-back is refused. Client's QUIC addresses stay
-   `unknown` indefinitely.
+It does **not** hold for **freshly started servers** — testbed
+containers, CI environments, newly deployed infrastructure:
 
-### Why This Is a Limitation, Not a Bug
+1. Server starts. Main host counter has zero history → `Probing`
+   state.
+2. The v2 `dialerHost` inherits the counter in read-only mode.
+   Read-only `getFilterState()` returns `Blocked` whenever the
+   state is anything other than `Allowed`:
 
-The detector works correctly for its intended purpose: it accurately
-reflects that the server hasn't seen successful UDP traffic. The problem is
-that "no UDP traffic on a controlled Docker network" means something
-different than "UDP is blocked by the network." The detector can't
-distinguish between these two cases.
+   ```go
+   if d.readOnly {
+       if f.State() != blackHoleStateAllowed {
+           return blackHoleStateBlocked
+       }
+       return blackHoleStateAllowed
+   }
+   ```
+3. On an isolated testbed network the main host has few or no
+   outbound UDP dials (no bootstrap nodes, no DHT walks). The
+   counter does not collect the N=100 results it needs to
+   transition to `Allowed` and stays in `Probing` indefinitely.
+4. Every AutoNAT v2 QUIC dial-back request reaches the
+   `dialerHost`. `FilterAddrs()` asks the read-only detector for
+   UDP state → returns `Blocked` because the main host state is
+   still `Probing` → UDP addresses filtered out.
+5. The dialerHost has nothing to dial, responds `E_DIAL_REFUSED`
+   to the client.
+6. Every QUIC dial-back is refused. The client's QUIC addresses
+   stay unreachable indefinitely.
 
-This is unlikely to cause issues on live networks where nodes are
-long-running and have diverse connection patterns. It specifically affects:
+This is distinct from the scenario where the main host's counter
+has actively entered `Blocked` after 100 failed dials — on isolated
+testbeds the counter never gets that far. It is stuck in `Probing`,
+and read-only mode makes that indistinguishable from `Blocked` for
+the dialerHost.
+
+### Why read-only mode exists (and what it got wrong)
+
+Read-only mode has two properties:
+- **Does not record outcomes into the shared counter** — prevents
+  AutoNAT-specific failure patterns (e.g., clients behind symmetric
+  NAT) from polluting the main host's view of UDP viability. This
+  was the same problem that motivated the v1 fix in PR #2529. This
+  property is correct.
+- **Treats non-`Allowed` as `Blocked`** — the code comment
+  describes this as "refusing requests when black hole state is
+  unknown." This is the root cause of the bug. For AutoNAT v2,
+  "unknown" should *not* mean "refuse"; every dial-back carries
+  information the client needs regardless of the main host's
+  current UDP assessment.
+
+### When this manifests
+
+The detector itself reflects the main host's UDP history accurately.
+The practical problem is that read-only mode reinterprets "we haven't
+learned yet" (`Probing`) as "UDP is broken" (`Blocked`) — conflating
+*unknown* with *bad*. That conflation is harmless on nodes where the
+main host reliably reaches `Allowed` shortly after startup, and
+harmful on nodes where it does not.
+
+This specifically affects:
 
 - **Testbed environments** with isolated Docker networks
 - **CI/CD pipelines** with short-lived server instances
@@ -186,14 +242,15 @@ libp2p.IPv6BlackHoleSuccessCounter(nil),
 
 Setting the main host's counter to `nil` means:
 
-1. The main host has **no** black hole detector — it will attempt all UDP
-   dials regardless of history.
-2. When `makeAutoNATV2Host()` copies `cfg.UDPBlackHoleSuccessCounter`
-   (now `nil`), the `dialerHost` also gets `nil`.
-3. The `dialerHost`'s swarm creates a fresh independent counter in
-   `Probing` state. Combined with `WithReadOnlyBlackHoleDetector()`, the
-   read-only probing state allows dials through (only `Blocked` state
-   refuses dials, not `Probing`).
+1. The main host has **no** black hole detector — it will attempt all
+   UDP dials regardless of history.
+2. `makeAutoNATV2Host()` copies `cfg.UDPBlackHoleSuccessCounter` (now
+   `nil`) into the dialerHost's config, so the dialerHost also has a
+   nil counter.
+3. In `FilterAddrs()`, the filter is gated on
+   `if d.udp != nil && hasUDP` — a nil counter bypasses filtering
+   entirely, regardless of read-only mode. UDP addresses are never
+   filtered out of dial attempts.
 4. QUIC dial-backs work immediately.
 
 ### Tradeoff
@@ -207,39 +264,61 @@ network, this is acceptable. On a production node this would be undesirable
 
 ## Impact on AutoNAT Results
 
-When the black hole detector blocks QUIC dial-back, the server responds
-to the client with `E_DIAL_REFUSED` for the QUIC address. From the
-client's perspective:
+When the black hole detector blocks QUIC dial-back, the server
+responds to the client with `E_DIAL_REFUSED` for the QUIC address.
+From the client's perspective:
 
-| Scenario | Server behavior | Client sees | Result |
-|----------|----------------|-------------|--------|
-| Detector allows QUIC | Server dials back, succeeds | REACHABLE | Correct |
-| Detector allows QUIC | Server dials back, NAT blocks | UNREACHABLE | Correct |
-| **Detector blocks QUIC** | **Server refuses to dial** | **UNREACHABLE** | **False negative** |
+| Scenario | Server behavior | Effect on client state |
+|----------|----------------|------------------------|
+| Detector allows QUIC | Server dials back, succeeds | Address confirmed Reachable |
+| Detector allows QUIC | Server dials back, NAT blocks (`E_DIAL_ERROR`) | Counts as failure; enough of these → Unreachable |
+| **Detector blocks QUIC** | **Server refuses to dial (`E_DIAL_REFUSED`)** | **Refusal discarded from confidence; probing paused after 5 consecutive refusals; address stays `Unknown`** |
 
-This is a **false negative**, not merely "unknown." The server actively
-reports the address as unreachable because it refused to attempt the
-dial-back. The client counts this as a failure toward its confidence
-target. With enough affected servers, a genuinely QUIC-reachable address
-may accumulate 3 net failures and be declared unreachable.
+The v2 reachability tracker handles `E_DIAL_REFUSED` via
+`AddRefusal()`, which only updates a `consecutiveRefusals` counter.
+It does **not** add an outcome to the confidence window and does
+**not** flip state to Unreachable:
+
+```go
+// p2p/host/basic/addrs_reachability_tracker.go
+if res.AllAddrsRefused {
+    if s, ok := m.statuses[firstAddrKey]; ok {
+        s.AddRefusal(now)
+    }
+    return   // returns without calling AddOutcome
+}
+```
+
+After `maxConsecutiveRefusals` (=5) consecutive refusals, probing
+for that address is paused for `recentProbeInterval` (=10 min); on
+resume, if every reachable server still refuses, the cycle repeats.
+
+The resulting failure mode is **"address stuck in `Unknown`"**, not
+**"address reported Unreachable"**. This is an important distinction:
+
+- `E_DIAL_REFUSED` does not erode confidence
+- State does not flip to Private/Unreachable
+- Downstream consumers that require a positive reachability signal
+  simply never receive one
 
 ### Why This Matters
 
-The false negative is particularly insidious because:
+1. **It's server-side, not client-side** — the client can't
+   distinguish "server refused because of its own detector" from any
+   other reason the server might refuse. Both look like
+   `E_DIAL_REFUSED`.
 
-1. **It's server-side, not client-side** — the client can't distinguish
-   "server refused because of its own detector" from "server tried and
-   NAT blocked it." Both look like `E_DIAL_REFUSED`.
+2. **It's transient for healthy nodes** — once the server's main
+   host accumulates enough successful outbound UDP, the counter
+   enters `Allowed` state and the read-only filter on the dialerHost
+   stops returning `Blocked`. On Kubo nodes with diverse traffic this
+   typically happens within minutes of startup.
 
-2. **It's transient** — once the server accumulates enough successful
-   UDP connections (from regular traffic, not AutoNAT), the detector
-   enters `Allowed` state and QUIC dial-backs start working. On Kubo
-   nodes this typically happens within minutes of startup.
-
-3. **It's testbed-specific in severity** — isolated Docker servers with
-   no background UDP traffic stay in `Blocked` state indefinitely. On
-   the live IPFS network, servers are long-running Kubo nodes with
-   healthy UDP counters.
+3. **It's testbed-specific in severity** — on isolated Docker
+   servers with no background UDP traffic the main host never leaves
+   `Probing`, so the dialerHost's read-only filter never stops
+   returning `Blocked`. The client can't find any v2 server that
+   will confirm the QUIC address.
 
 4. **TCP is unaffected** — the detector only gates UDP/QUIC. TCP
    dial-backs always proceed regardless of the detector state.

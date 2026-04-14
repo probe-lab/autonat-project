@@ -7,8 +7,7 @@
 3. [Findings](#findings)
 4. [Cross-Implementation Comparison](#cross-implementation-comparison)
 5. [Recommendations](#recommendations)
-6. [Testbed](#testbed)
-7. [Glossary](#glossary)
+6. [Glossary](#glossary)
 
 ---
 
@@ -75,7 +74,7 @@ This study evaluates how libp2p's NAT reachability stack — AutoNAT
 v1, AutoNAT v2, and the subsystems that consume their signals (DHT,
 AutoRelay, address management) — behaves across go-libp2p,
 rust-libp2p, and js-libp2p. In [controlled testbed
-conditions](#testbed), AutoNAT v2 correctly determines reachability
+conditions](testbed.md), AutoNAT v2 correctly determines reachability
 for all standard NAT types (**0% FNR/FPR**, ~6s convergence). However,
 we identified **5 findings** where the broader reachability stack
 breaks — in how implementations wire the protocol results into
@@ -86,10 +85,11 @@ for how each finding manifests per implementation.
 
 The most impactful finding is that **global (v1) and per-address (v2)
 reachability can disagree, and there is no canonical way to reconcile
-them**. In go-libp2p — the most relevant implementation since Kubo
-uses it to participate in the IPFS Amino DHT — DHT and AutoRelay
-subscribe to v1's global flag and do not consume v2's per-address
-signal. Both protocols select servers from
+them**. In go-libp2p, DHT and AutoRelay subscribe to v1's global
+flag and do not consume v2's per-address signal. This directly
+impacts Kubo, for instance, which relies on go-libp2p's AutoNAT
+signal to decide DHT server participation (see
+[Nebula crawl analysis](nebula-autonat-analysis.md)). Both protocols select servers from
 the same peer pool, but v1 counts all non-success results (including
 timeouts from honest-but-unreliable servers) as evidence against
 reachability, while v2 discards them entirely. This means **v1 can
@@ -237,9 +237,30 @@ For the full protocol walkthrough, see [autonat-v2.md](autonat-v2.md).
 
 Each finding below follows a Problem / Impact / Solution structure and
 links to a dedicated deep-dive document for full root-cause analysis.
-The testbed methodology and full numerical results are in
-[testbed.md](testbed.md) and
-[measurement-results.md](measurement-results.md).
+
+### Methodology
+
+Findings were explored and validated using a Docker-based testbed with
+configurable NAT types (iptables), transport protocols (TCP/QUIC),
+network conditions (latency, packet loss), and server configurations
+(reliable/unreliable, server count). Clients run go-libp2p (primary),
+rust-libp2p, or js-libp2p behind a NAT router; servers run go-libp2p
+with OTel instrumentation. Each scenario produces OTel traces analyzed
+for FNR, FPR, convergence time, and oscillation.
+
+**183 runs** across 7 scenario files, covering 5 NAT types, 2
+transports, latency/loss injection, v1/v2 oscillation comparison
+(20 runs), and cross-implementation validation.
+
+Key results: **0% FNR/FPR** for all non-edge-case NAT types, ~6s
+convergence, v1 oscillates in 55% of runs with unreliable servers
+while v2 is stable in all 20. Both TCP and QUIC maintain correctness
+under packet loss with no consistent convergence advantage for either.
+
+For full details:
+- [testbed.md](testbed.md) — architecture, NAT rules, scenario parameters
+- [measurement-results.md](measurement-results.md) — all results, trace timelines, convergence heatmaps
+- [scenario-schema.md](scenario-schema.md) — YAML scenario format
 
 ### Finding 1: Inconsistent Global vs Per-Address Reachability (v1 vs v2)
 
@@ -326,7 +347,7 @@ without defining the reduction could encounter the same
 inconsistency.
 
 **Impact:** Every go-libp2p deployment that relies on DHT participation
-or relay decisions experiences intermittent routing degradation. DHT
+or relay decisions may experience intermittent routing degradation. DHT
 queries fail when v1 flips the node to client mode; direct connections
 are replaced by higher-latency relay paths; the cycle repeats as v1
 flips back. Validator networks see higher-latency relay paths during
@@ -387,49 +408,76 @@ leaving behavior undefined is the root cause.
 
 **Category:** go-libp2p | **Severity:** Medium
 
-**Problem:** This is a **server-side** issue in go-libp2p. The UDP
-black hole detector is a performance optimization that tracks UDP
-connection success rates and blocks outbound UDP dials when too few
-succeed — protecting nodes on networks that silently drop UDP traffic.
-The AutoNAT v2 `dialerHost` (the internal host that performs dial-backs)
-shares the main host's `UDPBlackHoleSuccessCounter`. On fresh servers
-with zero UDP history, the counter enters `Blocked` state. When a client
-requests a QUIC address test, the server's `dialerHost` refuses to
-attempt the dial-back and responds with `E_DIAL_REFUSED`. From the
-client's perspective, this is indistinguishable from "the server tried
-and my NAT blocked it" — both count as failures toward the confidence
-target. The result is a **false negative**: a genuinely QUIC-reachable
-address is reported as unreachable.
+**Problem:** go-libp2p's UDP black hole detector is a performance
+optimization that filters outbound UDP/QUIC dials when the node's
+recent UDP success rate is too low. The counter has three states:
+`Probing` (initial, gathering data), `Allowed` (proven working),
+`Blocked` (proven dead). In the **main host**, `Probing` lets UDP
+dials through so the detector can learn.
 
-**Impact:** Every go-libp2p AutoNAT v2 server is affected after startup,
-until the main host accumulates enough successful UDP connections for the
-counter to reach `Allowed` state. On long-running Kubo nodes with
-diverse traffic this happens within minutes; on freshly deployed
-infrastructure or isolated testbeds, the counter stays `Blocked`
-indefinitely. TCP addresses are unaffected — the detector only gates
-UDP/QUIC.
+The AutoNAT v2 `dialerHost` — the internal host that performs
+dial-backs — shares the main host's counter in **read-only mode**.
+Read-only mode redefines the filter semantics: any state other than
+`Allowed` is treated as `Blocked`. Since the main host's counter starts 
+in `Probing` (zero history), until the main host accumulates enough outbound 
+UDP dials to move the counter to `Allowed` (≥5 successes in a 100-dial window), the
+`dialerHost` filters UDP addresses out of every QUIC dial-back and
+responds with `E_DIAL_REFUSED`.
 
-rust-libp2p and js-libp2p do not implement a black hole detector, so
-they are not affected by this specific issue.
+The net effect is that the v2 server cannot prove a client's QUIC
+address reachable. `E_DIAL_REFUSED` carries a property of the
+**server's** UDP history, not the client's NAT. AutoNAT v2's
+reachability tracker discards refusals from confidence outcomes
+(see Finding 1: `E_DIAL_REFUSED` does not erode confidence and does
+not flip state to Unreachable), but repeated refusals also prevent
+the address from accumulating positive evidence. The client's QUIC
+addresses remain **stuck in `Unknown`** until it finds a server
+whose main host has reached `Allowed` state.
 
-**Solution:** Disable the UDP black hole detector on `dialerHost`,
-matching the existing v1 fix
-([PR #2529](https://github.com/libp2p/go-libp2p/pull/2529)). The
-`dialerHost` only dials addresses that clients explicitly request to
-test — the dial result itself is the information the client needs, so
-the detector should not suppress it (5 fix options analyzed in the
-full analysis below).
+**Impact:** On long-running Kubo nodes with diverse traffic, the
+main host's counter reaches `Allowed` within minutes of startup, so
+affected servers quickly recover and dial-back works. The failure
+surfaces on **freshly deployed infrastructure, low-traffic nodes,
+and isolated testbeds**, where the main host does not generate
+enough successful outbound UDP to leave `Probing`. When every
+reachable v2 server shares the same condition (the typical testbed
+case), the client never confirms its QUIC addresses — they stay
+`Unknown` indefinitely, even though the node is genuinely reachable.
 
-**Expected outcome:** QUIC addresses correctly detected as reachable
-on fresh go-libp2p servers without waiting for the main host's UDP
-counter to accumulate history.
+This is not a false *Unreachable* verdict — confidence is not
+eroded and state is not flipped to Private. It is a **failure to
+confirm**: a reachable address cannot be verified, and therefore
+cannot be used to drive downstream subsystems that require a
+positive reachability signal (e.g., DHT server-mode selection via
+Finding 1's wiring gap).
+
+rust-libp2p and js-libp2p do not implement a black hole detector and
+are not affected. TCP addresses are unaffected — the detector only
+gates UDP/QUIC.
+
+**Solution:** Remove the black hole detector from the v2 `dialerHost`
+entirely, matching the v1 fix applied in
+[PR #2529](https://github.com/libp2p/go-libp2p/pull/2529). V1 solved
+the same class of issue by passing `nil` counters to the v1 dialer
+so the detector never runs there; v2 should do the same instead of
+relying on read-only mode. The `dialerHost` only dials addresses that
+clients explicitly request to test — the dial result itself is the
+information the client needs, so the detector should not suppress
+it. Alternative fixes (fix read-only to treat `Probing` as `Allowed`,
+seed the counter, etc.) are analyzed in the full analysis; all
+preserve avoidable complexity compared to the v1 approach.
+
+**Expected outcome:** QUIC addresses correctly verified on fresh
+go-libp2p servers without waiting for the main host's UDP counter
+to warm up.
 
 **Code-level evidence:**
 
-- **`dialerHost` shares the main host's UDP counter** (the bug): [`go-libp2p/config/config.go#L313-L314`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/config/config.go#L313-L314) — `cfg.UDPBlackHoleSuccessCounter` is passed through to the v2 dialerHost
-- **`BlackHoleSuccessCounter` state machine** with `Probing`/`Allowed`/`Blocked` states: [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L45-L62`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/net/swarm/black_hole_detector.go#L45-L62)
-- **`FilterAddrs` removes UDP addresses when state is `Blocked`** (the line that turns the false negative on): [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L138-L175`](https://github.com/libp2p/go-libp2p/blob/v0.47.0/p2p/net/swarm/black_hole_detector.go#L138-L175)
-- **Existing v1 fix to mirror**: [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529) — disables the detector for v1's dialerHost by passing `nil` counters; v2 needs the same treatment
+- **`dialerHost` shares the main host's UDP counter in read-only mode:** [`go-libp2p/config/config.go#L240-L246`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/config/config.go#L240-L246) — `cfg.UDPBlackHoleSuccessCounter` passed through plus `swarm.WithReadOnlyBlackHoleDetector()`
+- **Initial state is `Probing`** (zero value of the state enum): [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L11-L17`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/net/swarm/black_hole_detector.go#L11-L17)
+- **Read-only mode treats non-`Allowed` as `Blocked`** (the root cause): [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L254-L262`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/net/swarm/black_hole_detector.go#L254-L262)
+- **`FilterAddrs` drops UDP addresses when filter state is `Blocked`**: [`go-libp2p/p2p/net/swarm/black_hole_detector.go#L184-L237`](https://github.com/libp2p/go-libp2p/blob/v0.48.0/p2p/net/swarm/black_hole_detector.go#L184-L237)
+- **Existing v1 fix to mirror**: [PR #2529](https://github.com/libp2p/go-libp2p/pull/2529) — removes the detector entirely from the v1 dialer by passing `nil` counters.
 
 **Testbed reproduction:** The testbed disables the black hole detector on servers via `libp2p.UDPBlackHoleSuccessCounter(nil)` as a workaround (see [udp-black-hole-detector.md § Testbed Workaround](udp-black-hole-detector.md#testbed-workaround)). Without this workaround, all QUIC scenarios in `matrix.yaml` fail with `E_DIAL_REFUSED`.
 
@@ -732,32 +780,6 @@ and includes the proposed fix.
 | [go-libp2p](https://github.com/libp2p/go-libp2p) | Symmetric NAT: `EvtNATDeviceTypeChanged` emitted but has zero subscribers | F4 | Wire `getNATType()` detection (`EndpointDependent`) into either lowering `ActivationThresh` or emitting UNREACHABLE directly. Testbed confirms `ActivationThresh=1` produces correct UNREACHABLE. |
 | [rust-libp2p](https://github.com/libp2p/rust-libp2p) | Identify skips address translation when TCP port reuse silently falls back to ephemeral | F5 | TCP transport should construct the connection with `PortUse::New` when `bind()` falls back to ephemeral (compare `stream.local_addr()` against listen port). No public API change; fix contained in `libp2p-tcp`. |
 | [js-libp2p](https://github.com/libp2p/js-libp2p) | AutoNAT v2 emits no reachability events to consumers | F4 | Expose v2 probe results via EventEmitter or observable. Currently tracked internally in `dialResults` Map but not surfaced. Related: [js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620) (TCP observed addrs dropped). |
-
----
-
-## Testbed
-
-Findings were explored and validated using a Docker-based testbed with
-configurable NAT types (iptables), transport protocols (TCP/QUIC),
-network conditions (latency, packet loss), and server configurations
-(reliable/unreliable, server count). Clients run go-libp2p (primary),
-rust-libp2p, or js-libp2p behind a NAT router; servers run go-libp2p
-with OTel instrumentation. Each scenario produces OTel traces analyzed
-for FNR, FPR, convergence time, and oscillation.
-
-**183 runs** across 7 scenario files, covering 5 NAT types, 2
-transports, latency/loss injection, v1/v2 oscillation comparison
-(20 runs), and cross-implementation validation.
-
-Key results: **0% FNR/FPR** for all non-edge-case NAT types, ~6s
-convergence, v1 oscillates in 55% of runs with unreliable servers
-while v2 is stable in all 20. Both TCP and QUIC maintain correctness
-under packet loss with no consistent convergence advantage for either.
-
-For full details:
-- [testbed.md](testbed.md) — architecture, NAT rules, scenario parameters
-- [measurement-results.md](measurement-results.md) — all results, trace timelines, convergence heatmaps
-- [scenario-schema.md](scenario-schema.md) — YAML scenario format
 
 ---
 
