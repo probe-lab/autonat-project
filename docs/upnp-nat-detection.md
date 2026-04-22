@@ -101,7 +101,7 @@ correct external port, and AutoNAT v2 probes exactly that port.
 
 ---
 
-## AutoNAT v1 Does Not Recover After UPnP Port Remapping
+## Issue: AutoNAT v1 Does Not Recover After UPnP Port Remapping
 
 ### Observed behaviour
 

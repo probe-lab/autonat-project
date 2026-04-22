@@ -24,21 +24,20 @@ that doesn't know it's behind NAT may advertise unreachable addresses,
 participate as a DHT server when it can't serve queries, or fail to
 reserve relay connections it needs.
 
-libp2p's **AutoNAT** protocol solves this by having peers test whether a
+libp2p's [**AutoNAT**](autonat-v2.md) protocol solves this by having peers test whether a
 node's addresses are actually dialable from outside. AutoNAT v1 uses a
 simple majority vote; AutoNAT v2 (specified 2023, deployed 2024)
 improves on this with per-address testing and nonce-based verification.
 
-Real libp2p deployments have reported AutoNAT-adjacent connectivity
-issues that motivated this investigation; see
-[Appendix A](#appendix-a-production-reports-from-obol-and-avail).
-This project investigates AutoNAT v2 across go-libp2p, rust-libp2p, and
+Despite widespread use of libp2p's AutoNAT technique across libp2p implementations and libp2p-based networks, there hasn't been a targeted, in-depth analysis of AutoNAT's performance and effectiveness. This project investigates AutoNAT v2 across go-libp2p, rust-libp2p, and
 js-libp2p to evaluate whether it solves the reachability detection
-problem. A companion [Nebula crawl analysis](nebula-autonat-analysis.md)
+problem. . A companion [Nebula crawl analysis](nebula-autonat-analysis.md)
 of the IPFS Amino DHT confirms that DHT-mode flipping exists in
 production (2–12% per Kubo version), but most of it correlates with
 disconnections and restarts. Only ~0.39% of stably-reachable peers
 show flipping that cannot be explained by network events.
+
+For acronyms throughout this report, please refer to the [Glossary](#glossary) section at the end.
 
 ### Scope
 
@@ -135,32 +134,32 @@ For the full mapping/filtering taxonomy
 AutoNAT does not operate in isolation. It is part of a protocol stack
 where each component handles a different aspect of connectivity:
 
-**Identify** (`/ipfs/id/1.0.0`) — When two peers connect, they exchange
+**[Identify](https://github.com/libp2p/specs/blob/master/identify/README.md)** (`/ipfs/id/1.0.0`) — When two peers connect, they exchange
 metadata including the `ObservedAddr` — the address each peer sees the
 other connecting from. This is how a node discovers its external address
 (the NAT-mapped public IP:port). Identify is the **input** to AutoNAT:
 the observed addresses become candidates for reachability testing.
 
-**AutoNAT v1** (`/libp2p/autonat/1.0.0`) — The original reachability
+**[AutoNAT v1](https://github.com/libp2p/specs/blob/master/autonat/README.md)** (`/libp2p/autonat/1.0.0`) — The original reachability
 protocol. A node asks a random connected peer to dial it back. The peer
 reports success or failure. v1 produces a **global** verdict
 (Public/Private/Unknown) based on a majority vote across recent probes.
 
-**AutoNAT v2** (`/libp2p/autonat/2/dial-request`,
+**[AutoNAT v2](https://github.com/libp2p/specs/blob/master/autonat/autonat-v2.md)** (`/libp2p/autonat/2/dial-request`,
 `/libp2p/autonat/2/dial-back`) — The improved protocol tested in this
 report. Tests **individual addresses** with nonce-based verification and
 amplification protection. Produces per-address reachability.
 
-**Circuit Relay v2** (`/libp2p/circuit/relay/0.2.0/hop`,
+**[Circuit Relay v2](https://github.com/libp2p/specs/blob/master/relay/circuit-v2.md)** (`/libp2p/circuit/relay/0.2.0/hop`,
 `/libp2p/circuit/relay/0.2.0/stop`) — When a node is determined to be
 behind NAT, it reserves a relay slot on a public node. Other peers
 connect through the relay as a fallback.
 
-**DCUtR** (`/libp2p/dcutr`) — Direct Connection Upgrade through Relay.
+**[DCUtR](https://github.com/libp2p/specs/blob/master/relay/DCUtR.md)** (`/libp2p/dcutr`) — Direct Connection Upgrade through Relay.
 After connecting via relay, peers attempt hole punching to establish a
 direct connection, eliminating the relay overhead.
 
-**Kademlia DHT** — Uses the reachability signal to decide server vs
+**[Kademlia DHT](https://github.com/libp2p/specs/blob/master/kad-dht/README.md)** — Uses the reachability signal to decide server vs
 client mode. Server-mode nodes accept and serve DHT queries; client-mode
 nodes only issue queries. The DHT subscribes to AutoNAT v1's global
 flag (not v2's per-address signal).
@@ -388,6 +387,10 @@ leaving behavior undefined is the root cause.
 **[Testbed reproduction](measurement-results.md#6-v1v2-gap):** `v1-v2-gap.yaml` scenario — 20 runs comparing v1 and v2 under unreliable servers. v1 oscillates in 55% of runs; v2 is stable in all 20.
 
 **Full analysis:** [v1-v2-analysis.md](v1-v2-analysis.md) — state transitions, wiring gap, fix options, and testbed performance data
+
+See also [upnp-nat-detection.md](upnp-nat-detection.md#issue-autonat-v1-does-not-recover-after-upnp-port-remapping)
+for the same pattern observed on a home router using UPnP — v1 stuck in
+private while v2 confirms reachability via UPnP-mapped ports.
 
 ### Finding 2: UDP Black Hole Detector Blocks QUIC Dial-Back
 
@@ -785,3 +788,23 @@ and includes the proposed fix.
 | **FNR** | False Negative Rate | Fraction of reachable nodes incorrectly classified as unreachable |
 | **FPR** | False Positive Rate | Fraction of unreachable nodes incorrectly classified as reachable |
 | **DCUtR** | Direct Connection Upgrade through Relay | libp2p hole punching protocol |
+
+## Known Issues with libp2p-based Networks
+
+Some libp2p-based projects have consistently reported **connectivity issues for
+NATed nodes**, which we are trying to address as part of this study:
+
+- **Obol Network** ([Charon](https://github.com/ObolNetwork/charon),
+go-libp2p v0.47.0): Uses AutoNAT for reachability detection in
+distributed validator nodes behind home or corporate NAT. Operators
+reported NAT-related connectivity issues, although these were directly related
+to hole punching and relay behavior, not to AutoNAT v2 specifically.
+See [Obol/Charon GitHub issues](https://github.com/ObolNetwork/charon/issues/4233) for details.
+- **Avail Network** ([avail-light](https://github.com/availproject/avail-light),
+rust-libp2p v0.55.0): Light clients reported persistent
+“autonat-over-quic libp2p errors” starting from v1.7.4, caused by
+QUIC connection reuse producing false positives
+([rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900),
+since fixed by [PR #4568](https://github.com/libp2p/rust-libp2p/pull/4568)).
+However, Avail **disabled AutoNAT entirely** in v1.13.2 (September 2025) before the upstream fix shipped, forcing operators to manually
+set `-external-address` for DHT server mode.
