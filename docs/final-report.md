@@ -29,26 +29,8 @@ node's addresses are actually dialable from outside. AutoNAT v1 uses a
 simple majority vote; AutoNAT v2 (specified 2023, deployed 2024)
 improves on this with per-address testing and nonce-based verification.
 
-However, libp2p-based projects report **connectivity issues for
-NATed nodes** that motivated this investigation:
-
-- **Obol Network** ([Charon](https://github.com/ObolNetwork/charon),
-  go-libp2p v0.47.0): Uses AutoNAT for reachability detection in
-  distributed validator nodes behind home or corporate NAT. Operators
-  reported NAT-related connectivity issues, although these were directly related
-  to hole punching and relay behavior, not to AutoNAT v2 specifically.
-  See [Obol/Charon GitHub issues](https://github.com/ObolNetwork/charon/issues/4233) for details.
-
-- **Avail Network** ([avail-light](https://github.com/availproject/avail-light),
-  rust-libp2p v0.55.0): Light clients reported persistent
-  "autonat-over-quic libp2p errors" starting from v1.7.4, caused by
-  QUIC connection reuse producing false positives
-  ([rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900),
-  since fixed by [PR #4568](https://github.com/libp2p/rust-libp2p/pull/4568)).
-  However, Avail **disabled AutoNAT entirely** in v1.13.2 (September
-  2025) before the upstream fix shipped, forcing operators to manually
-  set `--external-address` for DHT server mode.
-
+Real libp2p deployments have reported AutoNAT-adjacent connectivity issues in production that brought
+motivation for this investigation; see [Appendix A](#appendix-a-production-reports-from-obol-and-avail).
 This project investigates AutoNAT v2 across go-libp2p, rust-libp2p, and
 js-libp2p to evaluate whether it solves the reachability detection
 problem. A companion [Nebula crawl analysis](nebula-autonat-analysis.md)
