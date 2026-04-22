@@ -24,7 +24,7 @@ that doesn't know it's behind NAT may advertise unreachable addresses,
 participate as a DHT server when it can't serve queries, or fail to
 reserve relay connections it needs.
 
-libp2p's [**AutoNAT**](autonat-v2.md) protocol solves this by having peers test whether a
+libp2p's [**AutoNAT**](https://github.com/libp2p/specs/tree/master/autonat) protocol solves this by having peers test whether a
 node's addresses are actually dialable from outside. AutoNAT v1 uses a
 simple majority vote; AutoNAT v2 (specified 2023, deployed 2024)
 improves on this with per-address testing and nonce-based verification.
