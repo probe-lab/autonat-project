@@ -101,7 +101,7 @@ correct external port, and AutoNAT v2 probes exactly that port.
 
 ---
 
-## Issue 3: AutoNAT v1 Does Not Recover After UPnP Port Remapping
+## Issue: AutoNAT v1 Does Not Recover After UPnP Port Remapping
 
 ### Observed behaviour
 
@@ -155,7 +155,7 @@ In the EIM case, v1 fires `public` at ~3s because port 4001 is directly reachabl
 
 ### Upstream gap
 
-This is a known design gap in go-libp2p: v2 results do not feed back into the v1 global reachability flag. See [GitHub issue #60](https://github.com/probe-lab/autonat-project/issues/60) for tracking.
+This is a known design gap in go-libp2p: v2 results do not feed back into the v1 global reachability flag. See [Finding #1](final-report.md#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2) for the full analysis and proposed fix.
 
 The correct long-term fix is for go-libp2p to derive `EvtLocalReachabilityChanged` from v2 per-address results, so that AutoRelay, NATService, and DHT use the more precise v2 signal.
 
@@ -409,7 +409,7 @@ within 13–14 seconds. The reachability timeline shows the expected v1/v2 gap:
 2. UPnP external address discovered at ~5s (`/ip4/79.153.197.240`)
 3. AutoNAT v2 probes begin, first probe returns at ~14s
 4. v1 fires `REACHABILITY CHANGED: public` at ~5s, then flips to `private` at ~19s
-   when port 4001 fails — the oscillation pattern from Finding #2
+   when port 4001 fails — the oscillation pattern from [Finding #1](final-report.md#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2)
 
 TCP reachability is confirmed on UPnP-mapped port 4001. QUIC on port 4001 is
 consistently **unreachable** across all 3 runs — the router's UPnP maps TCP but
@@ -553,8 +553,7 @@ the first to exercise the full UPnP → AutoNAT v2 → DHT chain in rust-libp2p.
 \* After enabling `rsa` feature. Without it, 0/4 peers reachable.
 
 These results are incorporated into the
-[final report Finding #7](final-report.md#finding-7-cross-implementation-differences-and-adoption)
-cross-implementation matrix.
+[cross-implementation comparison](cross-implementation-comparison.md).
 
 ### Findings
 
