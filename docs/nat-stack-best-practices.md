@@ -50,23 +50,43 @@ v1-alone (skip `EnableAutoNATv2()`) or v1+v2.
 
 ### 3. Wire DHT
 
-DHT subscribes to `EvtLocalReachabilityChanged` (v1) — not v2's
-`EvtHostReachableAddrsChanged`. So v1 oscillation can flip DHT mode
-even when v2 has confirmed reachability. See
-[F1](final-report.md#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2).
+`go-libp2p-kad-dht` decides server vs client mode by subscribing to
+`EvtLocalReachabilityChanged`, which is produced by v1 only. v2's
+per-address signal (`EvtHostReachableAddrsChanged`) is not consumed.
+Under an unreliable peer pool, v1 can oscillate between
+`Public`/`Private`/`Unknown` and flip the DHT mode even when v2 has
+confirmed an address is reachable — this is the most impactful
+issue documented in the report and worth reading the full analysis
+in
+[Finding 1](final-report.md#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2)
+before choosing a wiring.
 
-Options:
+**Recommended — publish a v2-derived reachability event.** The DHT
+subscribes to whatever is on the event bus; you can write a small
+reducer that listens for `EvtHostReachableAddrsChanged`, derives a
+global verdict from v2's per-address output, and emits
+`EvtLocalReachabilityChanged` itself. `dht.Mode(dht.ModeAuto)` then
+consumes your v2-derived signal instead of v1's oscillating one. A
+reasonable reduction: emit `Public` if any v2-confirmed address is
+reachable, `Private` if all v2 addresses are unreachable, `Unknown`
+otherwise. The DHT has no public `SetMode()` method — mode changes
+only happen via `ModeAuto` observing the reachability event, which
+is why a reducer works.
 
-- **AutoNAT-driven (default):** `dht.Mode(dht.ModeAuto)` — switches
-  with v1's verdict; vulnerable to oscillation.
+Other options, ordered by how much they avoid the v1 oscillation:
+
 - **Force Server:** `dht.Mode(dht.ModeServer)` when creating the DHT —
-  ignores AutoNAT, always serves. Use when you know the node is
+  ignores AutoNAT, always serves. Use when the node is known to be
   reachable (static IP, manual port-forward, confirmed UPnP).
 - **Force Client:** `dht.Mode(dht.ModeClient)` — never serves.
   Appropriate for NAT'd peers that won't get a reachable address.
-- **DIY:** subscribe to `EvtHostReachableAddrsChanged` yourself,
-  start the DHT in `ModeClient`, and call `dht.SetMode()` when v2
-  confirms an address.
+- **ModeAutoServer:** `dht.Mode(dht.ModeAutoServer)` — serves by
+  default; only switches to client when reachability is explicitly
+  `Private`. Optimistic; still subject to v1's `Private` verdicts
+  that may oscillate.
+- **Plain ModeAuto without a reducer:** `dht.Mode(dht.ModeAuto)`
+  alone — fully v1-driven, vulnerable to oscillation. Use when your
+  peer pool is known-reliable or occasional flipping is acceptable.
 
 ### 4. Detect NAT mapping type and pick a fallback
 
@@ -76,7 +96,7 @@ determines which fallbacks are available. go-libp2p's
 observed-port patterns and publishes `EvtNATDeviceTypeChanged` roughly
 60 s after it has seen enough peers. **No go-libp2p subsystem consumes
 this event today** — see
-[F4](final-report.md#finding-4-symmetric-nat-missing-signal), so your
+[Finding 4: Symmetric NAT missing signal](final-report.md#finding-4-symmetric-nat-missing-signal), so your
 app has to subscribe itself and branch on the result:
 
 ```go
@@ -274,7 +294,7 @@ v4 and v6 separately.
 - **Startup race:** dialing outbound before the `NewListenAddr` event
   causes TCP port-reuse to silently fall back to an ephemeral port,
   making AutoNAT report UNREACHABLE for TCP. See
-  [F5](final-report.md#finding-5-rust-libp2p-tcp-port-reuse-incorrect-metadata).
+  [Finding 5: rust-libp2p TCP port-reuse incorrect metadata](final-report.md#finding-5-rust-libp2p-tcp-port-reuse-incorrect-metadata).
   Wait for `NewListenAddr` before outbound dials.
 - **Older versions:** a QUIC false-positive bug in pre-[#4568](https://github.com/libp2p/rust-libp2p/pull/4568)
   builds caused AutoNAT to wrongly report reachable on reused
@@ -320,7 +340,7 @@ are separate plugins and you choose which to register. But there are
 two limitations to know:
 
 - **v2 emits no reachability events apps can subscribe to** today
-  ([F4](final-report.md#finding-4-symmetric-nat-missing-signal)).
+  ([Finding 4: Symmetric NAT missing signal](final-report.md#finding-4-symmetric-nat-missing-signal)).
   Running v2-only means you have no reactive signal to act on at the
   app level. If you need reactive reachability in js, you are on v1
   today. Helia is v1-only for this reason.
