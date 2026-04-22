@@ -29,8 +29,9 @@ node's addresses are actually dialable from outside. AutoNAT v1 uses a
 simple majority vote; AutoNAT v2 (specified 2023, deployed 2024)
 improves on this with per-address testing and nonce-based verification.
 
-Real libp2p deployments have reported AutoNAT-adjacent connectivity issues in production that brought
-motivation for this investigation; see [Appendix A](#appendix-a-production-reports-from-obol-and-avail).
+Real libp2p deployments have reported AutoNAT-adjacent connectivity
+issues that motivated this investigation; see
+[Appendix A](#appendix-a-production-reports-from-obol-and-avail).
 This project investigates AutoNAT v2 across go-libp2p, rust-libp2p, and
 js-libp2p to evaluate whether it solves the reachability detection
 problem. A companion [Nebula crawl analysis](nebula-autonat-analysis.md)
