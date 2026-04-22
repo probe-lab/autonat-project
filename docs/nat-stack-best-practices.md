@@ -11,7 +11,7 @@ runbooks below target apps that need runtime NAT discovery.
 
 ## go-libp2p
 
-### 1. Enable AutoNAT v2
+### 1. Enable AutoNAT v2 (and know what v1 is doing)
 
 ```go
 host, err := libp2p.New(
@@ -19,11 +19,20 @@ host, err := libp2p.New(
 )
 ```
 
-`EnableAutoNATv2()` activates the v2 **client** (probes other peers to
-learn your own reachability) and the v2 **server** (responds to other
-peers' probes). It does not control v1. The v1 **client** runs
-ambiently regardless (see step 2); the v1 **server** is opt-in via a
-separate option:
+`EnableAutoNATv2()` activates the v2 **client** (probes other peers
+to learn your own reachability) and the v2 **server** (responds to
+other peers' probes).
+
+Important: **v1 is not controlled by this option.** The v1 **client**
+runs ambiently in go-libp2p regardless of what you set — there is no
+way to disable it. It probes other peers and publishes
+`EvtLocalReachabilityChanged` (Public/Private/Unknown) on the event
+bus, which DHT and AutoRelay consume by default. So "v2-only" is not
+achievable in go-libp2p today — your options are v1 alone, or
+v1+v2.
+
+The v1 **server** (responding to other peers' v1 probes) is opt-in
+via a separate option:
 
 ```go
 libp2p.New(
@@ -32,63 +41,11 @@ libp2p.New(
 )
 ```
 
-So the practical combinations are: v1 client alone (no options), v1
-client + v1 server (`EnableNATService`), v1 client + v2 (`EnableAutoNATv2`),
-or all four (both options). v1 client-free is not an option — there is
-no way to disable it.
+Practical combinations: v1 client alone (no options), v1 client +
+v1 server (`EnableNATService`), v1 client + v2 (`EnableAutoNATv2`),
+or all four (both options).
 
-### 2. Know what v1 is doing
-
-The **v1 client always runs** — there's no option to disable it. It
-probes other peers and publishes `EvtLocalReachabilityChanged`
-(Public/Private/Unknown) regardless of whether v2 is also on.
-`libp2p.EnableNATService()` only controls the v1 *server* (whether you
-help other peers by dialing them back).
-
-So "v2-only" isn't achievable today in go-libp2p. Your choice is
-v1-alone (skip `EnableAutoNATv2()`) or v1+v2.
-
-### 3. Wire DHT
-
-`go-libp2p-kad-dht` decides server vs client mode by subscribing to
-`EvtLocalReachabilityChanged`, which is produced by v1 only. v2's
-per-address signal (`EvtHostReachableAddrsChanged`) is not consumed.
-Under an unreliable peer pool, v1 can oscillate between
-`Public`/`Private`/`Unknown` and flip the DHT mode even when v2 has
-confirmed an address is reachable — this is the most impactful
-issue documented in the report and worth reading the full analysis
-in
-[Finding 1](final-report.md#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2)
-before choosing a wiring.
-
-**Recommended — publish a v2-derived reachability event.** The DHT
-subscribes to whatever is on the event bus; you can write a small
-reducer that listens for `EvtHostReachableAddrsChanged`, derives a
-global verdict from v2's per-address output, and emits
-`EvtLocalReachabilityChanged` itself. `dht.Mode(dht.ModeAuto)` then
-consumes your v2-derived signal instead of v1's oscillating one. A
-reasonable reduction: emit `Public` if any v2-confirmed address is
-reachable, `Private` if all v2 addresses are unreachable, `Unknown`
-otherwise. The DHT has no public `SetMode()` method — mode changes
-only happen via `ModeAuto` observing the reachability event, which
-is why a reducer works.
-
-Other options, ordered by how much they avoid the v1 oscillation:
-
-- **Force Server:** `dht.Mode(dht.ModeServer)` when creating the DHT —
-  ignores AutoNAT, always serves. Use when the node is known to be
-  reachable (static IP, manual port-forward, confirmed UPnP).
-- **Force Client:** `dht.Mode(dht.ModeClient)` — never serves.
-  Appropriate for NAT'd peers that won't get a reachable address.
-- **ModeAutoServer:** `dht.Mode(dht.ModeAutoServer)` — serves by
-  default; only switches to client when reachability is explicitly
-  `Private`. Optimistic; still subject to v1's `Private` verdicts
-  that may oscillate.
-- **Plain ModeAuto without a reducer:** `dht.Mode(dht.ModeAuto)`
-  alone — fully v1-driven, vulnerable to oscillation. Use when your
-  peer pool is known-reliable or occasional flipping is acceptable.
-
-### 4. Detect NAT mapping type and pick a fallback
+### 2. Detect NAT mapping type and pick a fallback
 
 Beyond "am I reachable?", knowing the NAT's *mapping* behavior
 determines which fallbacks are available. go-libp2p's
@@ -140,8 +97,9 @@ libp2p.EnableAutoRelayWithPeerSource(peerSourceFn)
 ```
 
 Options:
-- **Default:** AutoRelay activates when v1 says Private. Same
-  oscillation sensitivity as DHT (step 3).
+- **Default:** AutoRelay activates when v1 says Private — same
+  v1-driven oscillation sensitivity the DHT has (see the DHT step
+  below).
 - **Always-on:** `libp2p.ForceReachabilityPrivate()` + AutoRelay →
   v1 publishes constant Private, reservation happens immediately.
   Good for known-NAT'd nodes that always need the relay.
@@ -186,6 +144,49 @@ with permissive v6 firewalls, which is why this works in practice
 for many mobile/CGNAT users — it is a probabilistic fallback, not a
 guaranteed one.
 
+### 3. Wire DHT (only if your app uses DHT)
+
+> Skip this step if your application does not use the Kademlia DHT.
+>
+> When it does, the DHT needs a reachability signal to pick server vs client mode — the options below cover how to feed it.
+
+`go-libp2p-kad-dht` decides server vs client mode by subscribing to
+`EvtLocalReachabilityChanged`, which is produced by v1 only. v2's
+per-address signal (`EvtHostReachableAddrsChanged`) is not consumed.
+Under an unreliable peer pool, v1 can oscillate between
+`Public`/`Private`/`Unknown` and flip the DHT mode even when v2 has
+confirmed an address is reachable — this is the most impactful
+issue documented in the report and worth reading the full analysis
+in
+[Finding 1](final-report.md#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2)
+before choosing a wiring.
+
+**Recommended — publish a v2-derived reachability event.** The DHT
+subscribes to whatever is on the event bus; you can write a small
+reducer that listens for `EvtHostReachableAddrsChanged`, derives a
+global verdict from v2's per-address output, and emits
+`EvtLocalReachabilityChanged` itself. `dht.Mode(dht.ModeAuto)` then
+consumes your v2-derived signal instead of v1's oscillating one. A
+reasonable reduction: emit `Public` if any v2-confirmed address is
+reachable, `Private` if all v2 addresses are unreachable, `Unknown`
+otherwise. The DHT has no public `SetMode()` method — mode changes
+only happen via `ModeAuto` observing the reachability event, which
+is why a reducer works.
+
+Other options, ordered by how much they avoid the v1 oscillation:
+
+- **Force Server:** `dht.Mode(dht.ModeServer)` when creating the DHT —
+  ignores AutoNAT, always serves. Use when the node is known to be
+  reachable (static IP, manual port-forward, confirmed UPnP).
+- **Force Client:** `dht.Mode(dht.ModeClient)` — never serves.
+  Appropriate for NAT'd peers that won't get a reachable address.
+- **ModeAutoServer:** `dht.Mode(dht.ModeAutoServer)` — serves by
+  default; only switches to client when reachability is explicitly
+  `Private`. Optimistic; still subject to v1's `Private` verdicts
+  that may oscillate.
+- **Plain ModeAuto without a reducer:** `dht.Mode(dht.ModeAuto)`
+  alone — fully v1-driven, vulnerable to oscillation. Use when your
+  peer pool is known-reliable or occasional flipping is acceptable.
 ## rust-libp2p
 
 ### 1. Enable AutoNAT v2
@@ -217,21 +218,7 @@ is clean** — there is no v1 client running in the background and no
 `EvtLocalReachabilityChanged` equivalent to oscillate. You don't need
 to compose v1 at all.
 
-### 3. Wire DHT
-
-Kademlia (`libp2p::kad::Behaviour`) consumes
-`FromSwarm::ExternalAddrConfirmed` and `FromSwarm::ExternalAddrExpired`
-from the swarm — events that AutoNAT v2 causes. No v1 intermediary;
-DHT mode switches as soon as v2 confirms. Usually no manual wiring
-needed. To force mode:
-
-```rust
-kademlia.set_mode(Some(kad::Mode::Server));
-// or via config:
-kad::Config::default().set_mode(kad::Mode::Server)
-```
-
-### 4. Detect NAT mapping type and pick a fallback
+### 3. Detect NAT mapping type and pick a fallback
 
 rust-libp2p has **no equivalent of go-libp2p's
 `EvtNATDeviceTypeChanged`** — it does not classify endpoint-independent
@@ -289,7 +276,7 @@ Same caveats as in go-libp2p: IPv6 removes NAT mapping but not
 firewalls. Confirmed reachability is per-address — AutoNAT v2 tests
 v4 and v6 separately.
 
-### 5. Other specifics
+### 4. Other specifics
 
 - **Startup race:** dialing outbound before the `NewListenAddr` event
   causes TCP port-reuse to silently fall back to an ephemeral port,
@@ -300,6 +287,22 @@ v4 and v6 separately.
   builds caused AutoNAT to wrongly report reachable on reused
   connections. Upgrade past that PR.
 
+### 5. Wire DHT (only if your app uses DHT)
+
+> Skip this step if your application does not use the Kademlia DHT.
+>
+> When it does, the DHT needs a reachability signal to pick server vs client mode — the options below cover how to feed it.
+Kademlia (`libp2p::kad::Behaviour`) consumes
+`FromSwarm::ExternalAddrConfirmed` and `FromSwarm::ExternalAddrExpired`
+from the swarm — events that AutoNAT v2 causes. No v1 intermediary;
+DHT mode switches as soon as v2 confirms. Usually no manual wiring
+needed. To force mode:
+
+```rust
+kademlia.set_mode(Some(kad::Mode::Server));
+// or via config:
+kad::Config::default().set_mode(kad::Mode::Server)
+```
 ## js-libp2p
 
 ### 1. Enable AutoNAT v2
@@ -354,18 +357,7 @@ two limitations to know:
   only QUIC addresses reach the v2 candidate list. Prefer QUIC in
   your listen configuration.
 
-### 3. Wire DHT
-
-`@libp2p/kad-dht` reacts to `self:peer:update` from the address
-manager. In js-libp2p that event is currently driven by v1
-confirmation, not v2. Force initial mode via config:
-
-```typescript
-kadDHT({ clientMode: true })   // never serve
-kadDHT({ clientMode: false })  // always serve
-```
-
-### 4. Detect NAT mapping type and pick a fallback
+### 3. Detect NAT mapping type and pick a fallback
 
 js-libp2p has **no NAT-type detection event** (no go-libp2p-style
 `EvtNATDeviceTypeChanged`), and v2 emits no reachability events
@@ -420,7 +412,7 @@ addresses: {
 
 Same v6-reachability caveats as go-libp2p.
 
-### 5. Other specifics
+### 4. Other specifics
 
 - **v2 emits nothing actionable** today — can't subscribe to AutoNAT
   v2 results from app code.
@@ -428,3 +420,16 @@ Same v6-reachability caveats as go-libp2p.
   inbound connections anyway, so UPnP, DCUtR, and IPv6 listeners are
   all Node.js-only.
 
+### 5. Wire DHT (only if your app uses DHT)
+
+> Skip this step if your application does not use the Kademlia DHT.
+>
+> When it does, the DHT needs a reachability signal to pick server vs client mode — the options below cover how to feed it.
+`@libp2p/kad-dht` reacts to `self:peer:update` from the address
+manager. In js-libp2p that event is currently driven by v1
+confirmation, not v2. Force initial mode via config:
+
+```typescript
+kadDHT({ clientMode: true })   // never serve
+kadDHT({ clientMode: false })  // always serve
+```
