@@ -17,7 +17,7 @@
 
 Peer-to-peer networks built on libp2p require nodes to determine whether
 their addresses are reachable from the internet. Most residential and
-mobile devices sit behind Network Address Translation (NAT) — a router
+mobile devices sit behind Network Address Translation (NAT) devices — a router
 technique that maps private IP addresses to a shared public IP. While
 NAT allows outbound connections, it blocks most inbound traffic. A node
 that doesn't know it's behind NAT may advertise unreachable addresses,
@@ -63,12 +63,12 @@ This report evaluates AutoNAT v2's correctness, performance, and
 integration across three libp2p implementations (go, rust, js). It
 does NOT evaluate:
 
-- Hole punching success rates (DCUtR) — see Trautwein et al. 2022/2025
+- Hole punching success rates (DCUtR) — see [Trautwein et al. 2022/2025](https://arxiv.org/abs/2604.12484)
 - Relay performance (Circuit Relay v2)
 - DHT performance itself (routing, lookup latency)
 - AutoNAT v1 in isolation (only v1/v2 comparison)
 
-### Findings
+### Findings Summary
 
 This study evaluates how libp2p's NAT reachability stack — AutoNAT
 v1, AutoNAT v2, and the subsystems that consume their signals (DHT,
@@ -126,6 +126,8 @@ adoption status, see
 ---
 
 ## Background
+
+This section provides a brief summary of NAT Types and then describes in detail how libp2p deals with NATs through its AutoNAT mechanism. If you are familiar with libp2p's AutoNAT specifics, skip to the Findings section further down.
 
 ### NAT Types
 
@@ -374,7 +376,7 @@ This applies to all three implementations:
    but nothing in the spec or in `libp2p-autonat` guarantees it. A
    future project that adds v1 alongside v2 should know how to combine
    them.
-3. **js-libp2p (preventive):** Same. Once Helia or another consumer
+3. **js-libp2p (preventive):** Same as above. Once Helia or another consumer
    enables v2, the reduction should be in place from day one.
 
 **Expected outcome:** DHT and AutoRelay stop flipping on v1
