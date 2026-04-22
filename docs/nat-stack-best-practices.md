@@ -127,7 +127,8 @@ Options:
   Good for known-NAT'd nodes that always need the relay.
 - **Manual:** skip AutoRelay and use the circuit-v2 client directly
   (`github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client` →
-  `Reservation()`) when your reachability logic is custom.
+  `Reserve(ctx, h, relayInfo)` returning a `*Reservation`) when your
+  reachability logic is custom.
 
 **Endpoint-independent (cone) + address unreachable → DCUtR on top of
 AutoRelay.** Two NAT'd cone peers can upgrade a relayed connection to
