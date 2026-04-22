@@ -17,7 +17,7 @@
 
 Peer-to-peer networks built on libp2p require nodes to determine whether
 their addresses are reachable from the internet. Most residential and
-mobile devices sit behind Network Address Translation (NAT) — a router
+mobile devices sit behind Network Address Translation (NAT) devices — a router
 technique that maps private IP addresses to a shared public IP. While
 NAT allows outbound connections, it blocks most inbound traffic. A node
 that doesn't know it's behind NAT may advertise unreachable addresses,
@@ -29,26 +29,9 @@ node's addresses are actually dialable from outside. AutoNAT v1 uses a
 simple majority vote; AutoNAT v2 (specified 2023, deployed 2024)
 improves on this with per-address testing and nonce-based verification.
 
-However, libp2p-based projects report **connectivity issues for
-NATed nodes** that motivated this investigation:
-
-- **Obol Network** ([Charon](https://github.com/ObolNetwork/charon),
-  go-libp2p v0.47.0): Uses AutoNAT for reachability detection in
-  distributed validator nodes behind home or corporate NAT. Operators
-  reported NAT-related connectivity issues, although these were directly related
-  to hole punching and relay behavior, not to AutoNAT v2 specifically.
-  See [Obol/Charon GitHub issues](https://github.com/ObolNetwork/charon/issues/4233) for details.
-
-- **Avail Network** ([avail-light](https://github.com/availproject/avail-light),
-  rust-libp2p v0.55.0): Light clients reported persistent
-  "autonat-over-quic libp2p errors" starting from v1.7.4, caused by
-  QUIC connection reuse producing false positives
-  ([rust-libp2p#3900](https://github.com/libp2p/rust-libp2p/issues/3900),
-  since fixed by [PR #4568](https://github.com/libp2p/rust-libp2p/pull/4568)).
-  However, Avail **disabled AutoNAT entirely** in v1.13.2 (September
-  2025) before the upstream fix shipped, forcing operators to manually
-  set `--external-address` for DHT server mode.
-
+Real libp2p deployments have reported AutoNAT-adjacent connectivity
+issues that motivated this investigation; see
+[Appendix A](#appendix-a-production-reports-from-obol-and-avail).
 This project investigates AutoNAT v2 across go-libp2p, rust-libp2p, and
 js-libp2p to evaluate whether it solves the reachability detection
 problem. A companion [Nebula crawl analysis](nebula-autonat-analysis.md)
@@ -63,12 +46,12 @@ This report evaluates AutoNAT v2's correctness, performance, and
 integration across three libp2p implementations (go, rust, js). It
 does NOT evaluate:
 
-- Hole punching success rates (DCUtR) — see Trautwein et al. 2022/2025
+- Hole punching success rates (DCUtR) — see [Trautwein et al. 2022/2025](https://arxiv.org/abs/2604.12484)
 - Relay performance (Circuit Relay v2)
 - DHT performance itself (routing, lookup latency)
 - AutoNAT v1 in isolation (only v1/v2 comparison)
 
-### Findings
+### Findings Summary
 
 This study evaluates how libp2p's NAT reachability stack — AutoNAT
 v1, AutoNAT v2, and the subsystems that consume their signals (DHT,
@@ -126,6 +109,8 @@ adoption status, see
 ---
 
 ## Background
+
+This section provides a brief summary of NAT Types and then describes in detail how libp2p deals with NATs through its AutoNAT mechanism. If you are familiar with libp2p's AutoNAT specifics, skip to the Findings section further down.
 
 ### NAT Types
 
@@ -374,7 +359,7 @@ This applies to all three implementations:
    but nothing in the spec or in `libp2p-autonat` guarantees it. A
    future project that adds v1 alongside v2 should know how to combine
    them.
-3. **js-libp2p (preventive):** Same. Once Helia or another consumer
+3. **js-libp2p (preventive):** Same as above. Once Helia or another consumer
    enables v2, the reduction should be in place from day one.
 
 **Expected outcome:** DHT and AutoRelay stop flipping on v1
