@@ -439,31 +439,11 @@ See `docs/otel-tracing.md` for the full event and span reference.
 
 ### Real-World
 
-| NAT Type | Where to Find | Runs | Status |
-|----------|--------------|------|--------|
-| None (public IP) | VPS (DigitalOcean, AWS) | 0 | Not tested |
-| Full-cone | Home router with DMZ | 0 | Not tested |
-| Address-restricted | Default home router | 0 | Not tested |
-| Port-restricted (port-preserving) | Airport WiFi | 4 | Done |
-| Port-restricted (port-remapping) | Hotel WiFi | 3 | Done |
-| Symmetric | Satellite WiFi | 3 | Done |
-
-### Gaps
-
-| Gap | Impact | Blocks |
-|-----|--------|--------|
-| No real-world full-cone data | Can't validate full-cone behavior | Full-cone confidence |
-| No real-world address-restricted data | Can't test Issue #1 in the wild | ADF prevalence measurement |
-| No real-world none/public data | Can't compare testbed baseline with field | Baseline confidence |
-| Server rate limiting not implemented | Can't run Experiment 8 | Rate limit testing |
-| Packet loss/latency experiments invalid | Used wrong NAT type (none vs full-cone) | Experiments 9, 10 |
-
-### Pending Real-World Tests
-
-- [ ] Home network (no DMZ): likely address-restricted or port-restricted
-- [ ] Home network (DMZ enabled): full-cone equivalent
-- [ ] VPS / cloud server: true public IP
-- [ ] Mobile hotspot (4G/5G): likely symmetric (CGNAT)
+| NAT Type | Where to Find | Status |
+|----------|--------------|--------|
+| Port-restricted (port-preserving) | Airport WiFi | Done |
+| Port-restricted (port-remapping) - UPnp | Hotel WiFi | Done |
+| Symmetric | Satellite WiFi | Done |
 
 ---
 
