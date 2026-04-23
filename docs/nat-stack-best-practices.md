@@ -11,8 +11,7 @@ runbooks below target apps that need runtime NAT discovery.
 
 ## go-libp2p
 
-### 1. Enable AutoNAT v2 (and know what v1 is doing)
-
+### 1. Enable AutoNAT v2
 ```go
 host, err := libp2p.New(
     libp2p.EnableAutoNATv2(),
@@ -144,7 +143,7 @@ with permissive v6 firewalls, which is why this works in practice
 for many mobile/CGNAT users — it is a probabilistic fallback, not a
 guaranteed one.
 
-### 3. Wire DHT (only if your app uses DHT)
+### 3. Wire DHT (in case you need)
 
 > Skip this step if your application does not use the Kademlia DHT.
 >
@@ -187,6 +186,7 @@ Other options, ordered by how much they avoid the v1 oscillation:
 - **Plain ModeAuto without a reducer:** `dht.Mode(dht.ModeAuto)`
   alone — fully v1-driven, vulnerable to oscillation. Use when your
   peer pool is known-reliable or occasional flipping is acceptable.
+  
 ## rust-libp2p
 
 ### 1. Enable AutoNAT v2
