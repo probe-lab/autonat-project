@@ -73,7 +73,8 @@ go func() {
 
 **Try UPnP / NAT-PMP first, regardless of NAT type.** Enabling
 `libp2p.NATPortMap()` at startup asks the router for an inbound port
-mapping; AutoNAT v2 then confirms whether it took. When the router
+mapping; AutoNAT v2 then confirms whether the mapped external port is
+actually reachable from outside. When the router
 cooperates, the mapped port is directly reachable and the fallbacks
 below become unnecessary. Many routers silently drop UPnP requests,
 which is why UPnP and AutoNAT are complementary — treat UPnP as
@@ -121,8 +122,9 @@ libp2p.EnableAutoRelayWithStaticRelays(relays)
 When the direct connection succeeds, the relayed one is closed.
 
 **Endpoint-dependent (symmetric) → IPv6 (when reachable).**
-Hole-punching will fail symmetric × anything. Include IPv6 listen
-addresses so the v6 path bypasses the v4 NAT mapping:
+Hole-punching fails when one side is symmetric, regardless of the
+other side's NAT type. Include IPv6 listen addresses so the v6 path
+bypasses the v4 NAT mapping entirely:
 
 ```go
 libp2p.ListenAddrStrings(
@@ -206,7 +208,9 @@ you explicitly compose. v1 lives in the older `libp2p::autonat` module
 and only runs if you explicitly add its behaviour — it does **not**
 run ambiently the way go-libp2p's v1 client does. So v2-only is a
 real, clean configuration: just compose v2 behaviours and nothing
-else. If you need both (rare), add `libp2p::autonat::Behaviour`
+else. If you need both (rare — typically only when interoperating
+with a network where many peers still run v1-only clients and have
+not yet adopted AutoNAT v2), add `libp2p::autonat::Behaviour`
 alongside.
 
 ### 2. Know the event model
@@ -294,13 +298,15 @@ v4 and v6 separately.
 > When it does, the DHT needs a reachability signal to pick server vs client mode — the options below cover how to feed it.
 Kademlia (`libp2p::kad::Behaviour`) consumes
 `FromSwarm::ExternalAddrConfirmed` and `FromSwarm::ExternalAddrExpired`
-from the swarm — events that AutoNAT v2 causes. No v1 intermediary;
-DHT mode switches as soon as v2 confirms. Usually no manual wiring
-needed. To force mode:
+from the swarm — these are events that AutoNAT v2 causes. There is no
+v1 intermediary; DHT mode switches as soon as v2 confirms. Usually no
+manual wiring needed. To force a specific mode (Server or Client):
 
 ```rust
 kademlia.set_mode(Some(kad::Mode::Server));
-// or via config:
+// or Client:
+kademlia.set_mode(Some(kad::Mode::Client));
+// or via config at construction:
 kad::Config::default().set_mode(kad::Mode::Server)
 ```
 ## js-libp2p
@@ -333,8 +339,8 @@ const node = await createLibp2p({
 })
 ```
 
-Running both buys little until v2 emits reachability events — see
-step 2.
+Running both brings little benefit until v2 emits reachability
+events — see step 2.
 
 ### 2. Know what's missing
 
