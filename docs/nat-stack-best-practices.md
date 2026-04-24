@@ -109,7 +109,7 @@ Options:
 
 **Endpoint-independent (cone) + address unreachable → DCUtR on top of
 AutoRelay.** Two NAT'd cone peers can upgrade a relayed connection to
-a direct one by hole-punching (the
+a direct one by hole-punching (through the
 [DCUtR](https://github.com/libp2p/specs/blob/master/relay/DCUtR.md)
 protocol). Enable both:
 
