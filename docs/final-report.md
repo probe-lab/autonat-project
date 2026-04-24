@@ -717,11 +717,10 @@ deployment — is collected in
 
 ## Recommendations
 
-All five findings led to concrete fix proposals, filed as upstream
-tracking issues in the relevant libp2p repositories. The filed issues
-contain the full proposal — code paths, constants to change, fix
-options, and spec-level changes where applicable — in more detail than
-would fit here. See the Upstream Issue column in
+All five findings were filed as upstream tracking issues in the
+relevant libp2p repositories. Each issue describes the problem —
+with code links where applicable — and proposes a specific fix. See
+the Upstream Issue column in
 [Findings at a Glance](#findings-at-a-glance) above, or the
 **Upstream issue:** line under each finding for the specific link.
 
