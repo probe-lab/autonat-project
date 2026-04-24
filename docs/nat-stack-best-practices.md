@@ -1,6 +1,6 @@
 # NAT Best Practices for libp2p developers
 
-This document is aimed to be a per-implementation runbooks for libp2p developers 
+This document is aimed to be a series of runbooks (per-implementation) for libp2p developers 
 for enabling and wiring libp2p's NAT-detection stack (Identify, AutoNAT v1/v2, UPnP/NAT-PMP) and
 integrating it with existing libp2p protocols, such as DHT and AutoRelay. This documents integrates the findings from 
 [this report](final-report.md).
