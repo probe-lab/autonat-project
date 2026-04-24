@@ -93,13 +93,16 @@ production (Substrate skips autonat entirely; Helia uses v1 only).
 
 ### Findings at a Glance
 
-| # | Finding | Category | Severity |
-|---|---------|----------|----------|
-| 1 | [Inconsistent global vs per-address reachability (v1 vs v2)](#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2) | go-libp2p | High |
-| 2 | [UDP black hole blocks QUIC dial-back](#finding-2-udp-black-hole-detector-blocks-quic-dial-back) | go-libp2p | Medium |
-| 3 | [ADF false positive (100% FPR)](#finding-3-address-restricted-nat-false-positive) | Protocol | Low |
-| 4 | [Symmetric NAT missing signal](#finding-4-symmetric-nat-missing-signal) | Cross-impl | Low |
-| 5 | [Rust: TCP port reuse safety net](#finding-5-rust-libp2p-tcp-port-reuse-safety-net) | rust-libp2p | Low |
+All five findings have been filed as upstream tracking issues in the
+relevant libp2p repository — see the rightmost column.
+
+| # | Finding | Category | Severity | Upstream Issue |
+|---|---------|----------|----------|----------------|
+| 1 | [Inconsistent global vs per-address reachability (v1 vs v2)](#finding-1-inconsistent-global-vs-per-address-reachability-v1-vs-v2) | go-libp2p | High | [libp2p/specs#713](https://github.com/libp2p/specs/issues/713) |
+| 2 | [UDP black hole blocks QUIC dial-back](#finding-2-udp-black-hole-detector-blocks-quic-dial-back) | go-libp2p | Medium | [libp2p/go-libp2p#3491](https://github.com/libp2p/go-libp2p/issues/3491) |
+| 3 | [ADF false positive (100% FPR)](#finding-3-address-restricted-nat-false-positive) | Protocol | Low | [libp2p/specs#714](https://github.com/libp2p/specs/issues/714) |
+| 4 | [Symmetric NAT missing signal](#finding-4-symmetric-nat-missing-signal) | Cross-impl | Low | [libp2p/js-libp2p#3472](https://github.com/libp2p/js-libp2p/issues/3472) |
+| 5 | [Rust: TCP port reuse safety net](#finding-5-rust-libp2p-tcp-port-reuse-safety-net) | rust-libp2p | Low | [libp2p/rust-libp2p#6393](https://github.com/libp2p/rust-libp2p/issues/6393) |
 
 For the cross-implementation findings matrix, feature comparison, and
 adoption status, see
@@ -714,56 +717,19 @@ deployment — is collected in
 
 ## Recommendations
 
-### For go-libp2p (highest impact)
+All five findings led to concrete fix proposals, filed as upstream
+tracking issues in the relevant libp2p repositories. The filed issues
+contain the full proposal — code paths, constants to change, fix
+options, and spec-level changes where applicable — in more detail than
+would fit here. See the Upstream Issue column in
+[Findings at a Glance](#findings-at-a-glance) above, or the
+**Upstream issue:** line under each finding for the specific link.
 
-- **Make v2 the source of truth for global reachability (F1)** —
-  Bridge v2 into the global flag with the reduction "PUBLIC if any
-  v2-confirmed address is reachable", and suppress v1 probing once v2
-  reaches `targetConfidence`. This eliminates v1 oscillation reaching
-  DHT/AutoRelay/Address Manager and makes existing consumers benefit
-  from v2's stability without changing their code.
-
-- **Disable black hole detector on dialerHost (F2)** — Match the v1
-  fix (PR #2529). [5 options analyzed](udp-black-hole-detector.md#proposed-upstream-fixes).
-
-### For rust-libp2p
-
-- **Fix silent `PortUse::Reuse` fallback (F5)** — When TCP port reuse
-  falls back to an ephemeral port, the TCP transport should construct
-  the connection with `PortUse::New` so identify's existing translation
-  logic works. The fix is contained inside `libp2p-tcp` (no public API
-  change). As a longer-term hardening, add an `ObservedAddrManager`-
-  equivalent that consolidates observed addresses by thin waist
-  independently of per-connection metadata. **Note:** application
-  authors should also wait for `NewListenAddr` events before starting
-  outbound dials — without that, the race condition triggers regardless
-  of the library fix.
-
-### For js-libp2p
-
-- **Emit reachability events (F4)** — Expose autonat v2 probe results
-  to consumers.
-
-### For the AutoNAT v2 spec
-
-- **Define state transitions, confidence semantics, and v2-priority reduction (F1–F5)** —
-  The spec defines the wire protocol but not the client-side state
-  machine. Each implementation has independently designed different
-  confidence systems, error classification, and re-probe schedules.
-  The spec should define confidence thresholds, how each server
-  response affects state, re-probe triggers, and the event surface.
-  It should also mandate that when both v1 and v2 run, v2's per-address
-  result determines global reachability. Today rust-libp2p and js-libp2p
-  are not affected because their DHT already consumes v2-level signals,
-  but this is an implementation choice, not a spec requirement.
-
-- **Document ADF limitation (F3)** — The protocol cannot distinguish
-  address-restricted from full-cone NAT because the dial-back always
-  comes from a previously contacted IP. Require dial-back from a
-  different IP when multihomed servers are available; document the
-  limitation for single-IP servers. ADF is not known to be used by
-  modern consumer routers, so this may be accepted as a known
-  limitation.
+For application developers who need to integrate the libp2p NAT stack
+today (Identify + AutoNAT + UPnP + AutoRelay + DCUtR) without waiting
+for the upstream fixes, see
+[NAT stack best practices](nat-stack-best-practices.md) —
+per-implementation runbooks for go-libp2p, rust-libp2p, and js-libp2p.
 
 ---
 
