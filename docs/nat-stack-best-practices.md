@@ -208,10 +208,9 @@ you explicitly compose. v1 lives in the older `libp2p::autonat` module
 and only runs if you explicitly add its behaviour — it does **not**
 run ambiently the way go-libp2p's v1 client does. So v2-only is a
 real, clean configuration: just compose v2 behaviours and nothing
-else. If you need both (rare — typically only when interoperating
-with a network where many peers still run v1-only clients and have
-not yet adopted AutoNAT v2), add `libp2p::autonat::Behaviour`
-alongside.
+else. If you need both (only necessary when interoperating with a
+network where many peers still run v1-only clients and have not yet
+adopted AutoNAT v2), add `libp2p::autonat::Behaviour` alongside.
 
 ### 2. Know the event model
 
