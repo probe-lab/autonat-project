@@ -347,7 +347,7 @@ two limitations to know:
   Running v2-only means you have no reactive signal to act on at the
   app level. If you need reactive reachability in js, you are on v1
   today. Helia is v1-only for this reason.
-- **Identify unconditionally drops all TCP observed addresses**
+- **The Identify protocol unconditionally drops all TCP observed addresses**
   ([js-libp2p#2620](https://github.com/libp2p/js-libp2p/issues/2620)),
   a Node.js platform limitation — Node.js TCP sockets lack
   `SO_REUSEPORT`, so every outbound TCP dial uses an ephemeral port
