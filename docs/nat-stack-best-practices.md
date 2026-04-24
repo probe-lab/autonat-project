@@ -140,7 +140,7 @@ carrier translation (464XLAT) can also keep v6 unreachable. AutoNAT
 v2 tests v4 and v6 separately, so v6 is confirmed only if it is
 actually reachable. When ISPs deploy CGNAT they often use dual-stack (IPv4 and IPv6)
 with permissive v6 firewalls, which is why this works in practice
-for many mobile/CGNAT users — it is a probabilistic fallback, not a
+for many mobile/CGNAT users — note that this is a probabilistic fallback, not a
 guaranteed one.
 
 ### 3. Wire DHT (in case you need)
