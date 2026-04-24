@@ -86,7 +86,7 @@ libp2p.NATPortMap()
 **Reserve on a relay (AutoRelay).** When you are NAT'd and UPnP
 doesn't produce a reachable address, reserving on a public
 circuit-v2 relay lets peers reach you through the relay. All traffic
-is proxied — higher latency, but it works for any NAT type, and the
+is proxied, which means latency increases, but this setting works for any NAT type, and the
 relayed connection is also the prerequisite for DCUtR below:
 
 ```go
