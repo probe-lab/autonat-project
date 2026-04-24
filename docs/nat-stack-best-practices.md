@@ -317,7 +317,7 @@ const node = await createLibp2p({
 
 js-libp2p ships v1 and v2 as separate plugins; register the one(s)
 you want — neither runs ambiently. The v2 package is
-`@libp2p/autonat-v2`; v1 lives in `@libp2p/autonat` (the older
+`@libp2p/autonat-v2`; v1 lives in `@libp2p/autonat` (this is the older
 package, still actively used — Helia registers v1 only today). To
 run both:
 
