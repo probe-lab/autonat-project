@@ -60,6 +60,7 @@ for requirements.
 | [UDP Black Hole Detector](docs/udp-black-hole-detector.md) | QUIC dial-back issue + fix options |
 | [UPnP + NAT Detection](docs/upnp-nat-detection.md) | UPnP interaction with AutoNAT v2 + local home-router tests |
 | [libp2p AutoNAT Ecosystem](docs/libp2p-autonat-ecosystem.md) | Survey of ~25 libp2p projects and their AutoNAT adoption |
+| [NAT Stack Best Practices](docs/nat-stack-best-practices.md) | Considerations and trade-offs for application developers embedding the libp2p NAT stack (Identify + AutoNAT + UPnP + DCUtR + Relay) |
 
 ### Implementation Analysis
 
