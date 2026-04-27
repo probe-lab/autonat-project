@@ -16,6 +16,8 @@ configurable NAT types.
 **[Final Report](docs/final-report.md)** — 5 findings, 183 testbed runs,
 cross-implementation comparison, and recommendations.
 
+**[NAT Stack Best Practices](docs/nat-stack-best-practices.md)** - Considerations and trade-offs for application developers embedding the libp2p NAT stack (Identify + AutoNAT + UPnP + DCUtR + Relay) |
+
 Key results:
 - **0% FNR / 0% FPR** for standard NAT types with ~6s convergence
 - **Inconsistent global vs per-address reachability**: v1's global flag and v2's per-address signal can disagree, and no spec or implementation defines a canonical reduction. In go-libp2p the DHT consumes v1, which oscillates in 60% of runs with unreliable peers; v2's stable per-address result is ignored. rust/js don't have the bug today but nothing prevents it either (High)
