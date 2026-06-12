@@ -9,6 +9,29 @@ Servers with known static public IPs (cloud, bare metal) can usually
 skip AutoNAT entirely and announce their address directly using `libp2p.ForceReachabilityPublic()`— the
 runbooks below target apps that need runtime NAT discovery.
 
+## Hole-punching (DCUtR): enable it together with the relay
+
+For a NAT'd node that can't be reached directly (no static IP,
+port-forward, or confirmed UPnP), the right default is to enable a
+circuit-relay-v2 reservation **and** DCUtR hole-punching together — they
+are two halves of one mechanism, not independent fallbacks:
+
+- a **circuit-relay-v2 reservation is metered** (bounded duration and
+  bytes by design), so it is **not** a connection you stay on — its job
+  is to give peers a channel to reach you and exchange the addresses and
+  RTT the punch needs;
+- **DCUtR** then uses that channel to upgrade to a **direct** connection,
+  which is the one you actually run traffic over.
+
+Enabling the relay without DCUtR leaves you on a metered path that won't
+carry a real workload; enabling DCUtR without a relay gives the punch no
+channel to coordinate over, so it never fires. Enable both. Hole-punching
+only succeeds when neither side is a symmetric NAT (the external port is
+otherwise unpredictable), and the metered relay is not a durable
+substitute for that tail — symmetric / CGNAT peers depend on the IPv6
+path instead, where it is available. The per-implementation wiring
+follows.
+
 ## go-libp2p
 
 ### 1. Enable AutoNAT v2
@@ -86,9 +109,11 @@ libp2p.NATPortMap()
 
 **Reserve on a relay (AutoRelay).** When you are NAT'd and UPnP
 doesn't produce a reachable address, reserving on a public
-circuit-v2 relay lets peers reach you through the relay. All traffic
-is proxied, which means latency increases, but this setting works for any NAT type, and the
-relayed connection is also the prerequisite for DCUtR below:
+circuit-v2 relay lets peers reach you through the relay. Circuit-relay-v2
+reservations are **metered** (bounded duration and bytes), so the relay
+is best treated as the coordination path that bootstraps DCUtR — not a
+durable proxy to stay connected on. It works for any NAT type and is the
+prerequisite for DCUtR below:
 
 ```go
 libp2p.EnableAutoRelayWithStaticRelays(relays)
@@ -108,18 +133,23 @@ Options:
   `Reserve(ctx, h, relayInfo)` returning a `*Reservation`) when your
   reachability logic is custom.
 
-**Endpoint-independent (cone) + address unreachable → DCUtR on top of
-AutoRelay.** Two NAT'd cone peers can upgrade a relayed connection to
-a direct one by hole-punching (through the
+**Hole-punching (DCUtR) on top of AutoRelay — enable both together.**
+For a NAT'd node that isn't port-forwarding, enable the relay reservation
+*and* DCUtR by default, not as a cone-only special case. The
 [DCUtR](https://github.com/libp2p/specs/blob/master/relay/DCUtR.md)
-protocol). Enable both:
+exchange runs over the relay to upgrade the relayed connection to a
+direct one whenever the NAT pair allows it (two cone peers):
 
 ```go
-libp2p.EnableHolePunching()
-libp2p.EnableAutoRelayWithStaticRelays(relays)
+libp2p.EnableAutoRelayWithStaticRelays(relays) // circuit-v2 reservation (coordination channel)
+libp2p.EnableHolePunching()                     // DCUtR upgrade to a direct connection
 ```
 
-When the direct connection succeeds, the relayed one is closed.
+When the direct connection succeeds, the metered relayed one is closed —
+which is the point: the relay only carries the punch coordination, the
+direct connection carries your traffic. On a symmetric NAT the punch
+can't succeed and the metered relay won't sustain a real connection, so
+those peers fall through to the IPv6 path below.
 
 **Endpoint-dependent (symmetric) → IPv6 (when reachable).**
 Hole-punching fails when one side is symmetric, regardless of the
@@ -249,21 +279,25 @@ swarm.listen_on(relay_multiaddr.with(Protocol::P2pCircuit))?;
 
 Your app decides when to reserve. A common pattern: listen for
 `FromSwarm::ExternalAddrExpired` and reserve on a chosen relay when
-the external address goes away. The relayed connection is also the
-prerequisite for DCUtR below.
+the external address goes away. Circuit-relay-v2 reservations are metered
+(bounded duration and bytes), so the relay is the coordination path that
+bootstraps DCUtR below — not a durable proxy.
 
-**DCUtR on top of the relay.** Compose `libp2p::dcutr::Behaviour`
-alongside the relay client:
+**DCUtR on top of the relay — enable both together.** For a NAT'd
+node that isn't port-forwarding, compose `libp2p::dcutr::Behaviour`
+alongside the relay client so the two are on together by default:
 
 ```rust
 let dcutr = libp2p::dcutr::Behaviour::new(local_peer_id);
 ```
 
 When a peer dials you via `/p2p-circuit`, the relayed connection
-triggers DCUtR, which attempts to upgrade to direct. Works on
-endpoint-independent NAT pairs; fails on symmetric — but without the
-NAT-type event you can't predict, so enable it and accept that some
-attempts will fail.
+triggers DCUtR, which attempts to upgrade to a direct connection. It
+works on endpoint-independent (cone) NAT pairs and fails on symmetric —
+and without a NAT-type event you can't predict which, so enable it
+unconditionally. The relay reservation is metered and only carries the
+punch coordination, so when the upgrade fails (symmetric) those peers
+fall through to the IPv6 path below rather than staying on the relay.
 
 **IPv6 listen addresses as a symmetric-NAT fallback.** Include v6
 listen addresses so the v6 path bypasses the v4 NAT mapping:
@@ -391,16 +425,12 @@ import { autoRelay } from '@libp2p/auto-relay'
 services: { autoRelay: autoRelay({ bootstrapRelays: [...] }) }
 ```
 
-**DCUtR on top of the relay.** `@libp2p/dcutr` plugin:
-
-```typescript
-import { dcutr } from '@libp2p/dcutr'
-
-services: { dcutr: dcutr() }
-```
-
-Paired with `autoRelay`, this gives the same direct-upgrade path as
-go-libp2p — works on cone × cone, fails on symmetric.
+**DCUtR — experimental, not recommended.** `@libp2p/dcutr` exists, but
+hole-punching in js-libp2p is only partially functional — TCP-only (no
+official QUIC transport) and bilateral both-NAT'd punching is currently
+unreliable. A NAT'd js node therefore can't count on upgrading to a
+direct connection; it depends on the (metered) relay path or IPv6 to be
+reachable at all.
 
 **IPv6 listen addresses (Node.js only; browsers can't listen).**
 
